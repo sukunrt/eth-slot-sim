@@ -258,3 +258,14 @@ New gossip topics / containers:
 Timing shifts earlier (GLOAS bp): `ATTESTATION_DUE 2500` (3 s), `AGGREGATE_DUE 5000` (6 s),
 `PAYLOAD_ATTESTATION_DUE 7500` (9 s). Net effect: the big payload moves off the critical
 t=0 path, and there's an extra attestation-like round late in the slot.
+
+---
+
+## 9. Good to have: light client (optional, off by default)
+
+`light_client_optimistic_update` (each slot) and `light_client_finality_update` (only when
+finality advances) — global topics carrying `LightClientOptimisticUpdate` /
+`LightClientFinalityUpdate` (~1–2 KB), broadcast by sync-committee nodes at `SYNC_MESSAGE_DUE`
+(~4 s). **Feature-gated** (Prysm `EnableLightClient`), so not part of the default dissemination
+set. Spec: `altair/light-client/p2p-interface.md`. Model only if/when simulating
+light-client-serving nodes.
