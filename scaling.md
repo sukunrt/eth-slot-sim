@@ -126,9 +126,12 @@ trend, plus one or two strong (`V=10⁶`) runs at your top feasible `N` to upper
 contention weak under-shows. Weak gives the optimistic trend, strong the pessimistic bound —
 mainnet is between, and you've bracketed it.
 
-**Punt the schedule.** It largely falls out of the Shadow ceiling (which still needs
-benchmarking): weak across the small-`N` sweep because it fits, strong only at the top as a
-cross-check. Build the harness V-parameterized and decide later.
+**Punt the schedule.** The ceiling isn't something you benchmark up front — there's nothing
+to measure until the harness exists, and it's discovered *by* the sweep, not before it: start
+at the cheap end (`N`≈250 always fits), climb `N` until Shadow chokes (RAM / wall-clock /
+event-rate), and the last `N` that finished is your ceiling. Then weak runs the small-`N`
+sweep and strong cross-checks at the top. Build the harness V-parameterized and let the climb
+set the schedule.
 
 Fundamental constraint behind all this: **full `s_c=512` + correct fan-out + `N`<10k cannot
 coexist** under real committee math. Strong sacrifices fan-out; weak sacrifices `s_c`.
