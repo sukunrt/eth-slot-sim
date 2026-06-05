@@ -1,203 +1,217 @@
-# Scaling Model — simulating slot dissemination below mainnet size
+# Scaling Model — extrapolating slot dissemination from small node counts
 
-Companion to `slot-messages.md`. Same notation (`N` nodes, `V` validators, `C`, `s_c`,
-`B`, `D≈8`).
+Companion to `slot-messages.md`. Same notation (`N` nodes, `V` validators, `C` committees/
+slot, `s_c` committee size, `B` blobs, `D≈8` mesh degree).
 
-**Goal:** dissemination-time CDFs (per message type) for **`N≈10⁴` nodes, `V≈10⁶`
-validators**. We can't run that. **Method (chosen):** integrated full-slot sims at a few
-*small* `N`, then compose up to mainnet by **summing per-hop delays to the required depth**.
+**Goal:** dissemination-time CDFs (per message type) at **`V=10⁶` validators, `N=10⁴`
+nodes**. We can't run 10k real nodes.
+
+**Method:** run a **sweep of small `N`** and extrapolate. Dissemination is a sum over hops,
+so the trick is to measure the **per-hop delay** (which is N-stable) from small runs and
+**sum it over the depth `H(N)` that 10k nodes require**.
+
+`V` is a **free input**, not a fixed choice — see §4. So is the validator→node distribution
+(§5). The harness takes `(N, V, distribution)` and derives everything else; the scaling
+*schedule* is decided at experiment time, not baked into the code.
 
 ---
 
-## 0. Why a small sim can speak for a big one
-
-Dissemination time of one message along the mesh is a **sum over hops**:
+## 0. Decomposition: depth vs. per-hop delay
 
 ```
-T_arrival(node) = Σ_{h=1..depth(node)} X_h
-X (one hop) = link_latency + transmission(size / bandwidth) + processing(validate + queue)
+T_arrival(node) = Σ_{h=1..depth(node)} X_h ,   X = link_latency + transmission(size/bw) + processing
 ```
 
-Two factors, with completely different `N`-scaling:
+| Factor              | Scales with `N` as           | Notes                                  |
+|---------------------|------------------------------|----------------------------------------|
+| **Depth** `H(N)`    | `log_{D-1}(N)` → `log₇(N)`   | hops to cover the graph                 |
+| **Per-hop** `X`     | ~constant                    | the mesh is locally identical at any `N`|
 
-| Factor                    | Scales with `N` as            | Notes                                              |
-|---------------------------|-------------------------------|----------------------------------------------------|
-| **Depth** `H(N)`          | `log_{D-1}(N)` → `log₇(N)`    | hops to cover the graph                             |
-| **Per-hop delay** `X`     | **constant** (N-independent)  | *iff* per-node conditions are held fixed (§3)       |
-
-The mesh is **locally identical at any `N`** — every node keeps ~`D` peers whether the
-network is 1k or 10k. So `X` measured in a small run is the same `X` mainnet nodes see;
-only the *number* of hops grows. Mainnet time = the small-run per-hop delay, summed
-`H(N_target)` times.
+The mesh is locally identical at any `N` (every node keeps ~`D` peers), so `X` measured in a
+small run is what mainnet nodes see — only the *number* of hops grows. Mainnet time = the
+small-run per-hop delay summed `H(N_target)` times.
 
 `H(N) = log₇(N)`:
 
-| `N`    | 250  | 500  | 1k   | 2k   | 5k   | **10k** | 20k  | 50k  |
-|--------|------|------|------|------|------|---------|------|------|
-| `H(N)` | 2.84 | 3.19 | 3.55 | 3.91 | 4.38 | **4.73**| 5.09 | 5.56 |
+| `N`    | 100  | 250  | 500  | 1k   | 2k   | 5k   | **10k** |
+|--------|------|------|------|------|------|------|---------|
+| `H(N)` | 2.37 | 2.84 | 3.19 | 3.55 | 3.91 | 4.38 | **4.73**|
 
-So **1k→10k is +1.18 hops; 2k→10k is +0.83 hops.** `N` is the cheap axis — it enters
-logarithmically. (Use `H` as the *functional form*; take the actual slope from the sweep,
-§2 — real gossipsub runs deeper than the ideal tree because of mesh overlap and tails.)
+1k→10k is **+1.18 hops**; 2k→10k is **+0.83**. Use `H` as the functional form; take the
+actual slope from the sweep (real gossipsub runs deeper than the ideal tree — overlap, tails).
 
----
-
-## 1. Decouple **workload** from **node count**
-
-Messages are synthetic blobs, so the message *workload* need not be self-consistent with
-`N`. Drive every run with the **mainnet per-slot message set** (counts + sizes + schedule
-from `slot-messages.md`), independent of how many nodes you run:
-
-| Workload knob (hold at mainnet, fixed across the whole sweep) | Value                |
-|--------------------------------------------------------------|----------------------|
-| block size                                                   | set explicitly       |
-| aggregates (global)                                          | 1024                 |
-| sync contributions (global)                                  | 64                   |
-| columns × size                                               | 128 × `(B·2144+356)` |
-| attestations per subnet `s_c`                                | `V/2048` (≈512)      |
-| sync msgs per subnet                                         | 128                  |
-
-**Do not derive these from `V` via committee math** — at small `V` the committee count
-`C` collapses (`C=min(64, V/4096)`), silently shrinking the aggregate count and attestation
-volume. Inject the counts directly; vary **only `N`** across the sweep.
-
-Why this keeps `X` constant: a node's **receive + processing** load on a topic is
-`(distinct msgs) × (≈D dups)` — set by the workload, *not* by `N`. Hold the workload fixed
-→ per-node load is identical at `N=500` and `N=10k` → `X` is N-stable → the sum is valid.
-(Per-node *send* load is `workload/N`, higher at small `N`, but it's a handful of tiny
-self-originated messages — negligible bytes.)
+Compose two ways: **linear fit** `T_p = α_p + β_p·H(N)` per percentile, extended to `H(10⁴)`;
+or **convolution** of the per-hop `X` over the depth distribution when you need the full CDF
+tail rather than just `p50/p90/p99`.
 
 ---
 
-## 2. The method: "few small Ns, then sum"
+## 1. Subnet structure (the part that bit us)
 
-1. **Sweep.** Run integrated full-slot sims at `N = 250, 500, 1k, 2k, …` up to the Shadow
-   ceiling, workload fixed (§1), everything in §3 fixed.
-2. **Validate stationarity.** Overlay the per-hop delay distribution across the sweep — it
-   must be flat in `N`. Equivalently, `T_p` vs `H(N)` must be a **straight line**. If it
-   isn't, an uncontrolled variable is leaking (usual culprit: subnet degeneracy, §5) — fix
-   before extrapolating.
-3. **Measure the building block.** Per message type, record the per-hop delay
-   *distribution* (not just the mean) including the upper tail.
-4. **Compose to target.** Two equivalent routes:
-   - **Linear fit:** `T_p(N) = α_p + β_p · H(N)` per percentile `p`; extend to `H(10⁴)`.
-   - **Convolution:** arrival at depth `d` is the `d`-fold convolution of `X`; mix over the
-     depth distribution for `N_target` to get the full CDF. Use this when you need the
-     tail/CDF shape, not just `p50/p90/p99`.
+**The number of subnets is fixed**: `ATTESTATION_SUBNET_COUNT = 64`,
+`DATA_COLUMN_SIDECAR_SUBNET_COUNT = 128`. Independent of `N` and `V`. What varies per run is
+**how many of them a node joins (meshes on / relays + receives)** — and the two domains
+behave oppositely:
 
-Do this **per message type and per graph** — block & aggregates on the global graph
-(`n=N`), attestations/columns/sync on their subnet graph (`n=n_subnet`, §5). Each has its
-own `X` (sizes/processing differ) and its own depth.
+**Attestation subnets — membership ≈ 2, independent of validator count.**
+- **Backbone:** `SUBNETS_PER_NODE = 2` long-lived subnets from node-id, stable 256 epochs.
+- **Aggregator duty:** a validator selected as aggregator (`is_aggregator()`, ~16/committee)
+  makes its node join that committee subnet *for the slot*.
+- **Publishing ≠ joining:** a plain attester only needs peers to *publish* (fan-out); it does
+  **not** join the mesh (`phase0/validator.md`: "does not need to subscribe and listen to all
+  messages on the topic"). So joins ≈ **2 + aggregator** ≈ 2 at mainnet.
+
+**Data-column subnets — membership scales with stake (the mirror image).**
+```
+custody = min( max(stake_on_node // 32ETH, 8), 128 )      # 4 if non-validating
+```
+≈ one column subnet per 32-ETH validator on the node, floored at 8 (validating), capped at
+128 (supernode). Plus `max(8, custody)` columns *sampled* per slot over **req/resp**, not
+gossip. So the "each validator pulls in another subnet" intuition is **false for attestations,
+true for columns.**
+
+| domain        | total | a node joins                | driven by                  |
+|---------------|-------|-----------------------------|----------------------------|
+| attestation   | 64    | ~2 (+aggregator)            | node-id backbone; agg duty |
+| data column   | 128   | 4 → 128                     | stake on the node          |
+
+**Per-node load consequences:**
+- Attestation **receive ≈ `2 · s_c`** — set by committee size, *not* by `V/N`.
+- Column **receive ≈ `custody · (B·2144+356)`** — set by stake-on-node, i.e. by the
+  validator **distribution** (§5), *not* by `N`.
 
 ---
 
-## 3. Invariants — fix these or the sum is invalid
+## 2. What's clean, what ramps
 
-If any of these changes with `N`, `X` stops being N-stable and step-2 stationarity breaks:
+| Quantity                                   | vs `N`                | Verdict                              |
+|--------------------------------------------|-----------------------|--------------------------------------|
+| Block / aggregate spread (global)          | per-node cost N-indep | **Clean** → depth extrapolation      |
+| One message's spread *within* its subnet   | depth on `n_subnet`   | **Clean** → depth extrapolation      |
+| Per-subnet contention / CPU (attestations) | scales with `s_c`     | ramps with committee size (§4)       |
+| Column download at t=0                     | scales with custody   | set by distribution (§5), not `N`    |
 
-- **GossipSub:** `D`, `D_low`, `D_high`, `D_lazy`, heartbeat, mcache, flood-publish, and
-  **`IDONTWANT`** (gossipsub ≥1.2 — dominates duplicate suppression for block/columns; a
-  wrong setting here moves block timing by hops).
+Block and aggregates are the headline metric (does the block beat the 4s deadline?) and they
+are exactly the clean part.
+
+---
+
+## 3. The sweep, and the stationarity check
+
+1. Sweep integrated full-slot runs at `N = 250, 500, 1k, 2k, …` up to the Shadow ceiling.
+2. **Check stationarity:** the per-hop delay must be flat across `N` — equivalently
+   `T_p` vs `H(N)` is a straight line. A bend signals an uncontrolled variable (usually the
+   per-node load drifting with the sweep policy, §4).
+3. Measure the per-hop delay *distribution* (incl. tail) per message type.
+4. Extrapolate to `H(10⁴)` (§0).
+
+Treat tiny points (`N`=10, 100) as near-complete-graph endpoints, not curve points.
+
+---
+
+## 4. `V` is a free input — strong vs. weak scaling is an experiment choice
+
+The harness derives everything from `V` and per-node stake — `C = min(64, V/4096)`,
+`s_c = (V/32)/C`, aggregate bitfield length, custody, aggregator/backbone subscriptions —
+**nothing hardcoded to mainnet**. So one binary runs any `(N, V)` point, and the only
+decision is *which points you sweep*:
+
+| | per-node footprint across the sweep | contention bias | cost at small `N` |
+|---|---|---|---|
+| **Strong** (`V=10⁶` fixed) | over-subscribed (agg subs + custody cap saturate) | **pessimistic** | heavy (full mainnet traffic through few nodes) |
+| **Weak** (`V=100·N`) | faithful mainnet node at every `N` (~2 attn subnets, ~100 cols at uniform); `s_c` ramps 128→512 | **optimistic** (per-subnet load only full at the target) | cheap |
+
+Same code either way. **Recommended:** weak (`V=100·N`) as primary for the clean self-similar
+trend, plus one or two strong (`V=10⁶`) runs at your top feasible `N` to upper-bound the
+contention weak under-shows. Weak gives the optimistic trend, strong the pessimistic bound —
+mainnet is between, and you've bracketed it.
+
+**Punt the schedule.** It largely falls out of the Shadow ceiling (which still needs
+benchmarking): weak across the small-`N` sweep because it fits, strong only at the top as a
+cross-check. Build the harness V-parameterized and decide later.
+
+Fundamental constraint behind all this: **full `s_c=512` + correct fan-out + `N`<10k cannot
+coexist** under real committee math. Strong sacrifices fan-out; weak sacrifices `s_c`.
+
+---
+
+## 5. The validator→node distribution — the knob that matters for columns
+
+How you spread `V` over the `N` nodes sets per-node stake, which sets custody:
+
+- **Uniform** `V/N` (e.g. 100/node) → every node custodies ~100 of 128 columns → each pulls
+  ~2 MB of column data at t=0 (B=9). Heavy, barely sharded.
+- **Realistic skew** (most home stakers 1–5 validators → custody 8; a few big operators →
+  128) → median node pulls ~8 columns (~160 KB); the load concentrates on big nodes.
+
+That's a **~10× swing on median t=0 column load** — far bigger than anything `N` does.
+Attestations are insensitive (~2 either way). So: expose the distribution as a knob; for
+columns, the skew *is* the model. (Big nodes also have fatter pipes — couple bandwidth to
+the distribution.)
+
+---
+
+## 6. Invariants — hold fixed across the sweep
+
+(`V` and the distribution are *inputs*, not invariants; everything below stays at mainnet so
+the per-hop `X` only moves with depth.)
+
+- **GossipSub:** `D=8`, `D_low=6`, `D_high`, `D_lazy`, heartbeat, mcache, flood-publish, and
+  **`IDONTWANT`** (≥v1.2 — dominates duplicate suppression for block/columns).
 - **Message sizes** (per `slot-messages.md`).
-- **Per-link latency distribution** — a geographic RTT model; this is most of `X` for small
-  messages. Same distribution at every `N`.
-- **Per-node bandwidth distribution** — incl. the heavy validator-operator skew (big nodes =
-  fatter pipes + more injection); same distribution at every `N`.
-- **Per-node subscription counts** — 2 backbone attestation subnets + duty; ≥4 custody
-  column subnets.
-- **Processing-delay model** (§6) — the "process x seconds, then forward" delay.
-- **Workload counts** (§1).
+- **Per-link latency distribution** — geographic RTT model; most of `X` for small messages.
+- **Per-node bandwidth distribution** — incl. operator skew, coupled to §5.
+- **Processing-delay model** (§7).
 
 ---
 
-## 4. Coupling — the payoff of integrated runs
+## 7. Processing delay (no crypto) — the dominant tunable
 
-A node has **one uplink shared across all its topics**, and load is bursty at three
-instants: **t=0** (block + custody columns), **t≈4s** (attestation flood), **t≈8s**
-(aggregate flood). Per-topic sims miss this contention; integrated runs capture it natively
-— the reason for choosing the integrated approach.
-
-Crucially, coupling intensity is a function of **per-node load = workload**, which we hold
-at mainnet across the sweep. So an integrated run at `N=1k` already has *mainnet-strength*
-contention at each peak — only the depth is smaller. That's exactly why integrated +
-fixed-workload extrapolates: the hard part (contention) is right at every `N`; the cheap
-part (depth) is what we extend.
-
----
-
-## 5. Where it's weak: subnet geometry at small `N`
-
-- **Global topics (block, aggregates, sync contributions):** graph = full `N`. Depth
-  extrapolation is exact. **Strong.**
-- **Subnet topics (attestation / sync / column subnets):** a subnet holds only
-  `n_subnet ≈ N·(subs/64) + duty_subscribers` nodes. At small `N` the subnet degenerates:
-  with `s_c=512` attesters forced onto few nodes, you get a handful of fat **injection
-  points** instead of ~1–2 attesters/node → propagation looks artificially fast → `X`
-  distorted (and step-2 stationarity bends).
-
-**Mitigations (pick per topic):**
-- **Floor `N_min`** so subnets stay realistic. Mainnet `n_subnet` is a few hundred; you
-  need `N_min` large enough that (a) backbone `N·2/64` and (b) the `s_c` duty-subscribers
-  land on *distinct* nodes — practically `N_min ≳ s_c ≈ 1–2k`.
-- **Escape hatch:** run subnet topics as separate **full-size per-topic** sims (~few-hundred
-  nodes = one whole subnet, no extrapolation) and only extrapolate the global topics. This
-  is the one spot where the integrated method borrows the per-topic trick.
-
-Decide this from the sweep: if the attestation `T` vs `H(N)` line is straight down to your
-`N_min`, the integrated subnets are fine; if it bends at the low end, switch attestations to
-the per-topic escape hatch.
-
----
-
-## 6. Processing delay (no crypto) — the dominant tunable
-
-With crypto stripped, the per-message validation delay is *synthetic* and sits **on the
-critical path at every hop** — get it wrong and every CDF shifts. Model per message type as:
+Validation is stripped, so the per-message service delay is synthetic and sits **on the
+critical path every hop**:
 
 ```
 service_time = fixed_validate + queue
 ```
 
 - `fixed_validate`: stand-in for sig-verify + checks; calibrate to real client numbers.
-- `queue`: messages arriving in a burst wait behind each other (attestation flood, aggregate
-  flood). Model as a single-server queue per node (≈ M/D/1) fed by the ingress rate — this
-  is where high `s_c` actually bites, as *CPU* contention rather than bandwidth.
-
-This is the main knob you'll fit during mainnet calibration (§7).
+- `queue`: burst arrivals wait single-file (attestation flood at t≈4s, aggregate flood at
+  t≈8s) — model as a per-node single-server queue (≈ M/D/1) fed by ingress rate. This is
+  where high `s_c` actually bites — as CPU, not bandwidth.
 
 ---
 
-## 7. Calibration & validation loop (Fulu → mainnet)
+## 8. Calibration & validation (Fulu → mainnet)
 
-Free primitives in `X`: latency geo-distribution, bandwidth profiles, `fixed_validate`.
-Fit them so the **composed Fulu CDFs match your beaconprobe / mainnet arrival CDFs**
-(block-arrival and attestation-arrival are the load-bearing ones). Lock the primitives once
-matched — *then* the model is trustworthy for counterfactuals.
+Free primitives in `X`: latency geo-distribution, bandwidth profiles, `fixed_validate`. Fit
+them so the **clean** composed Fulu CDFs (block-arrival above all) match your beaconprobe /
+mainnet arrival CDFs, then lock them. Calibrate off the clean metrics, since the contended
+ones carry the §4 bias.
 
 ```
-fit primitives ─▶ compose Fulu CDFs ─▶ compare to mainnet (beaconprobe) ─▶ adjust ─▶ lock
-                                                                                      │
-                                                  sweep counterfactuals ◀─────────────┘
+fit primitives ─▶ compose clean Fulu CDFs ─▶ compare to mainnet (beaconprobe) ─▶ adjust ─▶ lock
+                                                                                            │
+                                                        sweep counterfactuals ◀─────────────┘
 ```
 
-This is your stated plan: **Fulu first, compare with mainnet**, then explore.
+Your plan: **Fulu first, compare with mainnet**, then explore.
 
 ---
 
-## 8. What to record each run (so composition is possible)
+## 9. What to record each run
 
-Per message, per node: **receive time** (relative to publish), **hop count** (carry a depth
-tag / count, or reconstruct from the relay tree), **ingress/egress bytes**, **queue depth at
-arrival**. Derived: per-hop delay `X` (differences along the dissemination tree); arrival
-CDF; `p50 / p90 / p99 / p100`. Slot-timing decisions come off `p99–p100`, **not the mean**
-— the last 1–5% of nodes set the safe deadline.
+Per message, per node: **receive time** (rel. to publish), **hop count** (depth tag or
+relay-tree reconstruction), **ingress/egress bytes**, **queue depth at arrival**. Derived:
+per-hop `X`; arrival CDF; `p50 / p90 / p99 / p100`. Slot-timing decisions come off
+**`p99–p100`**, not the mean — the last 1–5% of nodes set the safe deadline.
 
 ---
 
-## 9. Study knobs (vary *after* calibration is locked)
+## 10. Study knobs (vary *after* calibration is locked)
 
 - **Slot timing** — `SLOT_DURATION_MS` and the BPS deadlines (the headline question).
 - **`B`** — blob/column count → column size/volume (the rising-blob roadmap).
+- **`V` / distribution** — validator-set size and concentration.
 - **`N`** — extrapolate further as the network grows.
-- **Fork** — Fulu → Gloas (ePBS): split block into bid + payload envelope + PTC votes, and
-  the earlier GLOAS deadlines (see `slot-messages.md §8`). New message shapes, same machinery.
+- **Fork** — Fulu → Gloas (ePBS): block splits into bid + payload envelope + PTC votes, with
+  earlier GLOAS deadlines (`slot-messages.md §8`). New message shapes, same machinery.
