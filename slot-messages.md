@@ -48,13 +48,16 @@ subscribes to what is the structure that matters:
 | Topic class                | # meshes | Who subscribes                                                            |
 |----------------------------|----------|--------------------------------------------------------------------------|
 | **Global**                 | 1 each   | **every** node (all `N`)                                                  |
-| **Attestation subnets**    | 64       | `SUBNETS_PER_NODE=2` stable backbone (per node-id, 256 epochs) + duty-based short-lived |
+| **Attestation subnets**    | 64       | `SUBNETS_PER_NODE=2` backbone (per node-id, 256 epochs) + aggregators join their committee subnet for the slot. **Publishers fan-out, don't join** → ~2/node regardless of validator count |
 | **Sync subnets**           | 4        | nodes holding a sync-committee validator, for the ~27 h period           |
-| **Data-column subnets**    | 128      | by **custody**: ≥`CUSTODY_REQUIREMENT=4`; `VALIDATOR_CUSTODY_REQUIREMENT=8` if validating; +1 per +32 ETH; 128 = supernode |
+| **Data-column subnets**    | 128      | by **custody** = `min(max(stake/32ETH, 8), 128)` ≈ validators-on-node (4 if non-validating); scales with stake, 128 = supernode |
 
-Consequence: a global-topic message crosses a graph of size `N`; a subnet message
-crosses a *sub-graph* of only the subscribed nodes. Custody means **no node downloads all
-column data** — the core PeerDAS scaling property.
+Consequence: a global-topic message crosses a graph of size `N`; a subnet message crosses a
+*sub-graph* of only the subscribed nodes. Attestation membership is ~2/node (backbone) no
+matter how many validators a node runs — a plain attester *publishes* to its committee's
+subnet (fan-out) but does not *join* it. **Column membership instead scales with stake**:
+light / non-validating nodes custody 4–8 of 128, big stakers custody most or all. So PeerDAS
+shards column data for the long tail of small nodes, far less for large operators.
 
 ---
 
