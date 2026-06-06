@@ -1,6 +1,7 @@
 package netsim
 
 import (
+	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -68,7 +69,7 @@ func TestPeerGraphConnectedSymmetric(t *testing.T) {
 	// Symmetric: j in adj[i] <=> i in adj[j].
 	for i := range adj {
 		for _, j := range adj[i] {
-			if !contains(adj[j], i) {
+			if !slices.Contains(adj[j], i) {
 				t.Fatalf("edge %d-%d not symmetric", i, j)
 			}
 		}
@@ -92,15 +93,6 @@ func TestPeerGraphConnectedSymmetric(t *testing.T) {
 	if count != n {
 		t.Fatalf("graph not connected: reached %d of %d", count, n)
 	}
-}
-
-func contains(s []int, v int) bool {
-	for _, x := range s {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }
 
 // Build test (milestone 2): hosts come up on a shared sim, PeerAddr resolves,

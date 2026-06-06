@@ -142,12 +142,15 @@ func pairLatency(seed uint64, lo, hi time.Duration, a, b net.IP) time.Duration {
 	if bytes.Compare(a4, b4) > 0 {
 		loIP, hiIP = b4, a4
 	}
+	span := uint64(hi - lo)
+	if span == 0 {
+		return lo // static latency
+	}
 	var buf [16]byte
 	binary.BigEndian.PutUint64(buf[:8], seed)
 	copy(buf[8:12], loIP)
 	copy(buf[12:16], hiIP)
 	sum := sha256.Sum256(buf[:])
-	span := uint64(hi - lo)
 	return lo + time.Duration(binary.BigEndian.Uint64(sum[:8])%span)
 }
 
