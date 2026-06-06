@@ -15,10 +15,10 @@ import (
 )
 
 // buildNodes wires count Node objects to a netsim, each running one Validator.
-func buildNodes(nw *netsim.Netsim, n int, slotDur time.Duration, rec metrics.Tracer) []*node.Node {
+func buildNodes(nw *netsim.Netsim, n, blockSize int, slotDur time.Duration, rec metrics.Tracer) []*node.Node {
 	nodes := make([]*node.Node, n)
 	for i := range n {
-		v := validator.New(i, n, 128*1024, 0, time.Second, rand.New(rand.NewPCG(uint64(i), 99)))
+		v := validator.New(i, n, blockSize, 0, time.Second, rand.New(rand.NewPCG(uint64(i), 99)))
 		nodes[i] = &node.Node{
 			Num:          i,
 			Host:         nw.Host(i),
@@ -64,7 +64,7 @@ func TestTwoNodesOneBlock(t *testing.T) {
 		t.Cleanup(nw.Close)
 
 		rec := metrics.NewRecorder()
-		nodes := buildNodes(nw, 2, slotDur, rec)
+		nodes := buildNodes(nw, 2, 128*1024, slotDur, rec)
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
 		bringUp(t, ctx, nodes, nw)
@@ -88,5 +88,90 @@ func TestTwoNodesOneBlock(t *testing.T) {
 		if a.Delay <= 0 {
 			t.Fatalf("delay = %v, want > 0", a.Delay)
 		}
+	})
+}
+
+// Milestone 3: N nodes, cyclic proposer, X=N*S run. Every non-proposer receives
+// each block exactly once, and the arrival spread is multi-hop.
+func TestNNodesCyclicDissemination(t *testing.T) {
+	if testing.Short() {
+		t.Skip("100-node full-slot dissemination is CPU-heavy; -short skips it")
+	}
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			n        = 100
+			slotDur  = 12 * time.Second
+			numSlots = n // every node proposes once
+		)
+		nw, err := netsim.New(netsim.Config{
+			N: n, P: 20, SuperFrac: 0.20, Seed: 1,
+			MinLatency: 10 * time.Millisecond, MaxLatency: 150 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("netsim: %v", err)
+		}
+		t.Cleanup(nw.Close)
+
+		rec := metrics.NewRecorder()
+		nodes := buildNodes(nw, n, 16*1024, slotDur, rec)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		bringUp(t, ctx, nodes, nw)
+
+		runStart := time.Now()
+		var wg sync.WaitGroup
+		for _, n := range nodes {
+			wg.Go(func() { n.Run(ctx, runStart, numSlots) })
+		}
+		wg.Wait()
+
+		arr := rec.Arrivals()
+
+		// (a) Every non-proposer receives each block exactly once: full coverage
+		// (numSlots*(n-1) arrivals) with no duplicate (node,slot,origin).
+		type key struct{ node, slot, origin int }
+		seen := make(map[key]bool, len(arr))
+		for _, a := range arr {
+			k := key{a.Node, a.Slot, a.Origin}
+			if seen[k] {
+				t.Fatalf("duplicate arrival %+v", a)
+			}
+			seen[k] = true
+			if a.Origin != a.Slot%n {
+				t.Fatalf("arrival %+v: origin != slot%%n", a)
+			}
+		}
+		if want := numSlots * (n - 1); len(arr) != want {
+			t.Fatalf("got %d arrivals, want %d (every non-proposer once per block)", len(arr), want)
+		}
+
+		// (b) Multi-hop: for a block from a regular (non-super) proposer, the
+		// slowest arrival is >= 2x the fastest (a 1-hop world clusters tightly).
+		slot := -1
+		for s := range numSlots {
+			if !nw.IsSupernode(s % n) {
+				slot = s
+				break
+			}
+		}
+		if slot < 0 {
+			t.Fatal("no regular proposer found")
+		}
+		var lo, hi time.Duration
+		for _, a := range arr {
+			if a.Slot != slot {
+				continue
+			}
+			if lo == 0 || a.Delay < lo {
+				lo = a.Delay
+			}
+			if a.Delay > hi {
+				hi = a.Delay
+			}
+		}
+		if hi < 2*lo {
+			t.Fatalf("slot %d not multi-hop: max=%v < 2*min=%v", slot, hi, 2*lo)
+		}
+		t.Logf("slot %d spread: min=%v max=%v; total arrivals=%d", slot, lo, hi, len(arr))
 	})
 }
