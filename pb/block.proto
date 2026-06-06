@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package block;
+
+option go_package = "github.com/ethp2p/slot-sim/pb";
+
+// Block is the Phase 1 wire message: an opaque, correctly-sized beacon block.
+// payload carries random filler sized so the marshaled Block hits the target
+// byte count (random because protobuf drops zero bytes and they'd compress away).
+message Block {
+  uint32 slot    = 1;
+  uint32 origin  = 2; // publishing node number
+  bytes  payload = 3; // random filler sized so the marshaled Block == target
+}
