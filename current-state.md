@@ -78,7 +78,7 @@ validator/                   Duty + makeBlock
 metrics/tracer.go            Recorder (simnet) + SlogTracer (shadow)
 netsim/netsim.go             simnet hosts, peer graph, Network impl (New + NewFromTopology)
 netsim/topology.go           Topology types + LoadTopology (consumes simctl topology.json)
-simctl/                      config.py, topology.py, runner.py, main.py (run + compare), manifest.py
+simctl/                      config.py, topology.py, runner.py, main.py (run/compare, --remote), remote.py, manifest.py
 analysis/check_arrivals.py   receipt check + CDF (cdf/delays_from_csv reused by compare)
 configs/smoke.yaml           25-node / 5-slot local Shadow smoke run
 docs/shadow-manual-test.md   expected vs actual for the Shadow run
@@ -91,6 +91,13 @@ uv sync
 uv run simctl run --config configs/smoke.yaml --output-dir runs/smoke
 python analysis/check_arrivals.py runs/smoke/run-*
 
+# Shadow on the remote box (mainnet-scale): same code path as local. rsyncs the
+# repo (respecting .gitignore), then uv sync + build + run there, then tarballs the
+# output dir. The whole repo is synced, so configs/ resolve as-is on the remote.
+uv run simctl run --config configs/smoke.yaml --remote sukun@ethp2p --output-dir runs/mainnet
+# preview the rsync/ssh commands without touching the remote:
+uv run simctl run --config configs/smoke.yaml --remote sukun@ethp2p --dry-run
+
 # Same topology on BOTH backends (simnet runs under synctest), side-by-side CDF
 uv run simctl compare --config configs/smoke.yaml --output-dir runs/compare
 
@@ -100,7 +107,7 @@ SIMRUN_PARAMS=runs/compare/run-*/simnet_params.json \
 
 # tests
 go test ./...        # incl. synctest suites
-uv run pytest        # topology / config / runner / check_arrivals
+uv run pytest        # topology / config / runner / remote / check_arrivals
 ```
 
 ## Gotchas / things to watch
@@ -123,8 +130,12 @@ uv run pytest        # topology / config / runner / check_arrivals
    Localize the 128 KiB residual with a fixed-latency / few-country topology and
    per-hop tracing (Shadow per-host token bucket vs simnet per-host FQ-CoDel),
    plus a block-size sweep. See `shadow-simnet.md` *What's left*.
-2. **simctl `--remote`.** Port `remote.py` from `../batched-attestation-sim`
-   (rsync → build on remote → run → tarball). Mirrors the other simctl skills.
+2. **simctl `--remote` — done.** `simctl run|compare --remote user@host` rsyncs
+   the repo (respecting `.gitignore`), `uv sync` + builds + runs on the remote, then
+   tarballs the output dir and removes the original. `--dry-run` previews the
+   rsync/ssh commands without touching the remote. Ported from
+   `../batched-attestation-sim` (`simctl/remote.py`); `tests/test_remote.py` asserts
+   the command contract. Use it to climb N on `sukun@ethp2p` (step 3).
 3. **Scale-out (plan.md Phase 4).** Climb N under Shadow; watch the connect
    race/startup window; find the ceiling. Add CDF/percentile tooling for sweeps.
 4. **More messages (plan.md Phase 1 steps 4-6 → Phase 2/5).** Attestations
