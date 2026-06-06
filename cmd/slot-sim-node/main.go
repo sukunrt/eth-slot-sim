@@ -38,7 +38,21 @@ import (
 	"github.com/ethp2p/slot-sim/validator"
 )
 
-const listenPort = 8000
+const (
+	listenPort = 8000
+	// meshJoinStagger bounds the random pause between dialing peers and joining the
+	// global topic, so a large fleet doesn't GRAFT in lockstep (mirrors
+	// batched-attestation-sim). The -startup settle window must exceed it.
+	meshJoinStagger = 30 * time.Second
+	// drainWindow keeps the receive loops alive after the final slot to capture a
+	// large block's dissemination tail — a 1 MiB block can outlast a 12s slot.
+	drainWindow = 30 * time.Second
+)
+
+// settleWindow is how long a worst-case-staggered host still has to mesh before
+// slot 0: the startup window minus the maximum join stagger. It must stay > 0,
+// else a late joiner would publish before its mesh forms.
+func settleWindow(startup, stagger time.Duration) time.Duration { return startup - stagger }
 
 func main() {
 	// Capture the start instant first: runStart = programStart + startup must be
@@ -63,6 +77,9 @@ func main() {
 		startup     = flag.Duration("startup", 60*time.Second, "bring-up window before slot 0")
 	)
 	flag.Parse()
+	if settleWindow(*startup, meshJoinStagger) <= 0 {
+		log.Fatalf("startup %v must exceed mesh-join stagger %v", *startup, meshJoinStagger)
+	}
 
 	tracer := metrics.NewSlogTracer(slog.NewJSONHandler(os.Stdout, nil))
 	val := validator.New(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
@@ -78,18 +95,22 @@ func main() {
 	if err := nd.Start(ctx); err != nil {
 		log.Fatalf("start: %v", err)
 	}
-	// Small jitter so hosts don't connect/heartbeat in lockstep.
-	time.Sleep(time.Duration(rand.IntN(1000)) * time.Millisecond)
+	// Bring-up cadence (mirrors batched-attestation-sim — nicer at scale): a small
+	// jitter before dialing and a larger random pause before joining, so a large
+	// fleet doesn't dial then GRAFT in lockstep. The -startup window then lets
+	// every host settle and mesh before slot 0.
+	time.Sleep(rand.N(time.Second))
 	nd.ConnectToPeers(parseIntList(*peerNumsStr))
 	slog.Info("peers connected", "node", *nodeNum)
+	time.Sleep(rand.N(meshJoinStagger))
 	if err := nd.JoinTopics(ctx); err != nil {
 		log.Fatalf("join topics: %v", err)
 	}
 
 	runStart := programStart.Add(*startup)
-	time.Sleep(time.Until(runStart)) // let every host finish bring-up + mesh form
+	time.Sleep(time.Until(runStart)) // chillax until slot 0 — every host has meshed
 	driver.SlotLoop(ctx, nd, val, tracer, runStart, *numSlots, *slotDur)
-	time.Sleep(*slotDur) // drain in-flight receives
+	time.Sleep(drainWindow) // capture the last block's dissemination tail
 	nd.Close()
 }
 
