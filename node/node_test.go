@@ -2,176 +2,124 @@ package node_test
 
 import (
 	"context"
-	"math/rand/v2"
-	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/metrics"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/ethp2p/slot-sim/netsim"
 	"github.com/ethp2p/slot-sim/node"
+	"github.com/ethp2p/slot-sim/pb"
 	"github.com/ethp2p/slot-sim/validator"
 )
 
-// buildNodes wires count Node objects to a netsim, each running one Validator.
-func buildNodes(nw *netsim.Netsim, n, blockSize int, slotDur time.Duration, rec metrics.Tracer) []*node.Node {
-	nodes := make([]*node.Node, n)
-	for i := range n {
-		v := validator.New(i, n, blockSize, 0, time.Second, rand.New(rand.NewPCG(uint64(i), 99)))
+// buildNodes wires count passive Node objects to a netsim. No validator, tracer,
+// or slot clock — those belong to a Driver; these tests drive the node directly.
+func buildNodes(nw *netsim.Netsim, count int) []*node.Node {
+	nodes := make([]*node.Node, count)
+	for i := range count {
 		nodes[i] = &node.Node{
-			Num:          i,
-			Host:         nw.Host(i),
-			Network:      nw,
-			Validator:    v,
-			Tracer:       rec,
-			SlotDuration: slotDur,
-			VerifyDelay:  func() time.Duration { return 10 * time.Millisecond },
-			D:            8, Dlo: 6, Dhi: 12,
+			Num: i, Host: nw.Host(i), Network: nw,
+			VerifyDelay: func() time.Duration { return 10 * time.Millisecond },
+			D:           8, Dlo: 6, Dhi: 12,
 		}
 	}
 	return nodes
 }
 
-// bringUp runs the proven cadence: Start all -> settle -> connect -> join -> settle.
+// bringUp is the minimal start-up cadence a node test needs: start, settle, dial
+// peers, join topics (starts receive loops), settle so the mesh forms.
 func bringUp(t *testing.T, ctx context.Context, nodes []*node.Node, nw *netsim.Netsim) {
 	t.Helper()
-	for _, n := range nodes {
-		if err := n.Start(ctx); err != nil {
-			t.Fatalf("start %d: %v", n.Num, err)
+	for _, nd := range nodes {
+		if err := nd.Start(ctx); err != nil {
+			t.Fatalf("start %d: %v", nd.Num, err)
 		}
 	}
 	time.Sleep(time.Second)
-	for _, n := range nodes {
-		n.ConnectToPeers(nw.Peers(n.Num))
+	for _, nd := range nodes {
+		nd.ConnectToPeers(nw.Peers(nd.Num))
 	}
-	for _, n := range nodes {
-		if err := n.JoinTopics(); err != nil {
-			t.Fatalf("join %d: %v", n.Num, err)
+	for _, nd := range nodes {
+		if err := nd.JoinTopics(ctx); err != nil {
+			t.Fatalf("join %d: %v", nd.Num, err)
 		}
 	}
 	time.Sleep(time.Second)
 }
 
-// Milestone 1: 2 nodes, one block A->B, arrival recorded exactly once.
-func TestTwoNodesOneBlock(t *testing.T) {
+// A node, driven directly, publishes a payload that its peer receives, decodes,
+// and reports outward via OnReceive — the message-agnostic mechanism in
+// isolation, no driver or validator.
+func TestNodePublishReceive(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		const slotDur = time.Second
 		nw, err := netsim.New(netsim.Config{N: 2, P: 1, Seed: 1, MinLatency: 5 * time.Millisecond, MaxLatency: 5 * time.Millisecond})
 		if err != nil {
 			t.Fatalf("netsim: %v", err)
 		}
 		t.Cleanup(nw.Close)
 
-		rec := metrics.NewRecorder()
-		nodes := buildNodes(nw, 2, 128*1024, slotDur, rec)
+		nodes := buildNodes(nw, 2)
+		got := make(chan node.Received, 8)
+		nodes[1].OnReceive = func(r node.Received) { got <- r }
+
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
 		bringUp(t, ctx, nodes, nw)
+		defer func() {
+			for _, nd := range nodes {
+				nd.Close()
+			}
+		}()
 
-		// Run one slot: only node 0 proposes (slot 0 % 2 == 0).
-		runStart := time.Now()
-		var wg sync.WaitGroup
-		for _, n := range nodes {
-			wg.Go(func() { n.Run(ctx, runStart, 1) })
+		blk := &pb.Block{Slot: 0, Origin: 0, Payload: []byte("payload")}
+		data, err := proto.Marshal(blk)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
 		}
-		wg.Wait()
+		if err := nodes[0].Publish(ctx, validator.BlockTopic, data); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
 
-		arr := rec.Arrivals()
-		if len(arr) != 1 {
-			t.Fatalf("got %d arrivals, want exactly 1 (node1 <- node0): %+v", len(arr), arr)
+		r := <-got
+		if r.Kind != node.KindBlock {
+			t.Fatalf("kind = %d, want KindBlock", r.Kind)
 		}
-		a := arr[0]
-		if a.Node != 1 || a.Origin != 0 || a.Slot != 0 {
-			t.Fatalf("arrival = %+v, want node1 origin0 slot0", a)
+		rb, ok := r.Obj.(*pb.Block)
+		if !ok {
+			t.Fatalf("obj type %T, want *pb.Block", r.Obj)
 		}
-		if a.Delay <= 0 {
-			t.Fatalf("delay = %v, want > 0", a.Delay)
+		if rb.Slot != 0 || rb.Origin != 0 || string(rb.Payload) != "payload" {
+			t.Fatalf("decoded %+v, want slot0 origin0 payload=%q", rb, "payload")
+		}
+		if r.At.IsZero() {
+			t.Fatal("receive time not stamped")
 		}
 	})
 }
 
-// Milestone 3: N nodes, cyclic proposer, X=N*S run. Every non-proposer receives
-// each block exactly once, and the arrival spread is multi-hop.
-func TestNNodesCyclicDissemination(t *testing.T) {
-	if testing.Short() {
-		t.Skip("100-node full-slot dissemination is CPU-heavy; -short skips it")
-	}
+// Publishing to a topic the node never joined is an error, not a panic.
+func TestPublishUnjoinedTopic(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		const (
-			n        = 100
-			slotDur  = 12 * time.Second
-			numSlots = n // every node proposes once
-		)
-		nw, err := netsim.New(netsim.Config{
-			N: n, P: 20, SuperFrac: 0.20, Seed: 1,
-			MinLatency: 10 * time.Millisecond, MaxLatency: 150 * time.Millisecond,
-		})
+		nw, err := netsim.New(netsim.Config{N: 1, P: 1, Seed: 1, MinLatency: 5 * time.Millisecond, MaxLatency: 5 * time.Millisecond})
 		if err != nil {
 			t.Fatalf("netsim: %v", err)
 		}
 		t.Cleanup(nw.Close)
 
-		rec := metrics.NewRecorder()
-		nodes := buildNodes(nw, n, 16*1024, slotDur, rec)
+		nodes := buildNodes(nw, 1)
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		bringUp(t, ctx, nodes, nw)
-
-		runStart := time.Now()
-		var wg sync.WaitGroup
-		for _, n := range nodes {
-			wg.Go(func() { n.Run(ctx, runStart, numSlots) })
+		if err := nodes[0].Start(ctx); err != nil {
+			t.Fatalf("start: %v", err)
 		}
-		wg.Wait()
-
-		arr := rec.Arrivals()
-
-		// (a) Every non-proposer receives each block exactly once: full coverage
-		// (numSlots*(n-1) arrivals) with no duplicate (node,slot,origin).
-		type key struct{ node, slot, origin int }
-		seen := make(map[key]bool, len(arr))
-		for _, a := range arr {
-			k := key{a.Node, a.Slot, a.Origin}
-			if seen[k] {
-				t.Fatalf("duplicate arrival %+v", a)
-			}
-			seen[k] = true
-			if a.Origin != a.Slot%n {
-				t.Fatalf("arrival %+v: origin != slot%%n", a)
-			}
+		if err := nodes[0].JoinTopics(ctx); err != nil {
+			t.Fatalf("join: %v", err)
 		}
-		if want := numSlots * (n - 1); len(arr) != want {
-			t.Fatalf("got %d arrivals, want %d (every non-proposer once per block)", len(arr), want)
+		defer nodes[0].Close()
+		if err := nodes[0].Publish(ctx, "/eth2/never/joined", []byte("x")); err == nil {
+			t.Fatal("publish to unjoined topic: got nil error, want failure")
 		}
-
-		// (b) Multi-hop: for a block from a regular (non-super) proposer, the
-		// slowest arrival is >= 2x the fastest (a 1-hop world clusters tightly).
-		slot := -1
-		for s := range numSlots {
-			if !nw.IsSupernode(s % n) {
-				slot = s
-				break
-			}
-		}
-		if slot < 0 {
-			t.Fatal("no regular proposer found")
-		}
-		var lo, hi time.Duration
-		for _, a := range arr {
-			if a.Slot != slot {
-				continue
-			}
-			if lo == 0 || a.Delay < lo {
-				lo = a.Delay
-			}
-			if a.Delay > hi {
-				hi = a.Delay
-			}
-		}
-		if hi < 2*lo {
-			t.Fatalf("slot %d not multi-hop: max=%v < 2*min=%v", slot, hi, 2*lo)
-		}
-		t.Logf("slot %d spread: min=%v max=%v; total arrivals=%d", slot, lo, hi, len(arr))
 	})
 }

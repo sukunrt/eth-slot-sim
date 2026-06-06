@@ -1,7 +1,7 @@
 // Package validator produces a node's per-slot duties and the messages they
-// carry. It is the message-creating half of the Node/Validator split: the Node
-// asks Duties(slot) each slot and never looks inside a Message. Phase 1's only
-// duty is proposing a block when it's this node's turn (cyclic).
+// carry. It is the message-creating half: a Driver asks Duties(slot) each slot
+// and never looks inside a Message. Phase 1's only duty is proposing a block
+// when it's this node's turn (cyclic).
 package validator
 
 import (

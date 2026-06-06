@@ -10,15 +10,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"math/rand/v2"
 	"os"
-	"sync"
 	"time"
 
+	"github.com/ethp2p/slot-sim/driver"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/netsim"
-	"github.com/ethp2p/slot-sim/node"
-	"github.com/ethp2p/slot-sim/validator"
 )
 
 func main() {
@@ -48,42 +45,22 @@ func main() {
 	defer nw.Close()
 
 	rec := metrics.NewRecorder()
-	jitter := *slotDur / 4 // spread proposals within the slot, never past its end
-	nodes := make([]*node.Node, *n)
-	for i := range *n {
-		v := validator.New(i, *n, *blockSize, 0, jitter, rand.New(rand.NewPCG(*seed, uint64(i))))
-		nodes[i] = &node.Node{
-			Num: i, Host: nw.Host(i), Network: nw, Validator: v, Tracer: rec,
-			SlotDuration: *slotDur,
-			VerifyDelay:  func() time.Duration { return 10 * time.Millisecond },
-			D:            8, Dlo: 6, Dhi: 12,
-		}
-	}
+	d := driver.New(nw, driver.Config{
+		BlockSize:    *blockSize,
+		SlotDuration: *slotDur,
+		Jitter:       *slotDur / 4, // spread proposals within the slot, never past its end
+		VerifyDelay:  func() time.Duration { return 10 * time.Millisecond },
+		D:            8, Dlo: 6, Dhi: 12,
+		Seed: *seed,
+	}, rec)
 
 	ctx := context.Background()
 	log.Printf("starting %d nodes, %d slots @ %v", *n, numSlots, *slotDur)
-	for _, nd := range nodes {
-		if err := nd.Start(ctx); err != nil {
-			log.Fatalf("start %d: %v", nd.Num, err)
-		}
+	if err := d.BringUp(ctx); err != nil {
+		log.Fatal(err)
 	}
-	time.Sleep(time.Second)
-	for _, nd := range nodes {
-		nd.ConnectToPeers(nw.Peers(nd.Num))
-	}
-	for _, nd := range nodes {
-		if err := nd.JoinTopics(); err != nil {
-			log.Fatalf("join %d: %v", nd.Num, err)
-		}
-	}
-	time.Sleep(time.Second) // let meshes form
 
-	runStart := time.Now()
-	var wg sync.WaitGroup
-	for _, nd := range nodes {
-		wg.Go(func() { nd.Run(ctx, runStart, numSlots) })
-	}
-	wg.Wait()
+	d.Run(ctx, time.Now(), numSlots)
 
 	report(rec, *csvPath)
 }

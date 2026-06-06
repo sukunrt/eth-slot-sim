@@ -1,14 +1,14 @@
-// Package node is the message-agnostic half of the simulator: it owns the
-// libp2p host, gossipsub, topic membership, peer connections, the slot clock,
-// and send/receive. Each slot it asks its Validator for duties and publishes
-// them; it knows nothing about "block". Adding attestations later grows the
-// Validator, not the Node.
+// Package node is the message-agnostic, passive half of the simulator: it owns
+// the libp2p host, gossipsub, topic membership, peer connections, and
+// send/receive. It responds to requests (Connect, JoinTopics, Publish) and
+// reports what it receives outward via OnReceive; it knows nothing about slots,
+// duties, or metrics. A Driver supplies the timing and orchestration.
 package node
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
-	"sort"
 	"sync"
 	"time"
 
@@ -18,26 +18,42 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/pb"
 	"github.com/ethp2p/slot-sim/validator"
 )
 
+// Kind tags a received, decoded message so a Driver can dispatch on it without
+// type-asserting to discover what it got. Values are predefined per message type.
+type Kind int
+
+const (
+	KindBlock       Kind = 1
+	KindAttestation Kind = 2
+)
+
+// Received is the node's outward hand-off for one decoded message: the node
+// infers the type from the gossipsub topic, unmarshals, and tags Obj with Kind.
+type Received struct {
+	Kind Kind
+	Obj  any
+	At   time.Time
+}
+
 // Node is one simulated beacon node. Exported fields are set by the caller
 // before Start; the Node loads no configuration itself.
 type Node struct {
-	Num          int
-	Host         host.Host
-	Network      Network
-	Validator    *validator.Validator
-	Tracer       metrics.Tracer
-	SlotDuration time.Duration
-	VerifyDelay  func() time.Duration // per-hop processing cost (validation-as-sleep)
-	D, Dlo, Dhi  int
+	Num         int
+	Host        host.Host
+	Network     Network
+	VerifyDelay func() time.Duration // per-hop processing cost (validation-as-sleep)
+	D, Dlo, Dhi int
+	OnReceive   func(Received) // outward sink; set before JoinTopics
 
-	ps    *pubsub.PubSub
-	topic *pubsub.Topic
-	sub   *pubsub.Subscription
+	ps     *pubsub.PubSub
+	topics map[string]*pubsub.Topic
+	sub    *pubsub.Subscription
+	cancel context.CancelFunc // stops the receive loop
+	wg     sync.WaitGroup     // tracks the receive loop until Close
 }
 
 // Start brings up gossipsub with the Prysm-tuned parameters. It does not set
@@ -70,11 +86,12 @@ func (n *Node) Start(ctx context.Context) error {
 	return nil
 }
 
-// JoinTopics registers the verify hook, joins the global block topic, and
-// subscribes. The verify hook sleeps the processing cost and accepts; gossipsub
-// won't forward until it returns, so the delay sits on the propagation path at
-// every hop. Async (default) form — never inline, which would serialize relays.
-func (n *Node) JoinTopics() error {
+// JoinTopics registers the verify hook, joins the global block topic,
+// subscribes, and starts the receive loop on ctx. The verify hook sleeps the
+// processing cost and accepts; gossipsub won't forward until it returns, so the
+// delay sits on the propagation path at every hop. Async (default) form — never
+// inline, which would serialize relays. Set OnReceive before calling.
+func (n *Node) JoinTopics(ctx context.Context) error {
 	err := n.ps.RegisterTopicValidator(validator.BlockTopic,
 		func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
 			time.Sleep(n.VerifyDelay())
@@ -87,13 +104,28 @@ func (n *Node) JoinTopics() error {
 	if err != nil {
 		return err
 	}
-	n.topic = topic
+	n.topics = map[string]*pubsub.Topic{validator.BlockTopic: topic}
 	sub, err := topic.Subscribe(pubsub.WithBufferSize(4096))
 	if err != nil {
 		return err
 	}
 	n.sub = sub
+	rctx, cancel := context.WithCancel(ctx)
+	n.cancel = cancel
+	n.wg.Go(func() { n.receive(rctx) })
 	return nil
+}
+
+// Close stops the receive loop and waits for it to exit. A no-op if the node
+// never joined; safe to call once.
+func (n *Node) Close() {
+	if n.cancel != nil {
+		n.cancel()
+	}
+	n.wg.Wait()
+	if n.sub != nil {
+		n.sub.Cancel()
+	}
 }
 
 // ConnectToPeers dials the given node numbers. It skips peers <= Num so each
@@ -123,56 +155,46 @@ func (n *Node) ConnectToPeers(peers []int) {
 	wg.Wait()
 }
 
-// Run executes numSlots slots from runStart (shared by all nodes so arrival
-// times share an origin), publishing each slot's duties at their offset and
-// recording received blocks. It returns once the run plus a drain window
-// completes.
-func (n *Node) Run(ctx context.Context, runStart time.Time, numSlots int) {
-	recvCtx, stop := context.WithCancel(ctx)
-	var wg sync.WaitGroup
-	wg.Go(func() { n.receive(recvCtx) })
-
-	for slot := range numSlots {
-		slotStart := runStart.Add(time.Duration(slot) * n.SlotDuration)
-		duties := n.Validator.Duties(slot)
-		sort.Slice(duties, func(i, j int) bool { return duties[i].At < duties[j].At })
-		for _, d := range duties {
-			time.Sleep(time.Until(slotStart.Add(d.At)))
-			n.publish(ctx, d.Msg)
-		}
-		time.Sleep(time.Until(slotStart.Add(n.SlotDuration)))
+// Publish sends payload on the named (already-joined) topic.
+func (n *Node) Publish(ctx context.Context, topic string, payload []byte) error {
+	t, ok := n.topics[topic]
+	if !ok {
+		return fmt.Errorf("publish: topic %q not joined", topic)
 	}
-
-	time.Sleep(n.SlotDuration) // drain in-flight receives
-	stop()
-	wg.Wait()
+	return t.Publish(ctx, payload)
 }
 
-// publish records the publish time (synchronously, before the send) then
-// publishes the raw payload onto the topic.
-func (n *Node) publish(ctx context.Context, msg validator.Message) {
-	n.Tracer.OnPublish(msg.Slot, n.Num, time.Now())
-	if err := n.topic.Publish(ctx, msg.Payload); err != nil {
-		slog.Error("publish failed", "node", n.Num, "slot", msg.Slot, "err", err)
-	}
-}
-
-// receive decodes each block off the subscription and records its arrival,
-// skipping the node's own locally-delivered publish (origin == self).
+// receive decodes each message off the subscription and hands it outward via
+// OnReceive. It does not skip the node's own loopback publish — there is no
+// clean origin in gossipsub, so that policy lives in the consumer.
 func (n *Node) receive(ctx context.Context) {
 	for {
 		msg, err := n.sub.Next(ctx)
 		if err != nil {
 			return
 		}
-		var blk pb.Block
-		if err := proto.Unmarshal(msg.Data, &blk); err != nil {
-			slog.Error("unmarshal failed", "node", n.Num, "err", err)
+		rec, err := decode(msg.GetTopic(), msg.Data, time.Now())
+		if err != nil {
+			slog.Error("decode failed", "node", n.Num, "err", err)
 			continue
 		}
-		if int(blk.Origin) == n.Num {
-			continue
+		if n.OnReceive != nil {
+			n.OnReceive(rec)
 		}
-		n.Tracer.OnReceive(n.Num, int(blk.Slot), int(blk.Origin), time.Now())
+	}
+}
+
+// decode infers the message type from the gossipsub topic, unmarshals it, and
+// tags it with its Kind.
+func decode(topic string, data []byte, at time.Time) (Received, error) {
+	switch topic {
+	case validator.BlockTopic:
+		blk := new(pb.Block)
+		if err := proto.Unmarshal(data, blk); err != nil {
+			return Received{}, err
+		}
+		return Received{Kind: KindBlock, Obj: blk, At: at}, nil
+	default:
+		return Received{}, fmt.Errorf("unknown topic %q", topic)
 	}
 }
