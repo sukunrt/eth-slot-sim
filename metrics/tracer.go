@@ -7,6 +7,7 @@ package metrics
 import (
 	"encoding/csv"
 	"io"
+	"log/slog"
 	"math"
 	"slices"
 	"strconv"
@@ -19,6 +20,24 @@ import (
 type Tracer interface {
 	OnPublish(slot, origin int, at time.Time)
 	OnReceive(node, slot, origin int, at time.Time)
+}
+
+// SlogTracer is a Tracer that emits one structured slog record per event. A
+// Shadow run is one process per node, all sharing Shadow's virtual clock, so a
+// run is reassembled from per-host logs by joining on (slot, origin) with
+// absolute UnixNano timestamps. The Shadow binary constructs it with a JSON
+// handler over stdout; tests pass a buffer handler.
+type SlogTracer struct{ log *slog.Logger }
+
+// NewSlogTracer returns a SlogTracer writing through h.
+func NewSlogTracer(h slog.Handler) *SlogTracer { return &SlogTracer{log: slog.New(h)} }
+
+func (t *SlogTracer) OnPublish(slot, origin int, at time.Time) {
+	t.log.Info("publish", "slot", slot, "origin", origin, "t_ns", at.UnixNano())
+}
+
+func (t *SlogTracer) OnReceive(node, slot, origin int, at time.Time) {
+	t.log.Info("arrival", "node", node, "slot", slot, "origin", origin, "t_ns", at.UnixNano())
 }
 
 // Arrival is one node's receipt of one block.
