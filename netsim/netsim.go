@@ -7,7 +7,6 @@ package netsim
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
@@ -25,18 +24,26 @@ import (
 	"github.com/ethp2p/slot-sim/node"
 )
 
-// Bandwidth classes (bits/sec). Supernodes are effectively unlimited; regular
-// nodes are asymmetric home-staker links. NOTE: this is a literal 1024 Gbps —
-// not simlibp2p's 1024*OneMbps idiom, which is only ~1 Gbps.
+// Bandwidth classes (bits/sec). Supernodes get ~1 Gbps (1024 Mbps); regular
+// nodes are asymmetric home-staker links.
 const (
-	regularUp   = 25 * 1_000_000
-	regularDown = 50 * 1_000_000
-	superLink   = 1024 * 1_000_000_000
+	regularUp   = 25 * 1_000_000   // 25 Mbps
+	regularDown = 50 * 1_000_000   // 50 Mbps
+	superLink   = 1024 * 1_000_000 // 1024 Mbps (~1 Gbps)
 )
 
 const listenPort = 8000
 
-// Config parameterizes a network. Zero MinLatency/MaxLatency are invalid.
+// Distinct PCG stream IDs so latency, supernode, and peer-graph draws from the
+// same Config.Seed don't correlate. The values are arbitrary, only distinct.
+const (
+	latencyStream = 1
+	supersStream  = 2
+	peersStream   = 3
+)
+
+// Config parameterizes a network. Requires MaxLatency >= MinLatency;
+// MinLatency == MaxLatency yields a fixed (static) per-link latency.
 type Config struct {
 	N          int
 	P          int     // target peers per node
@@ -55,11 +62,11 @@ type Netsim struct {
 }
 
 // New builds N hosts on a shared simnet and starts it. Each host gets its own
-// bandwidth class; the sim gets one latency function keyed on the link's
-// address pair.
+// bandwidth class; the sim looks up each packet's latency from a precomputed
+// per-link table.
 func New(cfg Config) (*Netsim, error) {
 	supers := pickSupernodes(cfg.N, cfg.SuperFrac, cfg.Seed)
-	sim := &simnet.Simnet{LatencyFunc: newLatencyFunc(cfg.Seed, cfg.MinLatency, cfg.MaxLatency)}
+	sim := &simnet.Simnet{LatencyFunc: latencyFunc(cfg.N, cfg.Seed, cfg.MinLatency, cfg.MaxLatency)}
 
 	hosts := make([]host.Host, cfg.N)
 	for i := range cfg.N {
@@ -72,6 +79,9 @@ func New(cfg Config) (*Netsim, error) {
 			libp2p.ResourceManager(&libp2pnet.NullResourceManager{}),
 		)
 		if err != nil {
+			for _, h := range hosts[:i] {
+				_ = h.Close()
+			}
 			return nil, fmt.Errorf("build host %d: %w", i, err)
 		}
 		hosts[i] = h
@@ -118,11 +128,28 @@ func linkSettings(super bool) simnet.NodeBiDiLinkSettings {
 	}
 }
 
-// newLatencyFunc returns simnet's per-packet latency function: a deterministic,
-// symmetric random draw per link in [lo, hi).
-func newLatencyFunc(seed uint64, lo, hi time.Duration) func(*simnet.Packet) time.Duration {
+// latencyFunc precomputes a fixed latency for every node pair at startup (one
+// seeded draw each), then returns a lock-free per-packet lookup — no rand or
+// allocation on the routing hot path. Latency is symmetric (keyed by the
+// unordered address pair) and identical for every packet on a link. lo == hi
+// gives a fixed latency for all links.
+func latencyFunc(n int, seed uint64, lo, hi time.Duration) func(*simnet.Packet) time.Duration {
+	span := int64(hi - lo)
+	lat := make(map[uint64]time.Duration, n*(n-1)/2)
+	if span > 0 {
+		rng := rand.New(rand.NewPCG(seed, latencyStream))
+		for i := range n {
+			for j := i + 1; j < n; j++ {
+				lat[ipPairKey(simnet.IntToPublicIPv4(i), simnet.IntToPublicIPv4(j))] =
+					lo + time.Duration(rng.Int64N(span))
+			}
+		}
+	}
 	return func(p *simnet.Packet) time.Duration {
-		return pairLatency(seed, lo, hi, ipOf(p.From), ipOf(p.To))
+		if d, ok := lat[ipPairKey(ipOf(p.From), ipOf(p.To))]; ok {
+			return d
+		}
+		return lo
 	}
 }
 
@@ -133,32 +160,20 @@ func ipOf(a net.Addr) net.IP {
 	return nil
 }
 
-// pairLatency hashes the canonicalized (min,max) address pair so A→B and B→A
-// agree, mapping to a stable value in [lo, hi). IntToPublicIPv4 isn't cleanly
-// invertible, so we hash the address bytes rather than recover node numbers.
-func pairLatency(seed uint64, lo, hi time.Duration, a, b net.IP) time.Duration {
+// ipPairKey canonicalizes an unordered IPv4 pair into a stable map key.
+func ipPairKey(a, b net.IP) uint64 {
 	a4, b4 := a.To4(), b.To4()
-	loIP, hiIP := a4, b4
 	if bytes.Compare(a4, b4) > 0 {
-		loIP, hiIP = b4, a4
+		a4, b4 = b4, a4
 	}
-	span := uint64(hi - lo)
-	if span == 0 {
-		return lo // static latency
-	}
-	var buf [16]byte
-	binary.BigEndian.PutUint64(buf[:8], seed)
-	copy(buf[8:12], loIP)
-	copy(buf[12:16], hiIP)
-	sum := sha256.Sum256(buf[:])
-	return lo + time.Duration(binary.BigEndian.Uint64(sum[:8])%span)
+	return uint64(binary.BigEndian.Uint32(a4))<<32 | uint64(binary.BigEndian.Uint32(b4))
 }
 
 // pickSupernodes returns exactly round(frac*n) supernode ids via a seeded
 // shuffle — a pure function of (n, frac, seed).
 func pickSupernodes(n int, frac float64, seed uint64) map[int]bool {
 	k := int(frac*float64(n) + 0.5)
-	r := rand.New(rand.NewPCG(seed, 0x5314e7))
+	r := rand.New(rand.NewPCG(seed, supersStream))
 	perm := r.Perm(n)
 	set := make(map[int]bool, k)
 	for _, id := range perm[:k] {
@@ -190,7 +205,7 @@ func peerGraph(n, p int, seed uint64) [][]int {
 	for i := range n { // ring backbone
 		add(i, (i+1)%n)
 	}
-	r := rand.New(rand.NewPCG(seed, 0x9e3779b9))
+	r := rand.New(rand.NewPCG(seed, peersStream))
 	for i := range n {
 		for tries := 0; len(adj[i]) < p && tries < p*4; tries++ {
 			add(i, r.IntN(n))

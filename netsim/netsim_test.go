@@ -1,6 +1,7 @@
 package netsim
 
 import (
+	"net"
 	"slices"
 	"testing"
 	"testing/synctest"
@@ -14,20 +15,27 @@ const (
 	testHi = 150 * time.Millisecond
 )
 
-func TestPairLatencySymmetricStableInRange(t *testing.T) {
-	seed := uint64(42)
+func pkt(i, j int) *simnet.Packet {
+	return &simnet.Packet{
+		From: &net.UDPAddr{IP: simnet.IntToPublicIPv4(i)},
+		To:   &net.UDPAddr{IP: simnet.IntToPublicIPv4(j)},
+	}
+}
+
+func TestLatencyFuncStableSymmetricInRange(t *testing.T) {
+	const n = 50
+	f := latencyFunc(n, 42, testLo, testHi)
 	seen := map[time.Duration]int{}
-	for i := range 50 {
-		for j := i + 1; j < 50; j++ {
-			a, b := simnet.IntToPublicIPv4(i), simnet.IntToPublicIPv4(j)
-			d := pairLatency(seed, testLo, testHi, a, b)
+	for i := range n {
+		for j := i + 1; j < n; j++ {
+			d := f(pkt(i, j))
 			if d < testLo || d >= testHi {
 				t.Fatalf("(%d,%d): latency %v out of [%v,%v)", i, j, d, testLo, testHi)
 			}
-			if rev := pairLatency(seed, testLo, testHi, b, a); rev != d {
+			if rev := f(pkt(j, i)); rev != d {
 				t.Fatalf("(%d,%d): asymmetric %v vs %v", i, j, d, rev)
 			}
-			if again := pairLatency(seed, testLo, testHi, a, b); again != d {
+			if again := f(pkt(i, j)); again != d {
 				t.Fatalf("(%d,%d): unstable %v vs %v", i, j, d, again)
 			}
 			seen[d]++
@@ -35,6 +43,11 @@ func TestPairLatencySymmetricStableInRange(t *testing.T) {
 	}
 	if len(seen) < 50 { // expect a spread of distinct values, not a constant
 		t.Fatalf("latency not varied: only %d distinct values", len(seen))
+	}
+
+	// lo == hi yields a fixed latency.
+	if d := latencyFunc(4, 1, testLo, testLo)(pkt(0, 1)); d != testLo {
+		t.Fatalf("static latency = %v, want %v", d, testLo)
 	}
 }
 

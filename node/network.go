@@ -44,6 +44,10 @@ func PeerIDFromNodeNum(nodeNum int) (peer.ID, error) {
 // MessageIDFunc is the gossipsub message-id function used across the
 // simulation. Hash of (topic, topic_len, data) truncated to 20 hex chars.
 func MessageIDFunc(msg *pspb.Message) string {
-	h := sha256.Sum256(fmt.Appendf(nil, "%s%d%s", *msg.Topic, len(*msg.Topic), string(msg.Data)))
-	return hex.EncodeToString(h[:])[:20]
+	// Stream topic||len(topic)||data into the hasher — same byte sequence as the
+	// reference, but no full copies of the (128 KiB) payload on this hot path.
+	h := sha256.New()
+	fmt.Fprintf(h, "%s%d", *msg.Topic, len(*msg.Topic))
+	h.Write(msg.Data)
+	return hex.EncodeToString(h.Sum(nil))[:20]
 }
