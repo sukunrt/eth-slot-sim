@@ -1,0 +1,28 @@
+# Mainnet-scale block dissemination: 1000 nodes, 1 MiB blocks, 20% super nodes.
+# Heavy — run on the remote box (sukun@ethp2p), not locally. Bring-up mirrors
+# batched-attestation-sim: each host dials peers, waits a random 0-30s, joins the
+# topic, then settles for the rest of the startup window before slot 0.
+topology:
+  num_nodes: 1000
+  degree: 8
+  type: random
+  seed: 42
+  super_node_fraction: 0.2     # 20% super nodes (1024/1024 Mbit); rest 25/50
+  latency_multiple: 1.0
+  min_node_to_node_latency_ms: 0
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+num_slots: 5
+slot_duration_seconds: 12
+block_size: 1048576            # 1 MiB
+verify_delay_ms: 10
+offset_ms: 0
+jitter_ms: 2000
+startup_seconds: 150          # boot + dial + 0-30s join stagger + ~2 min settle
+stop_time_minutes: 8          # 150 startup + 60 run + 30 drain = 240s, with margin
+log_level: warning            # 1000 hosts: keep Shadow's own log small
+seed: 1
