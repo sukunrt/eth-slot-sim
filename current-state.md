@@ -22,9 +22,14 @@ relays it; arrival time is recorded.
   CSV. The `testing/synctest` unit tests cover the same stack with assertions;
   `netsim.New` (random graph + uniform latency) lives there for quick tests.
 - **Shadow** — `cmd/slot-sim-node`: one real libp2p/QUIC process **per node**,
-  N of them launched by Shadow. Orchestrated by the `simctl` Python CLI (local).
-  Verified locally (Shadow 3.3.0): 25 nodes / 5 slots → **120/120 arrivals, 0
-  missing, 0 duplicates**, CDF p50=598ms … p100=1166ms.
+  N of them launched by Shadow. Orchestrated by the `simctl` Python CLI, locally
+  or on a remote box (`--remote sukun@ethp2p`). Each host staggers bring-up like
+  `../batched-attestation-sim` — dial peers, random 0-30s pause, join the topic,
+  then settle to slot 0 over the `-startup` window — so a large fleet doesn't
+  GRAFT in lockstep. Verified: 25 nodes / 5 slots (local, Shadow 3.3.0) →
+  **120/120, 0 missing**, p50=598ms … p100=1166ms; and **1000 nodes / 1 MiB
+  blocks / 5 slots on ethp2p → 4995/4995, 0 missing**, p50=3.8s … p100=6.5s
+  (`configs/n1000_1mb.yaml`; see `run.md`).
 
 ### The one seam
 `node.Network` (`PeerAddr(nodeNum) → multiaddr`) is the only thing that differs
@@ -81,7 +86,9 @@ netsim/topology.go           Topology types + LoadTopology (consumes simctl topo
 simctl/                      config.py, topology.py, runner.py, main.py (run/compare, --remote), remote.py, manifest.py
 analysis/check_arrivals.py   receipt check + CDF (cdf/delays_from_csv reused by compare)
 configs/smoke.yaml           25-node / 5-slot local Shadow smoke run
+configs/n1000_1mb.yaml       1000-node / 1 MiB mainnet-scale run (ethp2p)
 docs/shadow-manual-test.md   expected vs actual for the Shadow run
+run.md                       n1000 run: result + fetch / re-run instructions
 ```
 
 ## How to run
@@ -94,9 +101,9 @@ python analysis/check_arrivals.py runs/smoke/run-*
 # Shadow on the remote box (mainnet-scale): same code path as local. rsyncs the
 # repo (respecting .gitignore), then uv sync + build + run there, then tarballs the
 # output dir. The whole repo is synced, so configs/ resolve as-is on the remote.
-uv run simctl run --config configs/smoke.yaml --remote sukun@ethp2p --output-dir runs/mainnet
+uv run simctl run --config configs/n1000_1mb.yaml --remote sukun@ethp2p --output-dir runs/n1000-1mb
 # preview the rsync/ssh commands without touching the remote:
-uv run simctl run --config configs/smoke.yaml --remote sukun@ethp2p --dry-run
+uv run simctl run --config configs/n1000_1mb.yaml --remote sukun@ethp2p --dry-run
 
 # Same topology on BOTH backends (simnet runs under synctest), side-by-side CDF
 uv run simctl compare --config configs/smoke.yaml --output-dir runs/compare
@@ -113,11 +120,18 @@ uv run pytest        # topology / config / runner / remote / check_arrivals
 ## Gotchas / things to watch
 - **Shadow rejects fractional `stop_time`** — emit whole minutes ("5 min", not
   "5.0 min"). Handled in `runner._stop_time_minutes`.
-- **Connect race**: every host starts at sim-time 0; `node.ConnectToPeers` does a
-  single `ctx.Background()` dial and relies on QUIC handshake retransmission +
-  the `-startup` window (default 60s) to absorb start skew. Fine at N=25; if edges
-  drop at larger N, add a bounded retry in `node.ConnectToPeers` (harmless for
-  simnet).
+- **gossipsub max message size is 10 MiB** (mainnet `GOSSIP_MAX_SIZE`, set in
+  `node.Start`). The library default is 1 MiB, which **silently drops a 1 MiB
+  block** once wrapped in its protobuf/pubsub envelope (the first n1000 run got
+  0/4995, no error). `driver.TestLargeBlockDisseminates` (5-node simnet) guards it.
+- **Bring-up at scale**: every host starts at sim-time 0; `node.ConnectToPeers`
+  does a single `ctx.Background()` dial (no retry), relying on QUIC handshake
+  retransmission + the `-startup` window to absorb start skew. Each host then
+  pauses a random 0-30s before joining the topic so the fleet doesn't GRAFT in
+  lockstep (`meshJoinStagger`); `-startup` must exceed it (guarded in `main`). At
+  **N=1000 with `startup_seconds: 150`: 0 connect failures, 0 missing.** If edges
+  ever drop at larger N, add a bounded retry in `ConnectToPeers` (harmless for
+  simnet). The post-run drain is 30s so a 1 MiB block's tail isn't cut off.
 - **Clock alignment**: `runStart = programStart + startup`, with `programStart`
   captured as the first statement in `main`, so every host agrees on slot 0. Holds
   only while hosts start at `start_time: 0 sec`.
@@ -136,8 +150,9 @@ uv run pytest        # topology / config / runner / remote / check_arrivals
    rsync/ssh commands without touching the remote. Ported from
    `../batched-attestation-sim` (`simctl/remote.py`); `tests/test_remote.py` asserts
    the command contract. Use it to climb N on `sukun@ethp2p` (step 3).
-3. **Scale-out (plan.md Phase 4).** Climb N under Shadow; watch the connect
-   race/startup window; find the ceiling. Add CDF/percentile tooling for sweeps.
+3. **Scale-out (plan.md Phase 4).** **N=1000 / 1 MiB runs clean on ethp2p
+   (4995/4995, 0 missing).** Climb further; find the ceiling; watch the
+   startup/stagger window; add CDF/percentile tooling for block-size / N sweeps.
 4. **More messages (plan.md Phase 1 steps 4-6 → Phase 2/5).** Attestations
    (validator gains an attest duty + `makeAttestation`; the node loop is
    unchanged), then aggregates, data columns, then gloas.
