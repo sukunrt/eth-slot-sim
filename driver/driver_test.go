@@ -11,6 +11,49 @@ import (
 	"github.com/ethp2p/slot-sim/netsim"
 )
 
+// A block larger than gossipsub's default 1 MiB max message size must still
+// disseminate. A 1 MiB block plus its pubsub envelope exceeds the default, so
+// without node.go's WithMaxMessageSize every receiver silently drops it. This is
+// a message-size limit, not a scale effect, so it reproduces at N=5: pre-fix this
+// gets 0 of 4 arrivals.
+func TestLargeBlockDisseminates(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			n         = 5
+			slotDur   = 12 * time.Second
+			numSlots  = 1
+			blockSize = 1024 * 1024 // 1 MiB — over the pubsub 1 MiB default once enveloped
+		)
+		nw, err := netsim.New(netsim.Config{
+			N: n, P: 4, SuperFrac: 0.0, Seed: 1,
+			MinLatency: 10 * time.Millisecond, MaxLatency: 50 * time.Millisecond,
+		})
+		if err != nil {
+			t.Fatalf("netsim: %v", err)
+		}
+		t.Cleanup(nw.Close)
+
+		rec := metrics.NewRecorder()
+		d := driver.New(nw, driver.Config{
+			BlockSize: blockSize, SlotDuration: slotDur, Jitter: time.Second,
+			VerifyDelay: func() time.Duration { return 0 },
+			D:           8, Dlo: 6, Dhi: 12, Seed: 99,
+		}, rec)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		if err := d.BringUp(ctx); err != nil {
+			t.Fatal(err)
+		}
+		d.Run(ctx, time.Now(), numSlots)
+
+		if want := numSlots * (n - 1); len(rec.Arrivals()) != want {
+			t.Fatalf("1 MiB block: got %d arrivals, want %d — large block not disseminating "+
+				"(gossipsub WithMaxMessageSize)", len(rec.Arrivals()), want)
+		}
+	})
+}
+
 // N nodes, cyclic proposer, multi-slot run driven by the Driver. Every
 // non-proposer receives each block exactly once, and the arrival spread is
 // multi-hop.

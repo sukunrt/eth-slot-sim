@@ -71,6 +71,10 @@ func (n *Node) Start(ctx context.Context) error {
 	params.HistoryLength = 6
 	params.HistoryGossip = 3
 
+	// maxMessageSize matches Ethereum mainnet's GOSSIP_MAX_SIZE (10 MiB). The
+	// pubsub default is 1 MiB, which silently drops a 1 MiB block once wrapped in
+	// its protobuf/pubsub envelope.
+	const maxMessageSize = 10 * 1024 * 1024
 	ps, err := pubsub.NewGossipSub(ctx, n.Host,
 		pubsub.WithGossipSubParams(params),
 		pubsub.WithMessageIdFn(MessageIDFunc),
@@ -78,6 +82,7 @@ func (n *Node) Start(ctx context.Context) error {
 		pubsub.WithNoAuthor(),
 		pubsub.WithPeerOutboundQueueSize(1000),
 		pubsub.WithValidateQueueSize(600),
+		pubsub.WithMaxMessageSize(maxMessageSize),
 	)
 	if err != nil {
 		return err
