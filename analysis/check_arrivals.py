@@ -9,6 +9,7 @@ the arrival-delay percentiles. Stdlib only.
 Usage: python analysis/check_arrivals.py <run-dir>
 """
 
+import csv
 import json
 import math
 import re
@@ -87,6 +88,25 @@ def percentile(values: list[float], p: float) -> float:
     s = sorted(values)
     rank = max(math.ceil(p / 100 * len(s)), 1)
     return s[rank - 1]
+
+
+def cdf(delays_ms: list[float]) -> dict[str, float]:
+    """Headline arrival CDF (count + p50/p90/p99/p100). One place computes
+    percentiles so the Shadow and simnet backends are summarized identically."""
+    return {
+        "count": len(delays_ms),
+        "p50": percentile(delays_ms, 50),
+        "p90": percentile(delays_ms, 90),
+        "p99": percentile(delays_ms, 99),
+        "p100": percentile(delays_ms, 100),
+    }
+
+
+def delays_from_csv(path: Path) -> list[float]:
+    """Arrival delays (ms) from a slot-sim CSV (node,slot,origin,delay_ms) — the
+    simnet backend's output, read in the same units as the Shadow path's delays."""
+    with open(path, newline="") as f:
+        return [float(row["delay_ms"]) for row in csv.DictReader(f)]
 
 
 def load_run(run_dir: Path) -> tuple[Publishes, list[Arrival], set[int]]:

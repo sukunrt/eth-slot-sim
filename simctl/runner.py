@@ -7,6 +7,7 @@ per node.
 """
 
 import math
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -14,8 +15,9 @@ from typing import Any
 
 import yaml
 
+from analysis import check_arrivals
 from simctl.config import SimConfig
-from simctl.manifest import format_dir_timestamp, random_suffix
+from simctl.manifest import format_dir_timestamp, random_suffix, write_json_atomic
 from simctl.topology import (
     Topology,
     generate_random_topology,
@@ -143,12 +145,36 @@ def write_shadow_config(config_dict: dict[str, Any], path: Path) -> None:
 
 
 def build_node(output_path: Path) -> None:
-    """Build the slot-sim-node Go binary to output_path."""
+    """Build the slot-sim-node Go binary (one Shadow host) to output_path."""
+    _go_build("./cmd/slot-sim-node", output_path)
+
+
+def _go_build(pkg: str, output_path: Path) -> None:
     subprocess.run(
-        ["go", "build", "-buildvcs=false", "-o", str(output_path.resolve()), "./cmd/slot-sim-node"],
+        ["go", "build", "-buildvcs=false", "-o", str(output_path.resolve()), pkg],
         check=True,
         cwd=get_root(),
     )
+
+
+def _simnet_params(config: SimConfig) -> dict[str, Any]:
+    """Scenario knobs for the simnet (synctest) backend, matching the Shadow run.
+    The harness reads these as JSON via SIMRUN_PARAMS; topology and csv paths are
+    added per-run by run_simnet. latency_multiple mirrors the scaling generate_gml
+    applies for Shadow."""
+    return {
+        "latency_multiple": config.topology.latency_multiple,
+        "num_slots": config.num_slots,
+        "slot_seconds": config.slot_duration_seconds,
+        "block_size": config.block_size,
+        "verify_ms": config.verify_delay_ms,
+        "offset_ms": config.offset_ms,
+        "jitter_ms": config.jitter_ms,
+        "d": config.gossipsub.D,
+        "dlo": config.gossipsub.Dlow,
+        "dhi": config.gossipsub.Dhigh,
+        "seed": config.seed,
+    }
 
 
 def _build_topology(config: SimConfig) -> Topology:
@@ -199,18 +225,77 @@ def prepare_run_dir(config: SimConfig, output_dir: Path) -> Path:
     return run_dir
 
 
+def _run_shadow(run_dir: Path) -> subprocess.CompletedProcess:
+    """Build the node binary into run_dir and run shadow there, logging to
+    shadow.log. Assumes shadow.yaml + topology.json already exist in run_dir."""
+    build_node(run_dir / "slot-sim-node")
+    with open(run_dir / "shadow.log", "w") as log_file:
+        return subprocess.run(["shadow", "shadow.yaml"], cwd=run_dir, stdout=log_file, stderr=log_file)
+
+
 def run_simulation(config: SimConfig, output_dir: Path) -> tuple[Path, subprocess.CompletedProcess]:
     """Build, configure, and run one block-dissemination Shadow simulation.
 
     Returns (run_dir, completed_process).
     """
     run_dir = prepare_run_dir(config, output_dir)
-    build_node(run_dir / "slot-sim-node")
-
-    log_path = run_dir / "shadow.log"
-    with open(log_path, "w") as log_file:
-        result = subprocess.run(["shadow", "shadow.yaml"], cwd=run_dir, stdout=log_file, stderr=log_file)
-
+    result = _run_shadow(run_dir)
     print(f"Shadow completed. Results in: {run_dir}")
     print(f"Exit code: {result.returncode}")
     return run_dir, result
+
+
+def run_simnet(config: SimConfig, run_dir: Path) -> Path:
+    """Run the in-process simnet backend on run_dir/topology.json under synctest —
+    the only clock under which simnet's timing is meaningful (a plain binary on the
+    OS clock measures scheduler latency, not the network) — with the same scenario
+    knobs as the Shadow run, logging to simnet.log. synctest runs only under
+    `go test`, so the backend is the TestRun harness driven via -tags simnetrun and
+    a SIMRUN_PARAMS JSON. Returns the arrival CSV path."""
+    csv_path = run_dir / "simnet_arrivals.csv"
+    params = _simnet_params(config)
+    params["topology"] = str((run_dir / "topology.json").resolve())
+    params["csv"] = str(csv_path.resolve())
+    params_path = run_dir / "simnet_params.json"
+    write_json_atomic(params_path, params)
+
+    env = {**os.environ, "SIMRUN_PARAMS": str(params_path.resolve())}
+    cmd = ["go", "test", "-tags", "simnetrun", "-run", "TestRun",
+           "-count=1", "-timeout", "600s", "./simnetrun"]
+    with open(run_dir / "simnet.log", "w") as log_file:
+        subprocess.run(cmd, cwd=get_root(), env=env, stdout=log_file, stderr=log_file, check=True)
+    return csv_path
+
+
+def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
+    """Run one topology on both backends and return (and save) their arrival CDFs.
+
+    A single run dir is generated; its topology.json is consumed by both Shadow
+    and simnet, so the only difference between the two runs is the network
+    backend and the CDFs compare like for like. Writes compare.json."""
+    run_dir = prepare_run_dir(config, output_dir)
+
+    shadow_proc = _run_shadow(run_dir)
+    if shadow_proc.returncode != 0:
+        raise RuntimeError(f"shadow failed (exit {shadow_proc.returncode}); see {run_dir}/shadow.log")
+    pubs, arrs, node_nums = check_arrivals.load_run(run_dir)
+    shadow_res = check_arrivals.analyze(pubs, arrs, node_nums)
+
+    simnet_delays = check_arrivals.delays_from_csv(run_simnet(config, run_dir))
+
+    comparison = {
+        "run_dir": str(run_dir),
+        "expected_arrivals": shadow_res.expected,
+        "shadow": {
+            "arrivals": shadow_res.arrivals,
+            "missing": len(shadow_res.missing),
+            "duplicates": len(shadow_res.duplicates),
+            "cdf_ms": check_arrivals.cdf(shadow_res.delays_ms),
+        },
+        "simnet": {
+            "arrivals": len(simnet_delays),
+            "cdf_ms": check_arrivals.cdf(simnet_delays),
+        },
+    }
+    write_json_atomic(run_dir / "compare.json", comparison)
+    return comparison

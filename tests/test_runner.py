@@ -61,6 +61,22 @@ def test_generate_shadow_yaml_structure():
     assert sh["general"]["stop_time"].endswith("min")
 
 
+def test_simnet_params_match_scenario():
+    # The simnet backend (a synctest go-test harness) takes the same scenario knobs
+    # as a Shadow host; topology and csv paths are added per-run by run_simnet.
+    assert runner._simnet_params(config.SimConfig()) == {
+        "latency_multiple": 1.0,
+        "num_slots": 5,
+        "slot_seconds": 12,
+        "block_size": 131072,
+        "verify_ms": 10,
+        "offset_ms": 0,
+        "jitter_ms": 2000,
+        "d": 8, "dlo": 6, "dhi": 12,
+        "seed": 1,
+    }
+
+
 def test_stop_time_covers_startup_slots_drain():
     # startup 120s + 10 slots * 12s + drain/margin > config's 1 min floor.
     cfg = config.SimConfig(num_slots=10, slot_duration_seconds=12,

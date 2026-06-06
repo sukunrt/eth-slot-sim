@@ -56,3 +56,17 @@ def test_percentile_nearest_rank():
     assert ca.percentile(delays, 50) == 50.0
     assert ca.percentile(delays, 99) == 99.0
     assert ca.percentile(delays, 100) == 100.0
+
+
+def test_cdf_summary():
+    delays = [float(x) for x in range(1, 101)]  # 1..100 ms
+    assert ca.cdf(delays) == {
+        "count": 100, "p50": 50.0, "p90": 90.0, "p99": 99.0, "p100": 100.0,
+    }
+
+
+def test_delays_from_csv(tmp_path):
+    # Matches the slot-sim Recorder.WriteCSV header + integer-ms rows.
+    csv_path = tmp_path / "simnet_arrivals.csv"
+    csv_path.write_text("node,slot,origin,delay_ms\n1,0,0,500\n2,0,0,1000\n")
+    assert ca.delays_from_csv(csv_path) == [500.0, 1000.0]

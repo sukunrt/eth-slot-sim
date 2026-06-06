@@ -54,7 +54,7 @@ calibration. The Node/Validator split is *built so these slot in*; only the bloc
 
 ```
 go.mod                  module <path> (proposed github.com/ethp2p/slot-sim), go 1.25+
-cmd/slot-sim/main.go    wall-clock simnet driver: build scenario → run → print CDF
+simnetrun/run_test.go   simnet backend: TestRun runs the driver under synctest (-tags simnetrun)
 node/                   Node: host, gossipsub, topics, peers, slot loop, send/recv, metrics hookup
 validator/              Validator + Duty + Message + block creation (makeBlock)
 netsim/                 simnet module: hosts, random latency, bandwidth classes, Network seam
@@ -209,10 +209,13 @@ prefer full-mesh-with-flood-publish-off.)
   Run `X ≥ N·S` to let every node propose at least once.
 - **Publish time:** the proposer publishes at `slotStart(k) + offset + rand(0,K)` — the jitter
   spreads proposal times into a realistic distribution (`slot-messages.md` §4.1 relay offset).
-- Same loop under two clocks:
-  - **`cmd/slot-sim` binary** — wall-clock simnet, real time. For runs by hand (smaller `N`).
-  - **`node/` tests** — `testing/synctest`, virtual clock: the whole `X`-second run is instant
-    and deterministic, with real gossipsub. Where exact, repeatable numbers come from.
+- The simnet loop runs under `testing/synctest`'s virtual clock — the only valid
+  simnet clock: the whole `X`-second run is instant and deterministic, with real
+  gossipsub. The `simnetrun` harness (`-tags simnetrun`) drives a full run and the
+  `node/`/`driver/` tests assert on it. (An earlier plan also ran a wall-clock
+  binary "for runs by hand"; on the OS clock that measured scheduler latency, not
+  the network — it was the 45% red herring and has been removed. See
+  `shadow-simnet.md`.)
 
 Defaults for `X, S, offset, K` in §10 (confirm Q13).
 
@@ -237,7 +240,7 @@ Per `scaling.md` §9, Phase-1 subset — **arrival time only** (hop depth deferr
 3. **N nodes, one global topic, cyclic proposer, `X`-second run**; every node records each
    block's arrival. Assert: every non-proposer receives each block exactly once; arrival spread
    looks multi-hop (not all ~1 hop) — the flood-publish/connectivity check from §6.
-4. **Driver** (`cmd/slot-sim`): wall-clock run, prints the arrival CDF.
+4. **Driver** (`simnetrun.TestRun`): synctest run, writes the arrival CDF/CSV.
 
 ---
 
