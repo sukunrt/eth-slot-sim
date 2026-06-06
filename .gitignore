@@ -1,0 +1,13 @@
+# Go
+/slot-sim-node
+/slot-sim
+
+# simctl run outputs
+/runs/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
