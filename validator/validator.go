@@ -5,11 +5,10 @@
 package validator
 
 import (
-	"encoding/binary"
+	"bytes"
 	"math/rand/v2"
 	"time"
 
-	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ethp2p/slot-sim/pb"
@@ -61,46 +60,19 @@ func (v *Validator) Duties(slot int) []Duty {
 	return []Duty{{Msg: makeBlock(slot, v.self, v.blockSize), At: at}}
 }
 
-// makeBlock builds a Block whose marshaled size is exactly target bytes, with
-// random (incompressible) filler. The header size is measured, not assumed:
-// proto3 omits zero-valued fields and varint widths grow with the value, so the
-// payload length is solved against the actual header and length-prefix width.
-func makeBlock(slot, origin, target int) Message {
-	blk := &pb.Block{Slot: uint32(slot), Origin: uint32(origin)}
-	header := proto.Size(blk) // slot + origin fields, payload still empty
-
-	// marshaled = header + 1 (payload tag) + SizeVarint(len) + len == target.
-	// Find the length-prefix width lv that's self-consistent with the length.
-	rem := target - header - 1
-	payloadLen := -1
-	for lv := 1; lv <= protowire.SizeVarint(uint64(target)); lv++ {
-		if n := rem - lv; n >= 0 && protowire.SizeVarint(uint64(n)) == lv {
-			payloadLen = n
-			break
-		}
+// makeBlock builds a block-sized Message: a pb.Block carrying size bytes of
+// all-ones filler (non-zero so proto3 doesn't drop it). The slot/origin fields
+// add a negligible handful of header bytes — we don't size to an exact wire
+// total.
+func makeBlock(slot, origin, size int) Message {
+	blk := &pb.Block{
+		Slot:    uint32(slot),
+		Origin:  uint32(origin),
+		Payload: bytes.Repeat([]byte{1}, size),
 	}
-	if payloadLen < 0 {
-		panic("makeBlock: target too small for header")
-	}
-
-	blk.Payload = randomFiller(slot, payloadLen)
 	buf, err := proto.Marshal(blk)
 	if err != nil {
 		panic("makeBlock: marshal: " + err.Error())
 	}
-	if len(buf) != target {
-		panic("makeBlock: sized payload but marshaled size != target")
-	}
 	return Message{Topic: BlockTopic, Payload: buf, Slot: slot}
-}
-
-// randomFiller returns n incompressible bytes, deterministic per slot so runs
-// are reproducible under synctest.
-func randomFiller(slot, n int) []byte {
-	var seed [32]byte
-	binary.BigEndian.PutUint64(seed[:], uint64(slot))
-	r := rand.NewChaCha8(seed)
-	b := make([]byte, n)
-	r.Read(b)
-	return b
 }
