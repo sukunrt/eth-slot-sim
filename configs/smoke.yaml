@@ -1,0 +1,26 @@
+# Small local Shadow smoke run: 25 nodes, 5 slots (proposers node 0..4).
+# Proves block dissemination — every non-proposer receives each block.
+topology:
+  num_nodes: 25
+  degree: 8
+  type: random
+  seed: 42
+  super_node_fraction: 0.1
+  latency_multiple: 1.0
+  min_node_to_node_latency_ms: 0
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+num_slots: 5
+slot_duration_seconds: 12
+block_size: 131072       # 128 KiB
+verify_delay_ms: 10
+offset_ms: 0
+jitter_ms: 2000
+startup_seconds: 60
+stop_time_minutes: 5
+log_level: info
+seed: 1
