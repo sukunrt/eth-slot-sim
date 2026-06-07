@@ -101,7 +101,7 @@ func rawDuties(a *Assignment, node, slot int) []AttestDuty {
 // committee as an in-memory literal — no Python, no file — and exercise the accessors.
 func TestLiteralAssignmentAccessors(t *testing.T) {
 	a := &Assignment{
-		Params:            Params{N: 4, V: 8, C: 2, Sc: 2, SubnetCount: 64, BackbonePerNode: 1, NumSlots: 1},
+		Params:            Params{N: 4, V: 8, C: 2, Sc: 2, SubnetCount: 64, SubnetsPerNode: 1, NumSlots: 1},
 		SubnetSubscribers: [][]int{{1, 2, 3}, {0, 2}},
 		Slots: []SlotPlan{{
 			Slot: 0,

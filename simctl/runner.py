@@ -39,7 +39,7 @@ def _committee_assignment(config: SimConfig) -> committee.Assignment | None:
             c=a.committees,
             sc=a.committee_size,
             subnet_count=a.subnet_count,
-            backbone_per_node=a.backbone_per_node,
+            subnets_per_node=a.subnets_per_node,
             subscribe_floor=a.subscribe_floor,
             seed=config.seed,
             num_slots=config.num_slots,

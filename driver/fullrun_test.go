@@ -44,7 +44,7 @@ func TestFullRunKGreaterThanOne(t *testing.T) {
 		// vals 0 and 4 both live on node 0 (val % 4) ⇒ k=2; node 0 is not a subscriber of
 		// subnet 0, so it dials in.
 		a := &committee.Assignment{
-			Params: committee.Params{N: 4, V: 8, C: 1, Sc: 2, SubnetCount: 64, BackbonePerNode: 1, SubscribeFloor: 3, NumSlots: 1},
+			Params:            committee.Params{N: 4, V: 8, C: 1, Sc: 2, SubnetCount: 64, SubnetsPerNode: 1, SubscribeFloor: 3, NumSlots: 1},
 			SubnetSubscribers: [][]int{{1, 2, 3}},
 			Slots: []committee.SlotPlan{{
 				Slot: 0,

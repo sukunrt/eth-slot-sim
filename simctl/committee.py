@@ -26,7 +26,7 @@ class Params:
     c: int  # committees per slot (= active attestation subnets)
     sc: int  # committee size (attesters per committee per slot)
     subnet_count: int = 64
-    backbone_per_node: int = 2  # subnets a node subscribes (capped at C)
+    subnets_per_node: int = 2  # subnets a node subscribes (capped at C)
     subscribe_floor: int = 10  # min subscribers per active subnet
     seed: int = 1
     num_slots: int = 1
@@ -61,7 +61,7 @@ class Assignment:
                 "c": self.params.c,
                 "sc": self.params.sc,
                 "subnet_count": self.params.subnet_count,
-                "backbone_per_node": self.params.backbone_per_node,
+                "subnets_per_node": self.params.subnets_per_node,
                 "subscribe_floor": self.params.subscribe_floor,
                 "seed": self.params.seed,
                 "num_slots": self.params.num_slots,
@@ -110,11 +110,11 @@ def generate(p: Params) -> Assignment:
 
 
 def _subnet_subscribers(p: Params) -> list[list[int]]:
-    """Stable subscribe set: every node subscribes ``min(backbone_per_node, C)`` random
+    """Stable subscribe set: every node subscribes ``min(subnets_per_node, C)`` random
     active subnets, then any active subnet below the floor is topped up — so each active
     subnet has ≥ ``min(subscribe_floor, N)`` subscribers (its mesh core)."""
     rng = _rng(p.seed, 1)
-    spn = min(p.backbone_per_node, p.c)
+    spn = min(p.subnets_per_node, p.c)
     subs: list[set[int]] = [set() for _ in range(p.c)]
     for node in range(p.n):
         for s in rng.sample(range(p.c), spn):

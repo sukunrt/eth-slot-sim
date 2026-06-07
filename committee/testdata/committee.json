@@ -5,7 +5,7 @@
     "c": 2,
     "sc": 3,
     "subnet_count": 64,
-    "backbone_per_node": 1,
+    "subnets_per_node": 1,
     "subscribe_floor": 2,
     "seed": 1,
     "num_slots": 1

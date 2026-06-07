@@ -17,15 +17,15 @@ import (
 // Params are the assignment knobs (V, C, s_c independent; only C·s_c ≤ V is enforced,
 // in the generator). Fields mirror committee.json.
 type Params struct {
-	N               int    `json:"n"`
-	V               int    `json:"v"`
-	C               int    `json:"c"`
-	Sc              int    `json:"sc"`
-	SubnetCount     int    `json:"subnet_count"`
-	BackbonePerNode int    `json:"backbone_per_node"`
-	SubscribeFloor  int    `json:"subscribe_floor"`
-	Seed            uint64 `json:"seed"`
-	NumSlots        int    `json:"num_slots"`
+	N              int    `json:"n"`
+	V              int    `json:"v"`
+	C              int    `json:"c"`
+	Sc             int    `json:"sc"`
+	SubnetCount    int    `json:"subnet_count"`
+	SubnetsPerNode int    `json:"subnets_per_node"`
+	SubscribeFloor int    `json:"subscribe_floor"`
+	Seed           uint64 `json:"seed"`
+	NumSlots       int    `json:"num_slots"`
 }
 
 // AttesterRef is one committee seat: which node publishes, which validator, on which

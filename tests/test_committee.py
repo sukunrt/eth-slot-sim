@@ -15,7 +15,7 @@ from simctl import committee
 # Params of the committed Go contract-test fixture (committee/testdata/committee.json).
 _FIXTURE = Path(__file__).parent.parent / "committee" / "testdata" / "committee.json"
 _FIXTURE_PARAMS = committee.Params(
-    n=6, v=12, c=2, sc=3, backbone_per_node=1, subscribe_floor=2, seed=1, num_slots=1
+    n=6, v=12, c=2, sc=3, subnets_per_node=1, subscribe_floor=2, seed=1, num_slots=1
 )
 
 
@@ -68,14 +68,14 @@ def test_too_many_committees_for_subnets_raise():
 
 
 def test_subnet_subscribers_meet_floor_and_in_range():
-    p = committee.Params(n=30, v=60, c=4, sc=4, backbone_per_node=2, subscribe_floor=10)
+    p = committee.Params(n=30, v=60, c=4, sc=4, subnets_per_node=2, subscribe_floor=10)
     a = committee.generate(p)
     assert len(a.subnet_subscribers) == p.c
     for members in a.subnet_subscribers:
         assert len(members) >= min(p.subscribe_floor, p.n)  # floor per active subnet
         assert members == sorted(set(members))  # sorted, distinct
         assert all(0 <= m < p.n for m in members)
-    # Every node subscribes at least one subnet (~backbone_per_node, more after top-up).
+    # Every node subscribes at least one subnet (~subnets_per_node, more after top-up).
     cnt = Counter(m for members in a.subnet_subscribers for m in members)
     assert all(node in cnt for node in range(p.n))
 

@@ -171,8 +171,8 @@ func (n *Node) joinLocked(topic string) error {
 }
 
 // Subscribe joins topic's mesh (relays + receives), starting a receive goroutine.
-// Idempotent. Backbone subnets call this once; aggregators call it per slot and
-// Unsubscribe at slot end.
+// Idempotent. A node subscribes its own subnets once at bring-up; per-slot duty
+// subnets it doesn't subscribe are Join-only (publish-only fan-out).
 func (n *Node) Subscribe(topic string) error {
 	n.mu.Lock()
 	if err := n.joinLocked(topic); err != nil {

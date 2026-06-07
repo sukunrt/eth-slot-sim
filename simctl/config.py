@@ -43,7 +43,7 @@ class AttestationConfig(BaseModel):
     committees: int = 1  # C, active attestation subnets per slot
     committee_size: int = 8  # s_c, attesters per committee per slot
     subnet_count: int = 64
-    backbone_per_node: int = 2  # subnets each node subscribes (capped at C)
+    subnets_per_node: int = 2  # subnets each node subscribes (capped at C)
     subscribe_floor: int = 10  # min subscribers per active subnet
     attestation_due_ms: int = 4000  # ATTESTATION_DUE (3333 bp of a 12 s slot)
     prep_ms: int = 0  # Δ_prep before emitting on block receipt

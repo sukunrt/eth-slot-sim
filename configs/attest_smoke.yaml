@@ -21,7 +21,7 @@ attestation:
   committees: 2         # C active subnets/slot
   committee_size: 6     # s_c
   subnet_count: 64
-  backbone_per_node: 1  # each node subscribes 1 of the 2 subnets → attesters on the other dial in
+  subnets_per_node: 1  # each node subscribes 1 of the 2 subnets → attesters on the other dial in
   subscribe_floor: 7    # min subscribers per active subnet
   attestation_due_ms: 4000   # ATTESTATION_DUE (3333 bp of a 12 s slot)
   prep_ms: 0

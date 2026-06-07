@@ -150,7 +150,7 @@ func genAssignment(n, v, c, sc, spn, floor int, seed uint64) *committee.Assignme
 	return &committee.Assignment{
 		Params: committee.Params{
 			N: n, V: v, C: c, Sc: sc, SubnetCount: 64,
-			BackbonePerNode: spn, SubscribeFloor: floor, Seed: seed, NumSlots: 1,
+			SubnetsPerNode: spn, SubscribeFloor: floor, Seed: seed, NumSlots: 1,
 		},
 		SubnetSubscribers: subnetSubscribers,
 		Slots:             []committee.SlotPlan{sp},
@@ -239,7 +239,7 @@ func oneCommittee(n int, attesters []int) *committee.Assignment {
 	return &committee.Assignment{
 		Params: committee.Params{
 			N: n, V: n, C: 1, Sc: len(attesters), SubnetCount: 64,
-			BackbonePerNode: 1, SubscribeFloor: len(attesters), Seed: 1, NumSlots: 1,
+			SubnetsPerNode: 1, SubscribeFloor: len(attesters), Seed: 1, NumSlots: 1,
 		},
 		SubnetSubscribers: [][]int{slices.Sorted(slices.Values(attesters))},
 		Slots: []committee.SlotPlan{{
