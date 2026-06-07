@@ -74,13 +74,14 @@ type Node struct {
 	wg     sync.WaitGroup
 }
 
-// Start brings up gossipsub with the Prysm-tuned parameters. Flood-publish is on (a
-// mainnet/scaling.md invariant): the originator sends each publish to every topic peer
-// it knows, not just its mesh — relays still use the mesh, so multi-hop spread is
-// preserved, but a publisher reaches subscribers even on a subnet it just joined. The
-// block→attestation coupling emits as soon as the block is processed, before a per-slot
-// aggregator's mesh has grafted, so this is load-bearing. ctx is the pubsub lifecycle
-// context.
+// Start brings up gossipsub with the Prysm-tuned parameters (D/Dlo/Dhi, 700ms heartbeat,
+// 60s fanout TTL, mcache 6/3). Flood-publish is intentionally OFF, matching Prysm/mainnet
+// (go-libp2p-pubsub defaults it off, and Prysm sets no WithFloodPublish): a publisher
+// pushes to its mesh and relays carry it multi-hop. A node publishing on a duty subnet it
+// only Joined (no mesh) still reaches subscribers via gossipsub fanout — it has dialed 2 of
+// them at slot start, so the fanout has somewhere to land. Flooding instead would make the
+// proposer upload K copies of the block (K×size), which a low-bandwidth proposer can't push
+// at large K. ctx is the pubsub lifecycle context.
 func (n *Node) Start(ctx context.Context) error {
 	params := pubsub.DefaultGossipSubParams()
 	params.D = n.D
@@ -102,7 +103,6 @@ func (n *Node) Start(ctx context.Context) error {
 		pubsub.WithMessageIdFn(MessageIDFunc),
 		pubsub.WithMessageSignaturePolicy(pubsub.StrictNoSign),
 		pubsub.WithNoAuthor(),
-		pubsub.WithFloodPublish(true),
 		pubsub.WithPeerOutboundQueueSize(1000),
 		pubsub.WithValidateQueueSize(600),
 		pubsub.WithMaxMessageSize(maxMessageSize),

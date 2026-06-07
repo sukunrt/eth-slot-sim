@@ -159,8 +159,9 @@ the distribution.)
 (`V` and the distribution are *inputs*, not invariants; everything below stays at mainnet so
 the per-hop `X` only moves with depth.)
 
-- **GossipSub:** `D=8`, `D_low=6`, `D_high`, `D_lazy`, heartbeat, mcache, flood-publish, and
-  **`IDONTWANT`** (≥v1.2 — dominates duplicate suppression for block/columns).
+- **GossipSub:** `D=8`, `D_low=6`, `D_high`, `D_lazy`, heartbeat, mcache, and
+  **`IDONTWANT`** (≥v1.2 — dominates duplicate suppression for block/columns). Flood-publish
+  is **off**, matching Prysm/mainnet (a proposer pushes to its mesh, not to all K peers).
 - **Message sizes** (per `slot-messages.md`).
 - **Per-link latency distribution** — geographic RTT model; most of `X` for small messages.
 - **Per-node bandwidth distribution** — incl. operator skew, coupled to §5.
