@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/core/connmgr"
 	libp2pnet "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/x/simlibp2p"
 	"github.com/marcopolo/simnet"
@@ -126,6 +127,10 @@ func buildHosts(sim *simnet.Simnet, n int, linkOf func(int) simnet.NodeBiDiLinkS
 			simlibp2p.QUICSimnet(sim, linkOf(i)),
 			libp2p.DisableIdentifyAddressDiscovery(),
 			libp2p.ResourceManager(&libp2pnet.NullResourceManager{}),
+			// NullConnMgr like the Shadow host: without it libp2p.New falls back to a
+			// BasicConnMgr(160,192) that trims peers above the high-water mark, which
+			// would silently prune the bounded-K subnet graph (hub nodes can exceed it).
+			libp2p.ConnectionManager(&connmgr.NullConnMgr{}),
 		)
 		if err != nil {
 			for _, h := range hosts[:i] {
