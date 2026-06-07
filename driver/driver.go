@@ -91,10 +91,11 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 }
 
 // BringUp runs the start-up cadence: Start every node, settle, dial each node's
-// peers, join topics (which starts the receive loops), settle again so meshes
-// form before the first publish. The settle sleeps are load-bearing — publishing
-// before the mesh forms flakes.
-func (d *Driver) BringUp(ctx context.Context) error {
+// peers, join topics (which starts the receive loops), prepare attestation membership
+// (backbone meshes + duty-subnet joins for numSlots), settle again so meshes form
+// before the first publish. The settle sleeps are load-bearing — publishing before the
+// mesh forms flakes.
+func (d *Driver) BringUp(ctx context.Context, numSlots int) error {
 	for _, nd := range d.nodes {
 		if err := nd.Start(ctx); err != nil {
 			return err
@@ -110,7 +111,7 @@ func (d *Driver) BringUp(ctx context.Context) error {
 		}
 	}
 	for _, r := range d.runners {
-		r.SubscribeBackbone()
+		r.Prepare(numSlots)
 	}
 	time.Sleep(time.Second) // let block + backbone meshes form
 	return nil

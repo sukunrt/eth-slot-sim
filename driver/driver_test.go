@@ -42,7 +42,7 @@ func TestLargeBlockDisseminates(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		if err := d.BringUp(ctx); err != nil {
+		if err := d.BringUp(ctx, numSlots); err != nil {
 			t.Fatal(err)
 		}
 		d.Run(ctx, time.Now(), numSlots)
@@ -85,7 +85,7 @@ func TestNNodesCyclicDissemination(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		if err := d.BringUp(ctx); err != nil {
+		if err := d.BringUp(ctx, numSlots); err != nil {
 			t.Fatal(err)
 		}
 		d.Run(ctx, time.Now(), numSlots)

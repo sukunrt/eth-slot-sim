@@ -57,16 +57,31 @@ func NewRunner(num int, nd *node.Node, val *validator.Validator, comm *committee
 // Attach wires the runner as the node's receive sink. Call before JoinTopics.
 func (r *NodeRunner) Attach() { r.nd.OnReceive = r.onReceive }
 
-// SubscribeBackbone joins the node's long-lived backbone subnet meshes. Call during
-// bring-up (before the settle) so the meshes form before slot 0 — otherwise a fast
-// block-driven emit in slot 0 would publish into an ungrafted mesh and be lost.
-func (r *NodeRunner) SubscribeBackbone() {
+// Prepare joins the node's long-lived backbone subnet meshes and (publish-only) every
+// subnet it will attest on across the run. Call during bring-up (before the settle) so
+// both are processed before slot 0 — otherwise a fast block-driven emit in slot 0 would
+// publish into an ungrafted mesh or a topic the router hasn't set up yet, and be lost.
+// Per-slot aggregator subscribes still happen in beginSlot.
+func (r *NodeRunner) Prepare(numSlots int) {
 	if r.comm == nil {
 		return
 	}
-	for _, s := range r.comm.Node(r.num).Backbone() {
+	view := r.comm.Node(r.num)
+	for _, s := range view.Backbone() {
 		if err := r.nd.Subscribe(validator.AttestationTopic(s)); err != nil {
 			slog.Error("subscribe backbone failed", "node", r.num, "subnet", s, "err", err)
+		}
+	}
+	joined := map[int]bool{}
+	for slot := range numSlots {
+		for _, d := range view.AttestDuties(slot) {
+			if joined[d.Subnet] {
+				continue
+			}
+			joined[d.Subnet] = true
+			if err := r.nd.Join(validator.AttestationTopic(d.Subnet)); err != nil {
+				slog.Error("join duty subnet failed", "node", r.num, "subnet", d.Subnet, "err", err)
+			}
 		}
 	}
 }

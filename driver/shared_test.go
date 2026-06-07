@@ -61,7 +61,7 @@ func TestNodeRunnerPublishesBlock(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		if err := d.BringUp(ctx); err != nil {
+		if err := d.BringUp(ctx, 1); err != nil {
 			t.Fatal(err)
 		}
 		d.Run(ctx, time.Now(), 1) // slot 0 → node 0 proposes

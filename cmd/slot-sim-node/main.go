@@ -125,6 +125,7 @@ func main() {
 	if err := nd.JoinTopics(ctx); err != nil {
 		log.Fatalf("join topics: %v", err)
 	}
+	runner.Prepare(*numSlots) // backbone subscribe + duty-subnet joins, before the settle
 
 	runStart := programStart.Add(*startup)
 	time.Sleep(time.Until(runStart)) // chillax until slot 0 — every host has meshed

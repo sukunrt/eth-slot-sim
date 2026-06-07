@@ -81,9 +81,13 @@ type subState struct {
 	cancel context.CancelFunc
 }
 
-// Start brings up gossipsub with the Prysm-tuned parameters. It does not set
-// WithFloodPublish or WithPeerScore — matching Prysm, which leaves both at the
-// library default. ctx is the pubsub lifecycle context.
+// Start brings up gossipsub with the Prysm-tuned parameters. Flood-publish is on (a
+// mainnet/scaling.md invariant): the originator sends each publish to every topic peer
+// it knows, not just its mesh — relays still use the mesh, so multi-hop spread is
+// preserved, but a publisher reaches subscribers even on a subnet it just joined. The
+// block→attestation coupling emits as soon as the block is processed, before a per-slot
+// aggregator's mesh has grafted, so this is load-bearing. ctx is the pubsub lifecycle
+// context.
 func (n *Node) Start(ctx context.Context) error {
 	params := pubsub.DefaultGossipSubParams()
 	params.D = n.D
@@ -105,6 +109,7 @@ func (n *Node) Start(ctx context.Context) error {
 		pubsub.WithMessageIdFn(MessageIDFunc),
 		pubsub.WithMessageSignaturePolicy(pubsub.StrictNoSign),
 		pubsub.WithNoAuthor(),
+		pubsub.WithFloodPublish(true),
 		pubsub.WithPeerOutboundQueueSize(1000),
 		pubsub.WithValidateQueueSize(600),
 		pubsub.WithMaxMessageSize(maxMessageSize),

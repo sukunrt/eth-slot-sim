@@ -22,7 +22,7 @@ func TestCouplingForcedFlip(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		s.run(t, ctx, time.Now(), 1)
+		s.run(t, ctx, 1)
 
 		if got, want := rec.FractionVotedBlock(0), 2.0/3.0; got != want {
 			t.Fatalf("FractionVotedBlock = %v, want %v ((s_c-1)/s_c)", got, want)
@@ -75,7 +75,7 @@ func TestCouplingDeadlineSweep(t *testing.T) {
 
 				ctx, cancel := context.WithCancel(context.Background())
 				t.Cleanup(cancel)
-				s.run(t, ctx, time.Now(), 1)
+				s.run(t, ctx, 1)
 
 				if got := rec.FractionVotedBlock(0); got != c.want {
 					t.Fatalf("due=%v: FractionVotedBlock = %v, want %v", c.due, got, c.want)

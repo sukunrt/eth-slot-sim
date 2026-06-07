@@ -50,8 +50,7 @@ func TestAttestationsFireAtDeadline(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		runStart := time.Now()
-		s.run(t, ctx, runStart, 1)
+		runStart := s.run(t, ctx, 1)
 
 		tr.mu.Lock()
 		defer tr.mu.Unlock()
