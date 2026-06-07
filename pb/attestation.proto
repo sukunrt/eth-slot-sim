@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package block;
+
+option go_package = "github.com/ethp2p/slot-sim/pb";
+
+// Attestation is the SingleAttestation wire message (~240 B), one per attester per
+// slot, published on its committee's subnet. voted_origin records the block it voted
+// for (the proposer node number) or a sentinel for the prior head — the measurable
+// output of the block→attestation causal edge.
+message Attestation {
+  uint32 slot         = 1;
+  uint32 subnet       = 2; // committee → subnet
+  uint32 val          = 3; // global validator index — stable identity
+  uint32 origin       = 4; // publishing node number (gossip origin; for the loopback skip)
+  uint32 voted_origin = 5; // voted block's origin, or a sentinel (max uint32) for prior head
+  bytes  payload      = 6; // random filler so the marshaled message hits ~240 B
+}
