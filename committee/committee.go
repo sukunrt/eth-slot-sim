@@ -76,12 +76,11 @@ func (a *Assignment) Subscribers(subnet int) []int {
 	return a.SubnetSubscribers[subnet]
 }
 
-// AttestDuty is one attestation a node owes: which validator, on which subnet, at which
-// committee position. Content-free — the vote is decided later, by the coupling.
+// AttestDuty is one attestation a node owes: which validator, on which subnet.
+// Content-free — the vote is decided later, by the coupling.
 type AttestDuty struct {
-	Subnet   int
-	Val      int
-	Position int
+	Subnet int
+	Val    int
 }
 
 // View narrows the assignment to one node's slice (what a single host runs).
@@ -100,7 +99,7 @@ func (v View) AttestDuties(slot int) []AttestDuty {
 	for _, com := range v.a.Slots[slot].Committees {
 		for _, r := range com {
 			if r.Node == v.node {
-				duties = append(duties, AttestDuty{Subnet: r.Subnet, Val: r.Val, Position: r.Position})
+				duties = append(duties, AttestDuty{Subnet: r.Subnet, Val: r.Val})
 			}
 		}
 	}

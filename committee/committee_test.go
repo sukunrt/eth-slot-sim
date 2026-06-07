@@ -90,7 +90,7 @@ func rawDuties(a *Assignment, node, slot int) []AttestDuty {
 	for _, com := range a.Slots[slot].Committees {
 		for _, r := range com {
 			if r.Node == node {
-				out = append(out, AttestDuty{Subnet: r.Subnet, Val: r.Val, Position: r.Position})
+				out = append(out, AttestDuty{Subnet: r.Subnet, Val: r.Val})
 			}
 		}
 	}
