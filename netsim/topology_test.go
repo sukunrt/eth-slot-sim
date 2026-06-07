@@ -72,7 +72,7 @@ func TestLatencyFromEdgesDirected(t *testing.T) {
 func TestAdjacencyFromEdges(t *testing.T) {
 	edges := []TopoEdge{
 		{0, 1, 10}, {1, 0, 10}, // both directions
-		{1, 2, 20},             // one direction
+		{1, 2, 20},                         // one direction
 		{2, 0, 30}, {0, 2, 30}, {0, 2, 30}, // with a duplicate
 	}
 	adj := adjacencyFromEdges(3, edges)

@@ -21,7 +21,7 @@ import (
 // {KindAttestation, slot, subnet, attester, origin}. The tuple is unique per message,
 // so arrival delay is recv - publish.
 type MsgID struct {
-	Kind                            node.Kind
+	Kind                           node.Kind
 	Slot, Subnet, Attester, Origin int
 }
 
