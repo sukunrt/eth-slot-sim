@@ -67,18 +67,11 @@ type Node struct {
 	mu        sync.Mutex
 	topics    map[string]*pubsub.Topic
 	validated map[string]bool // topics with a registered verify hook (register-once)
-	subs      map[string]*subState
+	subs      map[string]*pubsub.Subscription
 
 	rctx   context.Context // parent of every receive goroutine; cancelled by Close
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
-}
-
-// subState is one active subscription: its handle and the cancel that stops its
-// receive goroutine (for per-slot Unsubscribe).
-type subState struct {
-	sub    *pubsub.Subscription
-	cancel context.CancelFunc
 }
 
 // Start brings up gossipsub with the Prysm-tuned parameters. Flood-publish is on (a
@@ -128,7 +121,7 @@ func (n *Node) Start(ctx context.Context) error {
 func (n *Node) JoinTopics(ctx context.Context) error {
 	n.topics = make(map[string]*pubsub.Topic)
 	n.validated = make(map[string]bool)
-	n.subs = make(map[string]*subState)
+	n.subs = make(map[string]*pubsub.Subscription)
 	n.rctx, n.cancel = context.WithCancel(ctx)
 
 	base := n.AttestVerifyDelay
@@ -190,27 +183,11 @@ func (n *Node) Subscribe(topic string) error {
 	if err != nil {
 		return err
 	}
-	sctx, scancel := context.WithCancel(n.rctx)
 	n.mu.Lock()
-	n.subs[topic] = &subState{sub: sub, cancel: scancel}
+	n.subs[topic] = sub
 	n.mu.Unlock()
-	n.wg.Go(func() { n.receive(sctx, sub) })
+	n.wg.Go(func() { n.receive(n.rctx, sub) })
 	return nil
-}
-
-// Unsubscribe leaves topic's mesh and stops its receive goroutine. A no-op if not
-// subscribed; the node stays a publisher (still Joined) unless never joined.
-func (n *Node) Unsubscribe(topic string) {
-	n.mu.Lock()
-	s, ok := n.subs[topic]
-	if ok {
-		delete(n.subs, topic)
-	}
-	n.mu.Unlock()
-	if ok {
-		s.cancel()
-		s.sub.Cancel()
-	}
 }
 
 // registerVerifyHook registers topic's validation-as-sleep hook once: attestation
@@ -247,8 +224,8 @@ func (n *Node) Close() {
 	}
 	n.wg.Wait()
 	n.mu.Lock()
-	for _, s := range n.subs {
-		s.sub.Cancel()
+	for _, sub := range n.subs {
+		sub.Cancel()
 	}
 	n.mu.Unlock()
 	if n.verifier != nil {
