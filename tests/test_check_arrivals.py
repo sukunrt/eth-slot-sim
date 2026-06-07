@@ -139,3 +139,40 @@ def test_delays_from_csv_filters_by_kind(tmp_path):
     )
     assert ca.delays_from_csv(csv_path) == [500.0, 1000.0]
     assert ca.delays_from_csv(csv_path, kind=ca.ATTEST_KIND) == [40.0]
+
+
+# committee.json shape the simnet CSV check joins against: subscribers per subnet + the draw.
+def _committee(subnet_subscribers, committees):
+    return {
+        "subnet_subscribers": subnet_subscribers,
+        "slots": [{"slot": 0, "committees": committees, "subnet_of": list(range(len(committees)))}],
+    }
+
+
+def test_analyze_attestations_csv_coverage_ok(tmp_path):
+    # attester val 5 on node 0 publishes subnet 0; subscribers {1,2} both receive.
+    data = _committee([[1, 2]], [[{"node": 0, "val": 5, "subnet": 0, "position": 0}]])
+    csv_path = tmp_path / "simnet_arrivals.csv"
+    csv_path.write_text(
+        "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
+        "1,0,2,0,5,40,true\n"
+        "2,0,2,0,5,55,true\n"
+    )
+    res = ca.analyze_attestations_csv(csv_path, data)
+    assert res.expected == 2 and res.arrivals == 2
+    assert res.missing == [] and res.leaked == [] and res.duplicates == []
+    assert res.ok and res.fraction_voted_block == 1.0
+
+
+def test_analyze_attestations_csv_detects_missing_and_leak(tmp_path):
+    data = _committee([[1, 2]], [[{"node": 0, "val": 5, "subnet": 0, "position": 0}]])
+    csv_path = tmp_path / "a.csv"
+    csv_path.write_text(
+        "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
+        "1,0,2,0,5,40,true\n"  # node 2 (a subscriber) never receives -> missing
+        "9,0,2,0,5,40,true\n"  # node 9 is not a subscriber -> leak
+    )
+    res = ca.analyze_attestations_csv(csv_path, data)
+    assert res.missing == [(2, 0, 0, 5, 0)]
+    assert res.leaked == [(9, 0, 0, 5, 0)]
+    assert not res.ok

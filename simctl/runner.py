@@ -6,6 +6,7 @@ publish schedules: the cyclic proposer is computed in Go from -node-num and
 per node.
 """
 
+import json
 import math
 import os
 import subprocess
@@ -348,9 +349,10 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
     pubs, arrs, node_nums = check_arrivals.load_run(run_dir)
     shadow_res = check_arrivals.analyze(pubs, arrs, node_nums)
 
-    simnet_delays = check_arrivals.delays_from_csv(run_simnet(config, run_dir))
+    csv_path = run_simnet(config, run_dir)
+    simnet_delays = check_arrivals.delays_from_csv(csv_path)
 
-    comparison = {
+    comparison: dict[str, Any] = {
         "run_dir": str(run_dir),
         "expected_arrivals": shadow_res.expected,
         "shadow": {
@@ -364,5 +366,33 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
             "cdf_ms": check_arrivals.cdf(simnet_delays),
         },
     }
+
+    # Attestation phase: report both backends' coverage/no-leak + CDF. The simnet check
+    # against committee.json is the only automated coverage test of the real topology.json
+    # graph (the Go suites only exercise the in-process discv5Graph).
+    subscribers = check_arrivals.load_committee(run_dir)
+    if subscribers is not None:
+        committee_data = json.loads((run_dir / "committee.json").read_text())
+        shadow_att = check_arrivals.analyze_attestations(pubs, arrs, subscribers)
+        simnet_att = check_arrivals.analyze_attestations_csv(csv_path, committee_data)
+        comparison["attestations"] = {
+            "expected": shadow_att.expected,
+            "shadow": _att_summary(shadow_att),
+            "simnet": _att_summary(simnet_att),
+        }
+
     write_json_atomic(run_dir / "compare.json", comparison)
     return comparison
+
+
+def _att_summary(res: check_arrivals.AttestResult) -> dict[str, Any]:
+    """One backend's attestation result as a compare.json sub-dict."""
+    return {
+        "arrivals": res.arrivals,
+        "expected": res.expected,
+        "missing": len(res.missing),
+        "leaked": len(res.leaked),
+        "duplicates": len(res.duplicates),
+        "fraction_voted_block": res.fraction_voted_block,
+        "cdf_ms": check_arrivals.cdf(res.delays_ms),
+    }

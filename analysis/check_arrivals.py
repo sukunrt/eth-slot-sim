@@ -200,6 +200,56 @@ def delays_from_csv(path: Path, kind: int = BLOCK_KIND) -> list[float]:
     return [float(r["delay_ms"]) for r in rows if int(r.get("kind", BLOCK_KIND)) == kind]
 
 
+def analyze_attestations_csv(path: Path, committee_data: dict) -> AttestResult:
+    """Coverage/no-leak for the simnet backend (the real cross-backend graph). The arrival
+    CSV is keyed by (slot, subnet, attester) with no origin column, so each attestation's
+    origin comes from committee.json's draw. Each published attestation must reach exactly
+    subscribers(subnet) \\ {origin} — missing/leaked/duplicate all fail."""
+    subscribers = {subnet: set(m) for subnet, m in enumerate(committee_data["subnet_subscribers"])}
+    origin_of: dict[tuple[int, int, int], int] = {}  # (slot,subnet,attester) -> publishing node
+    for sp in committee_data["slots"]:
+        for com in sp["committees"]:
+            for ref in com:
+                origin_of[(sp["slot"], ref["subnet"], ref["val"])] = ref["node"]
+
+    received: dict[tuple[int, int, int], set[int]] = {}
+    counts: Counter = Counter()
+    voted: dict[tuple[int, int, int], bool] = {}
+    delays_ms: list[float] = []
+    leaked: list[tuple[int, int, int, int, int]] = []
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            if int(r.get("kind", BLOCK_KIND)) != ATTEST_KIND:
+                continue
+            slot, subnet, attester = int(r["slot"]), int(r["subnet"]), int(r["attester"])
+            node = int(r["node"])
+            key = (slot, subnet, attester)
+            origin = origin_of.get(key, -1)
+            counts[(node, slot, subnet, attester, origin)] += 1
+            received.setdefault(key, set()).add(node)
+            voted[key] = r["voted_block"] == "true"
+            delays_ms.append(float(r["delay_ms"]))
+            if node not in subscribers.get(subnet, set()):
+                leaked.append((node, slot, subnet, attester, origin))
+
+    missing: list[tuple[int, int, int, int, int]] = []
+    expected = 0
+    for (slot, subnet, attester), origin in origin_of.items():
+        for node in subscribers.get(subnet, set()):
+            if node == origin:
+                continue
+            expected += 1
+            if node not in received.get((slot, subnet, attester), set()):
+                missing.append((node, slot, subnet, attester, origin))
+    duplicates = sorted(k for k, c in counts.items() if c > 1)
+    block_votes = sum(1 for v in voted.values() if v)
+    fraction = block_votes / len(voted) if voted else 0.0
+    return AttestResult(
+        sum(counts.values()), expected, sorted(missing), sorted(leaked), duplicates,
+        sorted(delays_ms), fraction, len(origin_of),
+    )
+
+
 def load_run(run_dir: Path) -> tuple[dict[PubKey, tuple[int, bool]], list[Arrival], set[int]]:
     """Read every host's stdout under run_dir/shadow.data/hosts/node*/."""
     hosts_dir = run_dir / "shadow.data" / "hosts"

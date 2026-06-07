@@ -110,11 +110,32 @@ def _print_comparison(result: dict) -> None:
     )
     click.echo(f"simnet: {simnet['arrivals']} arrivals")
     click.echo("\narrival-delay CDF (ms):")
+    _print_cdf_table(shadow["cdf_ms"], simnet["cdf_ms"])
+    if result.get("attestations"):
+        _print_attestations(result["attestations"])
+
+
+def _print_cdf_table(shadow_cdf: dict, simnet_cdf: dict) -> None:
+    """Side-by-side shadow/simnet percentile table with the simnet delta."""
     click.echo(f"  {'pct':<5}{'shadow':>11}{'simnet':>11}{'Δ%':>9}")
     for p in ("p50", "p90", "p99", "p100"):
-        s, m = shadow["cdf_ms"][p], simnet["cdf_ms"][p]
+        s, m = shadow_cdf[p], simnet_cdf[p]
         delta = (m - s) / s * 100 if s else 0.0
         click.echo(f"  {p:<5}{s:>11.1f}{m:>11.1f}{delta:>8.1f}%")
+
+
+def _print_attestations(att: dict) -> None:
+    """Render the attestation coverage + CDF for both backends."""
+    shadow, simnet = att["shadow"], att["simnet"]
+    click.echo(f"\nattestations (expected {att['expected']}):")
+    for name, r in (("shadow", shadow), ("simnet", simnet)):
+        click.echo(
+            f"  {name}: {r['arrivals']} arrivals "
+            f"(missing {r['missing']}, leaked {r['leaked']}, dup {r['duplicates']}), "
+            f"voted-block {r['fraction_voted_block']:.3f}"
+        )
+    click.echo("  attestation CDF (ms):")
+    _print_cdf_table(shadow["cdf_ms"], simnet["cdf_ms"])
 
 
 if __name__ == "__main__":
