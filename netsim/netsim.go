@@ -266,36 +266,17 @@ func pickSupernodes(n int, frac float64, seed uint64) map[int]bool {
 	return set
 }
 
-// peerGraph builds a connected, bounded-degree undirected graph: a ring backbone
-// guarantees connectivity, then random chords bring each node up to ~p peers.
-// Returns symmetric adjacency (each edge on both endpoints).
+// peerGraph builds a connected, bounded-degree undirected graph: a random spanning tree
+// for connectivity, then random fill up to ~p peers. Returns symmetric adjacency.
 func peerGraph(n, p int, seed uint64) [][]int {
-	adj := make([][]int, n)
-	edge := make([]map[int]bool, n)
-	for i := range n {
-		edge[i] = make(map[int]bool)
-	}
-	add := func(i, j int) {
-		if i == j || edge[i][j] {
-			return
-		}
-		edge[i][j], edge[j][i] = true, true
-		adj[i] = append(adj[i], j)
-		adj[j] = append(adj[j], i)
-	}
+	g := newGraph(n)
 	if n < 2 {
-		return adj
+		return g.adj
 	}
-	for i := range n { // ring backbone
-		add(i, (i+1)%n)
-	}
-	r := rand.New(rand.NewPCG(seed, peersStream))
-	for i := range n {
-		for tries := 0; len(adj[i]) < p && tries < p*4; tries++ {
-			add(i, r.IntN(n))
-		}
-	}
-	return adj
+	rng := rand.New(rand.NewPCG(seed, peersStream))
+	g.randomTree(seq(n), rng)
+	g.fill(p, rng)
+	return g.adj
 }
 
 // adjacencyFromEdges builds the undirected peer graph from topology edges: two
