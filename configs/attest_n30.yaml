@@ -1,0 +1,41 @@
+# Local Shadow verify: 30 nodes, 100 validators, 2 active subnets. Exercises the
+# bounded-K subnet topology (each subnet's subscribers connected within K peers) +
+# the per-slot dial/relay + coverage/no-leak end to end. Verify with
+# `simctl compare` (both backends) or analysis/check_arrivals.py on a `run`.
+topology:
+  num_nodes: 30
+  degree: 12               # K: target peers per node
+  type: random
+  seed: 42
+  super_node_fraction: 0.1
+  latency_multiple: 1.0
+  min_node_to_node_latency_ms: 0
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+attestation:
+  validators: 100          # V
+  committees: 2            # C active subnets/slot
+  committee_size: 10       # s_c (C*s_c = 20 <= V)
+  subnet_count: 64
+  subnets_per_node: 1      # each node subscribes 1 of the 2 -> the other's attesters dial in
+  subscribe_floor: 10      # min subscribers per active subnet
+  attestation_due_ms: 4000
+  prep_ms: 0
+  verify_delay_ms: 10
+  per_item_ms: 0
+  batch_window_ms: 50
+
+num_slots: 3
+slot_duration_seconds: 12
+block_size: 131072         # 128 KiB
+verify_delay_ms: 10
+offset_ms: 0
+jitter_ms: 2000
+startup_seconds: 60        # must exceed the 30 s mesh-join stagger
+stop_time_minutes: 4
+log_level: info
+seed: 1
