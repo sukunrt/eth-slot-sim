@@ -97,12 +97,12 @@ func TestNNodesCyclicDissemination(t *testing.T) {
 		type key struct{ node, slot, origin int }
 		seen := make(map[key]bool, len(arr))
 		for _, a := range arr {
-			k := key{a.Node, a.Slot, a.Origin}
+			k := key{a.Node, a.ID.Slot, a.ID.Origin}
 			if seen[k] {
 				t.Fatalf("duplicate arrival %+v", a)
 			}
 			seen[k] = true
-			if a.Origin != a.Slot%n {
+			if a.ID.Origin != a.ID.Slot%n {
 				t.Fatalf("arrival %+v: origin != slot%%n", a)
 			}
 		}
@@ -124,7 +124,7 @@ func TestNNodesCyclicDissemination(t *testing.T) {
 		}
 		var lo, hi time.Duration
 		for _, a := range arr {
-			if a.Slot != slot {
+			if a.ID.Slot != slot {
 				continue
 			}
 			if lo == 0 || a.Delay < lo {

@@ -32,6 +32,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"go.uber.org/fx"
 
+	"github.com/ethp2p/slot-sim/committee"
 	"github.com/ethp2p/slot-sim/driver"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
@@ -75,6 +76,13 @@ func main() {
 		dhi         = flag.Int("Dhi", 12, "gossipsub Dhi")
 		seed        = flag.Uint64("seed", 1, "validator rng seed (combined with node-num)")
 		startup     = flag.Duration("startup", 60*time.Second, "bring-up window before slot 0")
+
+		committeePath = flag.String("committee", "", "path to committee.json (empty → block-only)")
+		attDue        = flag.Duration("att-due", 4*time.Second, "attestation deadline offset into the slot")
+		prep          = flag.Duration("prep", 0, "extra processing before emitting on block receipt")
+		attestVerify  = flag.Duration("attest-verify-delay", 10*time.Millisecond, "attestation batch base verify delay")
+		attestPerItem = flag.Duration("attest-per-item", 0, "attestation per-item verify cost")
+		attestWindow  = flag.Duration("attest-batch-window", 50*time.Millisecond, "attestation batch window")
 	)
 	flag.Parse()
 	if settleWindow(*startup, meshJoinStagger) <= 0 {
@@ -84,12 +92,23 @@ func main() {
 	tracer := metrics.NewSlogTracer(slog.NewJSONHandler(os.Stdout, nil))
 	val := validator.New(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
 		rand.New(rand.NewPCG(*seed, uint64(*nodeNum))))
+	var comm *committee.Assignment
+	if *committeePath != "" {
+		c, err := committee.Load(*committeePath)
+		if err != nil {
+			log.Fatalf("load committee %s: %v", *committeePath, err)
+		}
+		comm = c
+	}
 	nd := &node.Node{
 		Num: *nodeNum, Host: newShadowHost(*nodeNum), Network: &shadowNetwork{},
-		VerifyDelay: func() time.Duration { return *verifyDelay },
-		D:           *d, Dlo: *dlo, Dhi: *dhi,
-		OnReceive: func(r node.Received) { driver.RouteReceived(*nodeNum, r, tracer) },
+		VerifyDelay:       func() time.Duration { return *verifyDelay },
+		AttestVerifyDelay: func() time.Duration { return *attestVerify },
+		AttestPerItem:     *attestPerItem, AttestBatchWindow: *attestWindow,
+		D: *d, Dlo: *dlo, Dhi: *dhi,
 	}
+	runner := driver.NewRunner(*nodeNum, nd, val, comm, tracer, *slotDur, *attDue, *prep)
+	runner.Attach() // sets nd.OnReceive before JoinTopics
 
 	ctx := context.Background()
 	if err := nd.Start(ctx); err != nil {
@@ -109,7 +128,7 @@ func main() {
 
 	runStart := programStart.Add(*startup)
 	time.Sleep(time.Until(runStart)) // chillax until slot 0 — every host has meshed
-	driver.SlotLoop(ctx, nd, val, tracer, runStart, *numSlots, *slotDur)
+	runner.Run(ctx, runStart, *numSlots)
 	time.Sleep(drainWindow) // capture the last block's dissemination tail
 	nd.Close()
 }

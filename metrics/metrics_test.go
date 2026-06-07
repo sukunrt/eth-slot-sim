@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ethp2p/slot-sim/node"
 )
 
 func TestPercentile(t *testing.T) {
@@ -36,9 +38,9 @@ func TestPercentile(t *testing.T) {
 func TestRecorderDelay(t *testing.T) {
 	r := NewRecorder()
 	t0 := time.Unix(1000, 0)
-	r.OnPublish(1, 0, t0)
-	r.OnReceive(1, 1, 0, t0.Add(5*time.Millisecond))
-	r.OnReceive(2, 1, 0, t0.Add(12*time.Millisecond))
+	r.OnPublish(BlockID(1, 0), false, t0)
+	r.OnReceive(1, BlockID(1, 0), t0.Add(5*time.Millisecond))
+	r.OnReceive(2, BlockID(1, 0), t0.Add(12*time.Millisecond))
 
 	arr := r.Arrivals()
 	if len(arr) != 2 {
@@ -46,6 +48,9 @@ func TestRecorderDelay(t *testing.T) {
 	}
 	byNode := map[int]time.Duration{}
 	for _, a := range arr {
+		if a.ID.Kind != node.KindBlock || a.ID.Slot != 1 || a.ID.Origin != 0 {
+			t.Fatalf("arrival id = %+v, want block slot1 origin0", a.ID)
+		}
 		byNode[a.Node] = a.Delay
 	}
 	if byNode[1] != 5*time.Millisecond || byNode[2] != 12*time.Millisecond {
@@ -53,12 +58,53 @@ func TestRecorderDelay(t *testing.T) {
 	}
 }
 
-// A receive with no recorded publish is skipped, not panicked on.
-func TestRecorderMissingPublish(t *testing.T) {
+// An attestation arrival carries its identity (subnet, attester) and the publisher's
+// vote (joined from the publish record).
+func TestRecorderAttestationVote(t *testing.T) {
 	r := NewRecorder()
-	r.OnReceive(1, 7, 0, time.Unix(1000, 0))
-	if len(r.Arrivals()) != 0 {
-		t.Fatalf("got %d arrivals, want 0 (no publish recorded)", len(r.Arrivals()))
+	t0 := time.Unix(1000, 0)
+	r.OnPublish(AttestID(1, 3, 7, 5), true, t0) // slot1 subnet3 attester7 origin5, voted block
+	r.OnReceive(9, AttestID(1, 3, 7, 5), t0.Add(2*time.Millisecond))
+
+	arr := r.Arrivals()
+	if len(arr) != 1 {
+		t.Fatalf("got %d arrivals, want 1", len(arr))
+	}
+	a := arr[0]
+	if a.ID.Kind != node.KindAttestation || a.ID.Subnet != 3 || a.ID.Attester != 7 || a.ID.Origin != 5 {
+		t.Fatalf("arrival id = %+v, want attestation subnet3 attester7 origin5", a.ID)
+	}
+	if !a.VotedBlock {
+		t.Fatal("VotedBlock = false, want true (joined from publish)")
+	}
+}
+
+// A receive with no recorded publish is counted as an orphan, not silently dropped —
+// under drops or late publishes this can happen and would otherwise hide data.
+func TestRecorderOrphanCounted(t *testing.T) {
+	r := NewRecorder()
+	r.OnReceive(1, BlockID(7, 0), time.Unix(1000, 0))
+	if got := len(r.Arrivals()); got != 0 {
+		t.Fatalf("got %d arrivals, want 0", got)
+	}
+	if got := r.Orphans(); got != 1 {
+		t.Fatalf("orphans = %d, want 1", got)
+	}
+}
+
+// FractionVotedBlock is the headline metric: over a slot's published attestations, the
+// share that voted for the block.
+func TestRecorderFractionVotedBlock(t *testing.T) {
+	r := NewRecorder()
+	t0 := time.Unix(1000, 0)
+	// 3 of 4 attesters in slot 1 voted block; a block publish must not count.
+	r.OnPublish(AttestID(1, 0, 0, 0), true, t0)
+	r.OnPublish(AttestID(1, 0, 1, 1), true, t0)
+	r.OnPublish(AttestID(1, 0, 2, 2), true, t0)
+	r.OnPublish(AttestID(1, 0, 3, 3), false, t0)
+	r.OnPublish(BlockID(1, 0), false, t0)
+	if got := r.FractionVotedBlock(1); got != 0.75 {
+		t.Fatalf("FractionVotedBlock(1) = %v, want 0.75", got)
 	}
 }
 
@@ -66,13 +112,13 @@ func TestRecorderConcurrent(t *testing.T) {
 	r := NewRecorder()
 	t0 := time.Unix(1000, 0)
 	for slot := range 10 {
-		r.OnPublish(slot, 0, t0)
+		r.OnPublish(BlockID(slot, 0), false, t0)
 	}
 	var wg sync.WaitGroup
-	for node := 1; node <= 50; node++ {
+	for nd := 1; nd <= 50; nd++ {
 		wg.Go(func() {
 			for slot := range 10 {
-				r.OnReceive(node, slot, 0, t0.Add(time.Millisecond))
+				r.OnReceive(nd, BlockID(slot, 0), t0.Add(time.Millisecond))
 			}
 		})
 	}
@@ -85,18 +131,19 @@ func TestRecorderConcurrent(t *testing.T) {
 func TestWriteCSV(t *testing.T) {
 	r := NewRecorder()
 	t0 := time.Unix(1000, 0)
-	r.OnPublish(1, 0, t0)
-	r.OnReceive(2, 1, 0, t0.Add(3*time.Millisecond))
+	r.OnPublish(AttestID(1, 3, 7, 0), true, t0)
+	r.OnReceive(2, AttestID(1, 3, 7, 0), t0.Add(3*time.Millisecond))
 
 	var b strings.Builder
 	if err := r.WriteCSV(&b); err != nil {
 		t.Fatalf("WriteCSV: %v", err)
 	}
 	out := b.String()
-	if !strings.HasPrefix(out, "node,slot,origin,delay_ms\n") {
-		t.Fatalf("missing header, got:\n%s", out)
+	if !strings.HasPrefix(out, "node,slot,kind,subnet,attester,delay_ms,voted_block\n") {
+		t.Fatalf("missing/!wrong header, got:\n%s", out)
 	}
-	if !strings.Contains(out, "2,1,0,3\n") {
+	// node2 slot1 kind2(attestation) subnet3 attester7 delay3 voted_block true
+	if !strings.Contains(out, "2,1,2,3,7,3,true\n") {
 		t.Fatalf("missing data row, got:\n%s", out)
 	}
 }

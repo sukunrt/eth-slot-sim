@@ -1,7 +1,6 @@
-// Package metrics records block-arrival times and summarizes them as a CDF.
-// The Node calls a Tracer on each publish/receive; the in-process Recorder
-// keeps everything in memory so tests assert on it directly and the binary
-// dumps it to CSV.
+// Package metrics records message-arrival times and summarizes them as a CDF.
+// A Driver calls a Tracer on each publish/receive; the in-process Recorder keeps
+// everything in memory so tests assert on it directly and the binary dumps it to CSV.
 package metrics
 
 import (
@@ -13,67 +12,98 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/ethp2p/slot-sim/node"
 )
 
-// Tracer receives app-level publish/receive events. The Node owns nothing about
-// "block" — it just reports (slot, origin) and timestamps.
-type Tracer interface {
-	OnPublish(slot, origin int, at time.Time)
-	OnReceive(node, slot, origin int, at time.Time)
+// MsgID identifies one disseminated message. A block is the special case
+// {KindBlock, slot, -1, -1, origin} (no subnet/attester); an attestation is
+// {KindAttestation, slot, subnet, attester, origin}. The tuple is unique per message,
+// so arrival delay is recv - publish.
+type MsgID struct {
+	Kind                            node.Kind
+	Slot, Subnet, Attester, Origin int
 }
 
-// SlogTracer is a Tracer that emits one structured slog record per event. A
-// Shadow run is one process per node, all sharing Shadow's virtual clock, so a
-// run is reassembled from per-host logs by joining on (slot, origin) with
-// absolute UnixNano timestamps. The Shadow binary constructs it with a JSON
-// handler over stdout; tests pass a buffer handler.
+// BlockID is the MsgID for a block published by origin in slot.
+func BlockID(slot, origin int) MsgID {
+	return MsgID{Kind: node.KindBlock, Slot: slot, Subnet: -1, Attester: -1, Origin: origin}
+}
+
+// AttestID is the MsgID for one attestation (validator attester on subnet, published by
+// origin) in slot.
+func AttestID(slot, subnet, attester, origin int) MsgID {
+	return MsgID{Kind: node.KindAttestation, Slot: slot, Subnet: subnet, Attester: attester, Origin: origin}
+}
+
+// Tracer receives app-level publish/receive events. votedBlock is meaningful only for
+// attestations (false for blocks); the receive side recovers it by joining to the
+// publish record, so OnReceive needs only the identity.
+type Tracer interface {
+	OnPublish(id MsgID, votedBlock bool, at time.Time)
+	OnReceive(rcv int, id MsgID, at time.Time)
+}
+
+// SlogTracer is a Tracer that emits one structured slog record per event. A Shadow run
+// is one process per node, all sharing Shadow's virtual clock, so a run is reassembled
+// from per-host logs by joining on (slot, subnet, attester, origin) with absolute
+// UnixNano timestamps. The publish carries the vote.
 type SlogTracer struct{ log *slog.Logger }
 
 // NewSlogTracer returns a SlogTracer writing through h.
 func NewSlogTracer(h slog.Handler) *SlogTracer { return &SlogTracer{log: slog.New(h)} }
 
-func (t *SlogTracer) OnPublish(slot, origin int, at time.Time) {
-	t.log.Info("publish", "slot", slot, "origin", origin, "t_ns", at.UnixNano())
+func (t *SlogTracer) OnPublish(id MsgID, votedBlock bool, at time.Time) {
+	t.log.Info("publish", "kind", int(id.Kind), "slot", id.Slot, "subnet", id.Subnet,
+		"attester", id.Attester, "origin", id.Origin, "voted_block", votedBlock, "t_ns", at.UnixNano())
 }
 
-func (t *SlogTracer) OnReceive(node, slot, origin int, at time.Time) {
-	t.log.Info("arrival", "node", node, "slot", slot, "origin", origin, "t_ns", at.UnixNano())
+func (t *SlogTracer) OnReceive(rcv int, id MsgID, at time.Time) {
+	t.log.Info("arrival", "node", rcv, "kind", int(id.Kind), "slot", id.Slot, "subnet", id.Subnet,
+		"attester", id.Attester, "origin", id.Origin, "t_ns", at.UnixNano())
 }
 
-// Arrival is one node's receipt of one block.
+// Arrival is one node's receipt of one message. VotedBlock is carried for attestations
+// (joined from the publish record).
 type Arrival struct {
-	Node, Slot, Origin int
-	Delay              time.Duration // recv_time - publish_time
+	Node       int
+	ID         MsgID
+	Delay      time.Duration // recv_time - publish_time
+	VotedBlock bool
 }
 
-type pubKey struct{ slot, origin int }
+type pubRec struct {
+	at         time.Time
+	votedBlock bool
+}
 
-// Recorder is an in-memory, concurrency-safe Tracer. One proposer per slot means
-// (slot, origin) uniquely identifies a block, so arrival delay is recv - publish.
+// Recorder is an in-memory, concurrency-safe Tracer keyed on MsgID.
 type Recorder struct {
 	mu       sync.Mutex
-	pub      map[pubKey]time.Time
+	pub      map[MsgID]pubRec
 	arrivals []Arrival
+	orphans  int
 }
 
 func NewRecorder() *Recorder {
-	return &Recorder{pub: make(map[pubKey]time.Time)}
+	return &Recorder{pub: make(map[MsgID]pubRec)}
 }
 
-func (r *Recorder) OnPublish(slot, origin int, at time.Time) {
+func (r *Recorder) OnPublish(id MsgID, votedBlock bool, at time.Time) {
 	r.mu.Lock()
-	r.pub[pubKey{slot, origin}] = at
+	r.pub[id] = pubRec{at: at, votedBlock: votedBlock}
 	r.mu.Unlock()
 }
 
-func (r *Recorder) OnReceive(node, slot, origin int, at time.Time) {
+func (r *Recorder) OnReceive(rcv int, id MsgID, at time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	pubAt, ok := r.pub[pubKey{slot, origin}]
+	p, ok := r.pub[id]
 	if !ok {
-		return // publish not recorded (shouldn't happen in-process); skip rather than guess
+		r.orphans++ // count it (drops / late publishes) rather than hide the data
+		return
 	}
-	r.arrivals = append(r.arrivals, Arrival{node, slot, origin, at.Sub(pubAt)})
+	r.arrivals = append(r.arrivals, Arrival{Node: rcv, ID: id, Delay: at.Sub(p.at), VotedBlock: p.votedBlock})
 }
 
 // Arrivals returns a copy of the recorded arrivals.
@@ -83,16 +113,45 @@ func (r *Recorder) Arrivals() []Arrival {
 	return slices.Clone(r.arrivals)
 }
 
-// WriteCSV dumps every arrival as node,slot,origin,delay_ms rows.
+// Orphans is the count of receives with no recorded publish.
+func (r *Recorder) Orphans() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.orphans
+}
+
+// FractionVotedBlock is the headline metric: over a slot's published attestations, the
+// fraction that voted for the block (vs. the prior head). 0 if none were published.
+func (r *Recorder) FractionVotedBlock(slot int) float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var total, block int
+	for id, p := range r.pub {
+		if id.Kind != node.KindAttestation || id.Slot != slot {
+			continue
+		}
+		total++
+		if p.votedBlock {
+			block++
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(block) / float64(total)
+}
+
+// WriteCSV dumps every arrival as node,slot,kind,subnet,attester,delay_ms,voted_block.
 func (r *Recorder) WriteCSV(w io.Writer) error {
 	cw := csv.NewWriter(w)
-	if err := cw.Write([]string{"node", "slot", "origin", "delay_ms"}); err != nil {
+	if err := cw.Write([]string{"node", "slot", "kind", "subnet", "attester", "delay_ms", "voted_block"}); err != nil {
 		return err
 	}
 	for _, a := range r.Arrivals() {
 		row := []string{
-			strconv.Itoa(a.Node), strconv.Itoa(a.Slot), strconv.Itoa(a.Origin),
-			strconv.FormatInt(a.Delay.Milliseconds(), 10),
+			strconv.Itoa(a.Node), strconv.Itoa(a.ID.Slot), strconv.Itoa(int(a.ID.Kind)),
+			strconv.Itoa(a.ID.Subnet), strconv.Itoa(a.ID.Attester),
+			strconv.FormatInt(a.Delay.Milliseconds(), 10), strconv.FormatBool(a.VotedBlock),
 		}
 		if err := cw.Write(row); err != nil {
 			return err

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/ethp2p/slot-sim/node"
 )
 
 var _ Tracer = (*SlogTracer)(nil)
@@ -13,23 +15,29 @@ var _ Tracer = (*SlogTracer)(nil)
 // rec mirrors a SlogTracer JSON line. t_ns is int64 (UnixNano exceeds float64's
 // exact-integer range, so it must not be decoded through interface{}/float64).
 type rec struct {
-	Msg    string `json:"msg"`
-	Slot   int    `json:"slot"`
-	Origin int    `json:"origin"`
-	Node   int    `json:"node"`
-	TNs    int64  `json:"t_ns"`
+	Msg        string `json:"msg"`
+	Kind       int    `json:"kind"`
+	Slot       int    `json:"slot"`
+	Subnet     int    `json:"subnet"`
+	Attester   int    `json:"attester"`
+	Origin     int    `json:"origin"`
+	Node       int    `json:"node"`
+	VotedBlock bool   `json:"voted_block"`
+	TNs        int64  `json:"t_ns"`
 }
 
 // SlogTracer emits one JSON object per publish/receive event, with absolute
-// nanosecond timestamps (comparable across Shadow hosts, which share one clock).
+// nanosecond timestamps (comparable across Shadow hosts, which share one clock). A
+// block is the subnet/attester = -1 special case; the publish carries the vote so a
+// Shadow run reassembles by (slot, subnet, attester, origin).
 func TestSlogTracerEmitsJSONLines(t *testing.T) {
 	var buf bytes.Buffer
 	tr := NewSlogTracer(slog.NewJSONHandler(&buf, nil))
 
 	pub := time.Unix(1_700_000_000, 111)
 	arr := time.Unix(1_700_000_000, 222)
-	tr.OnPublish(3, 7, pub)
-	tr.OnReceive(5, 3, 7, arr)
+	tr.OnPublish(AttestID(3, 9, 4, 7), true, pub)
+	tr.OnReceive(5, AttestID(3, 9, 4, 7), arr)
 
 	dec := json.NewDecoder(&buf)
 	var got []rec
@@ -44,11 +52,17 @@ func TestSlogTracerEmitsJSONLines(t *testing.T) {
 		t.Fatalf("got %d lines, want 2", len(got))
 	}
 
-	wantPub := rec{Msg: "publish", Slot: 3, Origin: 7, TNs: pub.UnixNano()}
+	wantPub := rec{
+		Msg: "publish", Kind: int(node.KindAttestation), Slot: 3, Subnet: 9, Attester: 4,
+		Origin: 7, VotedBlock: true, TNs: pub.UnixNano(),
+	}
 	if got[0] != wantPub {
 		t.Errorf("publish line = %+v, want %+v", got[0], wantPub)
 	}
-	wantArr := rec{Msg: "arrival", Node: 5, Slot: 3, Origin: 7, TNs: arr.UnixNano()}
+	wantArr := rec{
+		Msg: "arrival", Kind: int(node.KindAttestation), Slot: 3, Subnet: 9, Attester: 4,
+		Origin: 7, Node: 5, TNs: arr.UnixNano(),
+	}
 	if got[1] != wantArr {
 		t.Errorf("arrival line = %+v, want %+v", got[1], wantArr)
 	}
