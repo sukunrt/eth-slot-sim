@@ -1,9 +1,9 @@
-"""Shadow run orchestration for block dissemination.
+"""Shadow + simnet run orchestration.
 
-Adapted from batched-attestation-sim's runner, stripped of committees / fanout /
-publish schedules: the cyclic proposer is computed in Go from -node-num and
--num-nodes, so Python only generates the topology, the GML network, and one host
-per node.
+Generates the committee assignment (when the run has an attestation phase), the
+topology and GML network, and one Shadow host per node. The cyclic proposer and the
+attestation duties are computed in Go from committee.json + flags, so Python only sets
+up inputs. Also drives the simnet backend and the cross-backend comparison.
 """
 
 import json

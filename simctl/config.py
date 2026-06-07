@@ -1,9 +1,9 @@
-"""Configuration schema for block-dissemination Shadow runs.
+"""Configuration schema for slot-simulation runs.
 
-Slimmed from batched-attestation-sim: only the knobs a single global block topic
-needs. All attestation concerns (committees, fanout, partial messages, multiple
-topics, validation batching) are intentionally absent; unknown keys are rejected
-so a stale attestation config fails loudly rather than being silently ignored.
+Covers block dissemination plus the optional attestation phase (the ``attestation:``
+block — committees, subnets, the batched verifier). Partial messages and aggregation
+are still out of scope. ``extra="forbid"`` rejects unknown keys, so a typo or a stale
+field fails loudly rather than being silently ignored.
 """
 
 from pathlib import Path

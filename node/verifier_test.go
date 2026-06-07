@@ -155,11 +155,9 @@ func TestVerifierManyItemsNoneDropped(t *testing.T) {
 		const n = 50
 		var wg sync.WaitGroup
 		for i := range n {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				v.submit(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{i}}, sink.callback())
-			}()
+			})
 		}
 		wg.Wait()
 		time.Sleep(500 * time.Millisecond)
@@ -258,14 +256,12 @@ func TestVerifierSubmitAndWaitMultipleConcurrent(t *testing.T) {
 		var mu sync.Mutex
 		var done [4]bool
 		for i := range 4 {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				v.submitAndWait(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{i}})
 				mu.Lock()
 				done[i] = true
 				mu.Unlock()
-			}()
+			})
 		}
 		wg.Wait()
 
