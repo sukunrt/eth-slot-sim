@@ -1,14 +1,15 @@
 // Package node is the message-agnostic, passive half of the simulator: it owns
 // the libp2p host, gossipsub, topic membership, peer connections, and
-// send/receive. It responds to requests (Connect, JoinTopics, Publish) and
-// reports what it receives outward via OnReceive; it knows nothing about slots,
-// duties, or metrics. A Driver supplies the timing and orchestration.
+// send/receive. It responds to requests (Connect, JoinTopics, Join, Subscribe,
+// Publish) and reports what it receives outward via OnReceive; it knows nothing
+// about slots, duties, or metrics. A Driver supplies the timing and orchestration.
 package node
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,10 @@ import (
 	"github.com/ethp2p/slot-sim/pb"
 	"github.com/ethp2p/slot-sim/validator"
 )
+
+// defaultBatchWindow is the attestation verifier's batch window when unset; it must
+// be > 0 so the verifier's idle timer parks (a zero window busy-spins, §8.1).
+const defaultBatchWindow = 50 * time.Millisecond
 
 // Kind tags a received, decoded message so a Driver can dispatch on it without
 // type-asserting to discover what it got. Values are predefined per message type.
@@ -45,15 +50,35 @@ type Node struct {
 	Num         int
 	Host        host.Host
 	Network     Network
-	VerifyDelay func() time.Duration // per-hop processing cost (validation-as-sleep)
+	VerifyDelay func() time.Duration // per-hop block verify cost (validation-as-sleep)
 	D, Dlo, Dhi int
 	OnReceive   func(Received) // outward sink; set before JoinTopics
 
-	ps     *pubsub.PubSub
-	topics map[string]*pubsub.Topic
+	// Attestation verify-hook (batched): models the t≈4s flood as a single-server
+	// queue. AttestVerifyDelay defaults to VerifyDelay; AttestBatchWindow to
+	// defaultBatchWindow.
+	AttestVerifyDelay func() time.Duration
+	AttestPerItem     time.Duration
+	AttestBatchWindow time.Duration
+
+	ps       *pubsub.PubSub
+	verifier *batchVerifier
+
+	mu        sync.Mutex
+	topics    map[string]*pubsub.Topic
+	validated map[string]bool // topics with a registered verify hook (register-once)
+	subs      map[string]*subState
+
+	rctx   context.Context // parent of every receive goroutine; cancelled by Close
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+// subState is one active subscription: its handle and the cancel that stops its
+// receive goroutine (for per-slot Unsubscribe).
+type subState struct {
 	sub    *pubsub.Subscription
-	cancel context.CancelFunc // stops the receive loop
-	wg     sync.WaitGroup     // tracks the receive loop until Close
+	cancel context.CancelFunc
 }
 
 // Start brings up gossipsub with the Prysm-tuned parameters. It does not set
@@ -91,45 +116,138 @@ func (n *Node) Start(ctx context.Context) error {
 	return nil
 }
 
-// JoinTopics registers the verify hook, joins the global block topic,
-// subscribes, and starts the receive loop on ctx. The verify hook sleeps the
-// processing cost and accepts; gossipsub won't forward until it returns, so the
-// delay sits on the propagation path at every hop. Async (default) form — never
-// inline, which would serialize relays. Set OnReceive before calling.
+// JoinTopics initializes topic state, starts the per-node attestation verifier, and
+// joins + subscribes the global block topic (starting its receive loop). Per-subnet
+// membership is added later via Join (publish-only) and Subscribe (mesh). Set
+// OnReceive before calling.
 func (n *Node) JoinTopics(ctx context.Context) error {
-	err := n.ps.RegisterTopicValidator(validator.BlockTopic,
-		func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
-			time.Sleep(n.VerifyDelay())
-			return pubsub.ValidationAccept
-		})
+	n.topics = make(map[string]*pubsub.Topic)
+	n.validated = make(map[string]bool)
+	n.subs = make(map[string]*subState)
+	n.rctx, n.cancel = context.WithCancel(ctx)
+
+	base := n.AttestVerifyDelay
+	if base == nil {
+		base = n.VerifyDelay
+	}
+	window := n.AttestBatchWindow
+	if window <= 0 {
+		window = defaultBatchWindow
+	}
+	n.verifier = newBatchVerifier(base, n.AttestPerItem, window, slog.Default())
+	go n.verifier.run()
+
+	// The block topic: Join + Subscribe with the fixed verify hook, as Phase 1.
+	return n.Subscribe(validator.BlockTopic)
+}
+
+// Join makes the node a publisher on topic without joining its mesh (fan-out
+// publish). Idempotent; registers the topic's verify hook on first join.
+func (n *Node) Join(topic string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.joinLocked(topic)
+}
+
+// joinLocked joins topic and registers its verify hook; caller holds n.mu.
+func (n *Node) joinLocked(topic string) error {
+	if _, ok := n.topics[topic]; ok {
+		return nil
+	}
+	if err := n.registerVerifyHook(topic); err != nil {
+		return err
+	}
+	t, err := n.ps.Join(topic)
 	if err != nil {
 		return err
 	}
-	topic, err := n.ps.Join(validator.BlockTopic)
-	if err != nil {
-		return err
-	}
-	n.topics = map[string]*pubsub.Topic{validator.BlockTopic: topic}
-	sub, err := topic.Subscribe(pubsub.WithBufferSize(4096))
-	if err != nil {
-		return err
-	}
-	n.sub = sub
-	rctx, cancel := context.WithCancel(ctx)
-	n.cancel = cancel
-	n.wg.Go(func() { n.receive(rctx) })
+	n.topics[topic] = t
 	return nil
 }
 
-// Close stops the receive loop and waits for it to exit. A no-op if the node
-// never joined; safe to call once.
+// Subscribe joins topic's mesh (relays + receives), starting a receive goroutine.
+// Idempotent. Backbone subnets call this once; aggregators call it per slot and
+// Unsubscribe at slot end.
+func (n *Node) Subscribe(topic string) error {
+	n.mu.Lock()
+	if err := n.joinLocked(topic); err != nil {
+		n.mu.Unlock()
+		return err
+	}
+	if _, ok := n.subs[topic]; ok {
+		n.mu.Unlock()
+		return nil
+	}
+	t := n.topics[topic]
+	n.mu.Unlock()
+
+	sub, err := t.Subscribe(pubsub.WithBufferSize(4096))
+	if err != nil {
+		return err
+	}
+	sctx, scancel := context.WithCancel(n.rctx)
+	n.mu.Lock()
+	n.subs[topic] = &subState{sub: sub, cancel: scancel}
+	n.mu.Unlock()
+	n.wg.Go(func() { n.receive(sctx, sub) })
+	return nil
+}
+
+// Unsubscribe leaves topic's mesh and stops its receive goroutine. A no-op if not
+// subscribed; the node stays a publisher (still Joined) unless never joined.
+func (n *Node) Unsubscribe(topic string) {
+	n.mu.Lock()
+	s, ok := n.subs[topic]
+	if ok {
+		delete(n.subs, topic)
+	}
+	n.mu.Unlock()
+	if ok {
+		s.cancel()
+		s.sub.Cancel()
+	}
+}
+
+// registerVerifyHook registers topic's validation-as-sleep hook once: attestation
+// subnets share the batched verifier (the M/D/1 flood queue); everything else (the
+// block) gets the fixed per-hop delay. Caller holds n.mu.
+func (n *Node) registerVerifyHook(topic string) error {
+	if n.validated[topic] {
+		return nil
+	}
+	var hook pubsub.ValidatorEx
+	if strings.HasPrefix(topic, validator.AttestationTopicPrefix) {
+		hook = func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
+			n.verifier.submitAndWait(verificationItem{Attestations: []any{nil}})
+			return pubsub.ValidationAccept
+		}
+	} else {
+		hook = func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
+			time.Sleep(n.VerifyDelay())
+			return pubsub.ValidationAccept
+		}
+	}
+	if err := n.ps.RegisterTopicValidator(topic, hook); err != nil {
+		return err
+	}
+	n.validated[topic] = true
+	return nil
+}
+
+// Close stops the receive loops and the verifier and waits for them to exit. A
+// no-op if the node never joined; safe to call once.
 func (n *Node) Close() {
 	if n.cancel != nil {
 		n.cancel()
 	}
 	n.wg.Wait()
-	if n.sub != nil {
-		n.sub.Cancel()
+	n.mu.Lock()
+	for _, s := range n.subs {
+		s.sub.Cancel()
+	}
+	n.mu.Unlock()
+	if n.verifier != nil {
+		n.verifier.stop()
 	}
 }
 
@@ -162,7 +280,9 @@ func (n *Node) ConnectToPeers(peers []int) {
 
 // Publish sends payload on the named (already-joined) topic.
 func (n *Node) Publish(ctx context.Context, topic string, payload []byte) error {
+	n.mu.Lock()
 	t, ok := n.topics[topic]
+	n.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("publish: topic %q not joined", topic)
 	}
@@ -172,9 +292,9 @@ func (n *Node) Publish(ctx context.Context, topic string, payload []byte) error 
 // receive decodes each message off the subscription and hands it outward via
 // OnReceive. It does not skip the node's own loopback publish — there is no
 // clean origin in gossipsub, so that policy lives in the consumer.
-func (n *Node) receive(ctx context.Context) {
+func (n *Node) receive(ctx context.Context, sub *pubsub.Subscription) {
 	for {
-		msg, err := n.sub.Next(ctx)
+		msg, err := sub.Next(ctx)
 		if err != nil {
 			return
 		}
@@ -192,13 +312,19 @@ func (n *Node) receive(ctx context.Context) {
 // decode infers the message type from the gossipsub topic, unmarshals it, and
 // tags it with its Kind.
 func decode(topic string, data []byte, at time.Time) (Received, error) {
-	switch topic {
-	case validator.BlockTopic:
+	switch {
+	case topic == validator.BlockTopic:
 		blk := new(pb.Block)
 		if err := proto.Unmarshal(data, blk); err != nil {
 			return Received{}, err
 		}
 		return Received{Kind: KindBlock, Obj: blk, At: at}, nil
+	case strings.HasPrefix(topic, validator.AttestationTopicPrefix):
+		att := new(pb.Attestation)
+		if err := proto.Unmarshal(data, att); err != nil {
+			return Received{}, err
+		}
+		return Received{Kind: KindAttestation, Obj: att, At: at}, nil
 	default:
 		return Received{}, fmt.Errorf("unknown topic %q", topic)
 	}
