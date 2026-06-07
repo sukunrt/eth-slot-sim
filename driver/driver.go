@@ -82,7 +82,8 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 			AttestBatchWindow: cfg.AttestBatchWindow,
 			D:                 cfg.D, Dlo: cfg.Dlo, Dhi: cfg.Dhi,
 		}
-		r := NewRunner(i, nd, val, cfg.Committee, tracer, cfg.SlotDuration, cfg.AttestationDue, cfg.Prep)
+		r := NewRunner(i, nd, val, cfg.Committee, tracer, cfg.SlotDuration, cfg.AttestationDue,
+			cfg.Prep, cfg.Seed, nw.Peers(i))
 		r.Attach()
 		d.nodes[i] = nd
 		d.runners[i] = r
@@ -90,12 +91,11 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 	return d
 }
 
-// BringUp runs the start-up cadence: Start every node, settle, dial each node's
-// peers, join topics (which starts the receive loops), prepare attestation membership
-// (backbone meshes + duty-subnet joins for numSlots), settle again so meshes form
-// before the first publish. The settle sleeps are load-bearing — publishing before the
-// mesh forms flakes.
-func (d *Driver) BringUp(ctx context.Context, numSlots int) error {
+// BringUp runs the start-up cadence: Start every node, settle, dial each node's base
+// peers, join topics (which starts the receive loops), subscribe each node's own subnets,
+// settle again so the meshes form before the first publish. The settle sleeps are
+// load-bearing — publishing before the mesh forms flakes.
+func (d *Driver) BringUp(ctx context.Context) error {
 	for _, nd := range d.nodes {
 		if err := nd.Start(ctx); err != nil {
 			return err
@@ -111,9 +111,9 @@ func (d *Driver) BringUp(ctx context.Context, numSlots int) error {
 		}
 	}
 	for _, r := range d.runners {
-		r.Prepare(numSlots)
+		r.Prepare()
 	}
-	time.Sleep(time.Second) // let block + backbone meshes form
+	time.Sleep(time.Second) // let the block + subnet meshes form
 	return nil
 }
 

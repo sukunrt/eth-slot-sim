@@ -16,9 +16,11 @@ import (
 	"github.com/ethp2p/slot-sim/validator"
 )
 
-// scenario builds N nodes + NodeRunners over a committee assignment by hand (not via
-// the Driver), so a test can override individual nodes — in particular suppress block
-// delivery to chosen nodes (the test-only OnReceive filter the coupling tests need).
+// scenario builds N nodes + NodeRunners over a committee assignment by hand (not via the
+// Driver), so a test can override individual nodes — in particular suppress block delivery
+// to chosen nodes (the test-only OnReceive filter the coupling tests need). peersP is the
+// base-graph degree; set it below a subnet's subscriber count to force the per-slot dial +
+// relay path (with P=n-1 a publisher reaches everyone directly and the dial is bypassed).
 type scenario struct {
 	a       *committee.Assignment
 	nw      *netsim.Netsim
@@ -27,15 +29,12 @@ type scenario struct {
 	slotDur time.Duration
 }
 
-// buildScenario wires the nodes against tracer. suppressBlock[i] drops block receipts to
-// node i's runner (it still relays via gossipsub) so node i never processes the block —
-// forcing its attestation to the prior-head path. due is the attestation deadline offset.
-func buildScenario(t *testing.T, a *committee.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer) *scenario {
+func buildScenario(t *testing.T, a *committee.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int) *scenario {
 	t.Helper()
 	n := a.Params.N
 	const slotDur = 12 * time.Second
 	nw, err := netsim.NewWithCommittee(a, netsim.Config{
-		N: n, P: n - 1, Seed: 1, MinLatency: 5 * time.Millisecond, MaxLatency: 5 * time.Millisecond,
+		N: n, P: peersP, Seed: 1, MinLatency: 5 * time.Millisecond, MaxLatency: 5 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("netsim: %v", err)
@@ -44,8 +43,8 @@ func buildScenario(t *testing.T, a *committee.Assignment, due time.Duration, sup
 
 	s := &scenario{a: a, nw: nw, slotDur: slotDur}
 	for i := range n {
-		// A small publish offset keeps the proposer from publishing at the exact instant
-		// the bring-up settle unparks every goroutine (which drops the first flood).
+		// A small publish offset keeps the proposer off the exact instant the settle
+		// unparks every goroutine (which drops the first flood).
 		val := validator.New(i, n, 1024, 200*time.Millisecond, 0, rand.New(rand.NewPCG(1, uint64(i))))
 		nd := &node.Node{
 			Num: i, Host: nw.Host(i), Network: nw,
@@ -54,7 +53,7 @@ func buildScenario(t *testing.T, a *committee.Assignment, due time.Duration, sup
 			AttestBatchWindow: 10 * time.Millisecond,
 			D:                 8, Dlo: 6, Dhi: 12,
 		}
-		r := driver.NewRunner(i, nd, val, a, tracer, slotDur, due, 0)
+		r := driver.NewRunner(i, nd, val, a, tracer, slotDur, due, 0, 1, nw.Peers(i))
 		r.Attach()
 		if suppressBlock[i] {
 			orig := nd.OnReceive
@@ -71,10 +70,8 @@ func buildScenario(t *testing.T, a *committee.Assignment, due time.Duration, sup
 	return s
 }
 
-// run brings the fleet up, then runs numSlots, returning the runStart it used (captured
-// AFTER bring-up so slot 0 starts in the future — a runStart in the past would fire the
-// proposer's publish at the chaotic instant the settle returns). Returns once the run
-// plus a drain window completes.
+// run brings the fleet up and runs numSlots, returning the runStart it used (captured
+// AFTER bring-up so slot 0 starts in the future).
 func (s *scenario) run(t *testing.T, ctx context.Context, numSlots int) time.Time {
 	t.Helper()
 	for _, nd := range s.nodes {
@@ -92,9 +89,9 @@ func (s *scenario) run(t *testing.T, ctx context.Context, numSlots int) time.Tim
 		}
 	}
 	for _, r := range s.runners {
-		r.Prepare(numSlots)
+		r.Prepare()
 	}
-	time.Sleep(2 * time.Second) // settle block + backbone meshes + duty-subnet joins
+	time.Sleep(2 * time.Second) // settle block + subnet meshes
 
 	runStart := time.Now()
 	var wg sync.WaitGroup
@@ -109,67 +106,72 @@ func (s *scenario) run(t *testing.T, ctx context.Context, numSlots int) time.Tim
 	return runStart
 }
 
-// genAssignment builds a sized assignment the way simctl/committee.py does (backbone
-// from node-id, an independent per-slot draw of C committees of s_c, capped aggregators,
-// subscribers = backbone subs ∪ aggregator nodes). A test fixture builder — it need not
-// match Python's RNG, since the test asserts against this assignment's own derived sets.
-func genAssignment(n, v, c, sc, backbonePerNode, aggsPerCommittee int, seed uint64) *committee.Assignment {
-	const subnetCount = 64
-	backbone := make([][]int, n)
-	br := rand.New(rand.NewPCG(seed, 1))
-	backboneSubs := map[int][]int{}
-	for nd := range n {
-		backbone[nd] = br.Perm(subnetCount)[:backbonePerNode]
-		slices.Sort(backbone[nd])
-		for _, s := range backbone[nd] {
-			backboneSubs[s] = append(backboneSubs[s], nd)
+// genAssignment builds a sized assignment the way simctl/committee.py does: each node
+// subscribes `spn` random subnets, any subnet under `floor` is topped up, and each slot
+// independently draws C committees of s_c. A test fixture builder — it need not match
+// Python's RNG, since the test asserts against this assignment's own subscriber sets.
+func genAssignment(n, v, c, sc, spn, floor int, seed uint64) *committee.Assignment {
+	subsSets := make([]map[int]bool, c)
+	for i := range subsSets {
+		subsSets[i] = map[int]bool{}
+	}
+	srng := rand.New(rand.NewPCG(seed, 1))
+	per := min(spn, c)
+	for node := range n {
+		for _, s := range srng.Perm(c)[:per] {
+			subsSets[s][node] = true
 		}
 	}
-	cr := rand.New(rand.NewPCG(seed, 2))
-	vals := cr.Perm(v)[:c*sc]
+	f := min(floor, n)
+	frng := rand.New(rand.NewPCG(seed, 11))
+	for s := range c {
+		for _, node := range frng.Perm(n) {
+			if len(subsSets[s]) >= f {
+				break
+			}
+			subsSets[s][node] = true
+		}
+	}
+	subnetSubscribers := make([][]int, c)
+	for s := range c {
+		subnetSubscribers[s] = sortedKeys(subsSets[s])
+	}
 	sp := committee.SlotPlan{Slot: 0}
+	vals := rand.New(rand.NewPCG(seed, 2)).Perm(v)[:c*sc]
 	for ci := range c {
 		com := make([]committee.AttesterRef, sc)
 		for pos := range sc {
 			val := vals[ci*sc+pos]
 			com[pos] = committee.AttesterRef{Node: val % n, Val: val, Subnet: ci, Position: pos}
 		}
-		aggPos := rand.New(rand.NewPCG(seed, uint64(100+ci))).Perm(sc)[:min(aggsPerCommittee, sc)]
-		subSet := map[int]bool{}
-		for _, nd := range backboneSubs[ci] {
-			subSet[nd] = true
-		}
-		var aggs []committee.AttesterRef
-		for _, p := range aggPos {
-			aggs = append(aggs, com[p])
-			subSet[com[p].Node] = true
-		}
-		subs := make([]int, 0, len(subSet))
-		for nd := range subSet {
-			subs = append(subs, nd)
-		}
-		slices.Sort(subs)
 		sp.Committees = append(sp.Committees, com)
 		sp.SubnetOf = append(sp.SubnetOf, ci)
-		sp.Aggregators = append(sp.Aggregators, aggs)
-		sp.Subscribers = append(sp.Subscribers, subs)
 	}
 	return &committee.Assignment{
 		Params: committee.Params{
-			N: n, V: v, C: c, Sc: sc, SubnetCount: subnetCount,
-			BackbonePerNode: backbonePerNode, AggsPerCommittee: aggsPerCommittee, Seed: seed, NumSlots: 1,
+			N: n, V: v, C: c, Sc: sc, SubnetCount: 64,
+			BackbonePerNode: spn, SubscribeFloor: floor, Seed: seed, NumSlots: 1,
 		},
-		Backbone: backbone,
-		Slots:    []committee.SlotPlan{sp},
+		SubnetSubscribers: subnetSubscribers,
+		Slots:             []committee.SlotPlan{sp},
 	}
+}
+
+func sortedKeys(m map[int]bool) []int {
+	out := make([]int, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // attestKey identifies one published attestation across its arrivals.
 type attestKey struct{ subnet, attester int }
 
-// assertCoverageNoLeakage checks the strongest invariant (§8.2): every published
-// attestation reaches exactly ExpectedSubscribers(subnet) \ {publisher} — no missing, no
-// leaked (arrival at a non-subscriber), no duplicate — set-equality both directions.
+// assertCoverageNoLeakage checks the strongest invariant: every published attestation
+// reaches exactly Subscribers(subnet) \ {publisher} — no missing, leaked (arrival at a
+// non-subscriber), or duplicate.
 func assertCoverageNoLeakage(t *testing.T, a *committee.Assignment, rec *metrics.Recorder, slot int) {
 	t.Helper()
 	got := map[attestKey]map[int]bool{}
@@ -198,7 +200,7 @@ func assertCoverageNoLeakage(t *testing.T, a *committee.Assignment, rec *metrics
 	for _, com := range a.Slots[slot].Committees {
 		for _, ref := range com {
 			want := map[int]bool{}
-			for _, nd := range a.ExpectedSubscribers(slot, ref.Subnet) {
+			for _, nd := range a.Subscribers(ref.Subnet) {
 				if nd != ref.Node {
 					want[nd] = true
 				}
@@ -227,30 +229,21 @@ func keys(m map[int]bool) []int {
 }
 
 // oneCommittee builds an N-node assignment with a single committee of the given attester
-// nodes on subnet 0, all of them backbone subscribers of subnet 0 (so they relay +
-// receive). Nodes outside the committee back a different subnet. One slot.
+// nodes on subnet 0, where those same nodes are subnet 0's subscribers (so they mesh and
+// receive each other's attestations). One slot.
 func oneCommittee(n int, attesters []int) *committee.Assignment {
-	backbone := make([][]int, n)
-	for i := range backbone {
-		backbone[i] = []int{1} // default: some other subnet
-	}
-	var com []committee.AttesterRef
+	com := make([]committee.AttesterRef, len(attesters))
 	for pos, node := range attesters {
-		backbone[node] = []int{0}
-		com = append(com, committee.AttesterRef{Node: node, Val: node, Subnet: 0, Position: pos})
+		com[pos] = committee.AttesterRef{Node: node, Val: node, Subnet: 0, Position: pos}
 	}
-	subs := append([]int(nil), attesters...)
 	return &committee.Assignment{
 		Params: committee.Params{
-			N: n, V: n, C: 1, Sc: len(attesters), SubnetCount: 64, BackbonePerNode: 1, NumSlots: 1,
+			N: n, V: n, C: 1, Sc: len(attesters), SubnetCount: 64,
+			BackbonePerNode: 1, SubscribeFloor: len(attesters), Seed: 1, NumSlots: 1,
 		},
-		Backbone: backbone,
+		SubnetSubscribers: [][]int{slices.Sorted(slices.Values(attesters))},
 		Slots: []committee.SlotPlan{{
-			Slot:        0,
-			Committees:  [][]committee.AttesterRef{com},
-			SubnetOf:    []int{0},
-			Aggregators: [][]committee.AttesterRef{{}},
-			Subscribers: [][]int{subs},
+			Slot: 0, Committees: [][]committee.AttesterRef{com}, SubnetOf: []int{0},
 		}},
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/ethp2p/slot-sim/committee"
 	"github.com/ethp2p/slot-sim/driver"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/netsim"
@@ -37,6 +38,14 @@ type params struct {
 	Dlo             int     `json:"dlo"`
 	Dhi             int     `json:"dhi"`
 	Seed            uint64  `json:"seed"`
+
+	// Attestation phase (empty Committee ⇒ block-only).
+	Committee        string `json:"committee"`
+	AttDueMs         int    `json:"att_due_ms"`
+	PrepMs           int    `json:"prep_ms"`
+	AttVerifyMs      int    `json:"att_verify_ms"`
+	AttPerItemMs     int    `json:"att_per_item_ms"`
+	AttBatchWindowMs int    `json:"att_batch_window_ms"`
 }
 
 // TestRun is the simnet backend: it runs the block-dissemination scenario over a
@@ -71,7 +80,7 @@ func TestRun(t *testing.T) {
 		}
 		t.Cleanup(nw.Close)
 
-		d := driver.New(nw, driver.Config{
+		cfg := driver.Config{
 			BlockSize:    p.BlockSize,
 			SlotDuration: time.Duration(p.SlotSeconds) * time.Second,
 			Offset:       time.Duration(p.OffsetMs) * time.Millisecond,
@@ -79,11 +88,24 @@ func TestRun(t *testing.T) {
 			VerifyDelay:  func() time.Duration { return time.Duration(p.VerifyMs) * time.Millisecond },
 			D:            p.D, Dlo: p.Dlo, Dhi: p.Dhi,
 			Seed: p.Seed,
-		}, rec)
+		}
+		if p.Committee != "" {
+			a, err := committee.Load(p.Committee)
+			if err != nil {
+				t.Fatalf("load committee %s: %v", p.Committee, err)
+			}
+			cfg.Committee = a
+			cfg.AttestationDue = time.Duration(p.AttDueMs) * time.Millisecond
+			cfg.Prep = time.Duration(p.PrepMs) * time.Millisecond
+			cfg.AttestVerifyDelay = func() time.Duration { return time.Duration(p.AttVerifyMs) * time.Millisecond }
+			cfg.AttestPerItem = time.Duration(p.AttPerItemMs) * time.Millisecond
+			cfg.AttestBatchWindow = time.Duration(p.AttBatchWindowMs) * time.Millisecond
+		}
+		d := driver.New(nw, cfg, rec)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		if err := d.BringUp(ctx, p.NumSlots); err != nil {
+		if err := d.BringUp(ctx); err != nil {
 			t.Fatal(err)
 		}
 		d.Run(ctx, time.Now(), p.NumSlots)

@@ -33,6 +33,25 @@ class GossipsubParams(BaseModel):
     Dhigh: int = 12
 
 
+class AttestationConfig(BaseModel):
+    """Attestation phase knobs. Present ⇒ the run adds the block→attestation response.
+    V, C, s_c are independent (only C·s_c ≤ V); see committee.py."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    validators: int = 64  # V, mapped over the N nodes
+    committees: int = 1  # C, active attestation subnets per slot
+    committee_size: int = 8  # s_c, attesters per committee per slot
+    subnet_count: int = 64
+    backbone_per_node: int = 2  # subnets each node subscribes (capped at C)
+    subscribe_floor: int = 10  # min subscribers per active subnet
+    attestation_due_ms: int = 4000  # ATTESTATION_DUE (3333 bp of a 12 s slot)
+    prep_ms: int = 0  # Δ_prep before emitting on block receipt
+    verify_delay_ms: int = 10  # batched verifier base delay
+    per_item_ms: int = 0  # batched verifier per-attestation cost
+    batch_window_ms: int = 50  # batched verifier window
+
+
 class SimConfig(BaseModel):
     """Root configuration for a single block-dissemination run."""
 
@@ -40,6 +59,7 @@ class SimConfig(BaseModel):
 
     topology: TopologyConfig = Field(default_factory=TopologyConfig)
     gossipsub: GossipsubParams = Field(default_factory=GossipsubParams)
+    attestation: AttestationConfig | None = None  # present ⇒ run the attestation phase
     num_slots: int = 5
     slot_duration_seconds: int = 12
     block_size: int = 128 * 1024

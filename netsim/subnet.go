@@ -1,22 +1,30 @@
 package netsim
 
 import (
+	"math/rand/v2"
+
 	"github.com/marcopolo/simnet"
 
 	"github.com/ethp2p/slot-sim/committee"
 )
 
-// subnetReach bounds how many of a subnet's backbone subscribers a publisher/aggregator
-// connects to: enough to seed fan-out into the subnet's (connected) subgraph, not all of
-// them — so per-node degree stays bounded as the subscriber set grows with N.
-const subnetReach = 16
+// Distinct PCG streams (continuing netsim.go's set) so the subnet-mesh and fill draws
+// don't correlate with latency/supernode/peer draws from the same seed.
+const (
+	subnetStream = 4
+	fillStream   = 5
+)
 
-// NewWithCommittee builds a subnet-aware network from a committee assignment: the
-// raised-P random graph (the global block topic + base connectivity) augmented from the
-// known subnet membership so that, by construction, each subnet's subscribers form a
-// connected subgraph and every publisher/aggregator reaches them. This is the generator
-// "playing discv5" — reachability comes from construction, not chance (§3). Latency and
-// bandwidth come from cfg as in New; N is taken from the assignment.
+// subnetMeshDegree is how many subnet-mates each subscriber connects to within a subnet —
+// ~the gossipsub mesh degree D, so the subscribers can form a working mesh.
+const subnetMeshDegree = 8
+
+// NewWithCommittee builds a discv5-biased network from a committee assignment: every node
+// keeps ~P long-lived peers, biased so the subscribers of each subnet are connected to
+// each other (a mesh) and the whole graph stays connected for the block topic. Publishers
+// reach a subnet they don't subscribe by dialing its subscribers per slot (the driver),
+// not via static edges here. Latency and bandwidth come from cfg as in New; N is the
+// assignment's.
 func NewWithCommittee(a *committee.Assignment, cfg Config) (*Netsim, error) {
 	n := a.Params.N
 	supers := pickSupernodes(n, cfg.SuperFrac, cfg.Seed)
@@ -26,15 +34,18 @@ func NewWithCommittee(a *committee.Assignment, cfg Config) (*Netsim, error) {
 		return nil, err
 	}
 	sim.Start()
-	return &Netsim{sim: sim, hosts: hosts, peers: subnetAwareGraph(a, cfg.P, cfg.Seed), supers: supers}, nil
+	return &Netsim{sim: sim, hosts: hosts, peers: discv5Graph(a, cfg.P, cfg.Seed), supers: supers}, nil
 }
 
-// subnetAwareGraph overlays subnet connectivity onto the base random-P graph. For each
-// subnet it (a) rings its backbone subscribers together so the mesh can form, and (b)
-// links every node that publishes to or aggregates the subnet to a few of those
-// subscribers so fan-out always has somewhere to send. Returns symmetric adjacency.
-func subnetAwareGraph(a *committee.Assignment, p int, seed uint64) [][]int {
+// discv5Graph builds each node's ~p long-lived peers: a global ring (block-topic
+// connectivity), then for each subnet a connected mesh over its subscribers (ring +
+// random chords up to subnetMeshDegree), then random peers to fill each node toward p.
+// p is clamped to n-1. Returns symmetric adjacency.
+func discv5Graph(a *committee.Assignment, p int, seed uint64) [][]int {
 	n := a.Params.N
+	if p > n-1 {
+		p = n - 1
+	}
 	adj := make([][]int, n)
 	edge := make([]map[int]bool, n)
 	for i := range n {
@@ -48,43 +59,34 @@ func subnetAwareGraph(a *committee.Assignment, p int, seed uint64) [][]int {
 		adj[i] = append(adj[i], j)
 		adj[j] = append(adj[j], i)
 	}
-
-	for i, peers := range peerGraph(n, p, seed) { // base: global topic + connectivity
-		for _, j := range peers {
-			add(i, j)
-		}
+	if n < 2 {
+		return adj
 	}
 
-	backboneSubs := make(map[int][]int)
-	for node, subnets := range a.Backbone {
-		for _, s := range subnets {
-			backboneSubs[s] = append(backboneSubs[s], node)
-		}
+	for i := range n { // global ring: keep the block topic connected
+		add(i, (i+1)%n)
 	}
-	for _, subs := range backboneSubs { // (a) connect each subnet's subscribers in a ring
-		for i := 1; i < len(subs); i++ {
-			add(subs[i-1], subs[i])
+
+	// Subnet meshes: each subnet's subscribers form a connected ~D-degree subgraph, so an
+	// attestation handed to a couple of them spreads to all of them.
+	srng := rand.New(rand.NewPCG(seed, subnetStream))
+	for _, subs := range a.SubnetSubscribers {
+		m := len(subs)
+		for i := range m {
+			add(subs[i], subs[(i+1)%m]) // ring → guaranteed connected
 		}
-		if len(subs) > 2 {
-			add(subs[len(subs)-1], subs[0])
-		}
-	}
-	reach := func(node, subnet int) { // (b) link a publisher/aggregator to subscribers
-		subs := backboneSubs[subnet]
-		for i := 0; i < len(subs) && i < subnetReach; i++ {
-			add(node, subs[i])
-		}
-	}
-	for _, sp := range a.Slots {
-		for _, com := range sp.Committees {
-			for _, r := range com {
-				reach(r.Node, r.Subnet)
+		for _, u := range subs { // chords → ~subnetMeshDegree within the subnet
+			for k := 0; k < subnetMeshDegree && k < m-1; k++ {
+				add(u, subs[srng.IntN(m)])
 			}
 		}
-		for _, aggs := range sp.Aggregators {
-			for _, r := range aggs {
-				reach(r.Node, r.Subnet)
-			}
+	}
+
+	// Random fill toward p for general connectivity (also carries the block topic).
+	frng := rand.New(rand.NewPCG(seed, fillStream))
+	for i := range n {
+		for tries := 0; len(adj[i]) < p && tries < p*4; tries++ {
+			add(i, frng.IntN(n))
 		}
 	}
 	return adj

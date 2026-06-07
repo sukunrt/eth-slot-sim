@@ -219,6 +219,39 @@ def generate_random_topology(
     return Topology(nodes=nodes, edges=edges, fanout_nodes=fanout_node_nums)
 
 
+def augment_subnet_edges(topology, assignment, min_latency_ms: int = 0) -> None:
+    """Connect each subnet's subscribers to each other (a ring plus a few chords) so they
+    form a mesh — an attestation handed to a couple of them spreads to all of them. The
+    base random graph already gives general/block connectivity, and publishers dial into a
+    subnet they don't subscribe per slot (the Go runner), so no static publisher→subscriber
+    edges are needed here. Mirrors netsim's discv5Graph. Mutates topology.
+
+    `assignment` is a simctl.committee.Assignment.
+    """
+    chords = 8  # ~gossipsub D: in-subnet links per subscriber
+    latencies = load_latencies()
+    country = {n.num: n.country for n in topology.nodes}
+    existing = {(e.source, e.target) for e in topology.edges}
+    rng = random.Random(assignment.params.seed * 1_000_003 + 4)
+
+    def add(u: int, v: int) -> None:
+        if u == v:
+            return
+        for a, b in ((u, v), (v, u)):
+            if (a, b) not in existing:
+                lat = max(latencies.get(country[a], {}).get(country[b], 100), min_latency_ms)
+                topology.edges.append(Edge(source=a, target=b, latency_ms=lat))
+                existing.add((a, b))
+
+    for subs in assignment.subnet_subscribers:
+        m = len(subs)
+        for i in range(m):
+            add(subs[i], subs[(i + 1) % m])  # ring → guaranteed connected
+        for u in subs:  # chords → ~D-degree mesh within the subnet
+            for _ in range(min(chords, m - 1)):
+                add(u, subs[rng.randrange(m)])
+
+
 def generate_ring_topology(
     num_nodes: int,
     seed: int,

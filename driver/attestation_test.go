@@ -46,7 +46,7 @@ func TestAttestationsFireAtDeadline(t *testing.T) {
 		const sc, due = 3, 4 * time.Second
 		a := oneCommittee(4, []int{1, 2, 3}) // node 0 is the (excluded) proposer
 		tr := &timeTracer{}
-		s := buildScenario(t, a, due, map[int]bool{1: true, 2: true, 3: true}, tr)
+		s := buildScenario(t, a, due, map[int]bool{1: true, 2: true, 3: true}, tr, 3)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)

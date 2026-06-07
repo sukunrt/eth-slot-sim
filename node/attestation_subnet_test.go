@@ -45,23 +45,21 @@ func (s *attSink) receivers(k attKey) []int {
 	return out
 }
 
-// M2 / §8.2: a publisher that is NOT a subscriber of subnet S still reaches every
-// subscriber (fan-out), and a non-subscriber receives nothing — got == want both ways.
-// The subnet-aware graph guarantees the publisher connects to S's subscribers (the
-// generator "plays discv5"); reachability must come from construction, not chance.
+// M2: a publisher that is NOT a subscriber of subnet S dials a couple of S's subscribers
+// and reaches all of them (they relay over the subnet mesh); a non-subscriber (node 3)
+// receives nothing — got == want both ways. Reachability comes from the per-slot dial
+// (what the runner does), not a static edge.
 func TestSubnetFanOutReachesSubscribersOnly(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		// subnet 0's backbone subscribers = {1,2}; node 0 attests subnet 0 (publisher,
-		// not a subscriber); node 3 is uninvolved in subnet 0.
+		// subnet 0's subscribers = {1,2}; node 0 attests subnet 0 (publisher, not a
+		// subscriber); node 3 is uninvolved in subnet 0.
 		a := &committee.Assignment{
-			Params:   committee.Params{N: 4, V: 4, C: 1, Sc: 1, SubnetCount: 64, BackbonePerNode: 1, NumSlots: 1},
-			Backbone: [][]int{{10}, {0}, {0}, {11}},
+			Params:            committee.Params{N: 4, V: 4, C: 1, Sc: 1, SubnetCount: 64, BackbonePerNode: 1, SubscribeFloor: 2, NumSlots: 1},
+			SubnetSubscribers: [][]int{{1, 2}},
 			Slots: []committee.SlotPlan{{
-				Slot:        0,
-				Committees:  [][]committee.AttesterRef{{{Node: 0, Val: 0, Subnet: 0, Position: 0}}},
-				SubnetOf:    []int{0},
-				Aggregators: [][]committee.AttesterRef{{}},
-				Subscribers: [][]int{{1, 2}},
+				Slot:       0,
+				Committees: [][]committee.AttesterRef{{{Node: 0, Val: 0, Subnet: 0, Position: 0}}},
+				SubnetOf:   []int{0},
 			}},
 		}
 		nw, err := netsim.NewWithCommittee(a, netsim.Config{
@@ -109,8 +107,9 @@ func TestSubnetFanOutReachesSubscribersOnly(t *testing.T) {
 		topic := validator.AttestationTopic(0)
 		mustDo(t, nodes[1].Subscribe(topic)) // subscribers join the mesh
 		mustDo(t, nodes[2].Subscribe(topic))
-		mustDo(t, nodes[0].Join(topic)) // publisher fans out without subscribing
-		time.Sleep(2 * time.Second)  // let subscriptions propagate + mesh form
+		mustDo(t, nodes[0].Join(topic))  // publisher joins to publish...
+		nodes[0].Dial([]int{1, 2})       // ...and dials the subscribers (what the runner does)
+		time.Sleep(2 * time.Second)      // let subscriptions propagate + mesh form
 
 		msg := validator.MakeAttestation(0, 0, 0, 0, -1) // slot0 subnet0 val0 origin0, prior vote
 		if err := nodes[0].Publish(ctx, topic, msg.Payload); err != nil {

@@ -18,7 +18,7 @@ func TestCouplingForcedFlip(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		a := oneCommittee(4, []int{1, 2, 3})
 		rec := metrics.NewRecorder()
-		s := buildScenario(t, a, 4*time.Second, map[int]bool{1: true}, rec)
+		s := buildScenario(t, a, 4*time.Second, map[int]bool{1: true}, rec, 3)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
@@ -71,7 +71,7 @@ func TestCouplingDeadlineSweep(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				a := oneCommittee(4, []int{1, 2, 3})
 				rec := metrics.NewRecorder()
-				s := buildScenario(t, a, c.due, nil, rec)
+				s := buildScenario(t, a, c.due, nil, rec, 3)
 
 				ctx, cancel := context.WithCancel(context.Background())
 				t.Cleanup(cancel)

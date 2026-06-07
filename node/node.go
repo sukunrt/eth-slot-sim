@@ -256,16 +256,25 @@ func (n *Node) Close() {
 	}
 }
 
-// ConnectToPeers dials the given node numbers. It skips peers <= Num so each
-// undirected edge is dialed once; the QUIC connection is bidirectional.
+// ConnectToPeers dials the given node numbers for the long-lived base graph, skipping
+// peers <= Num so each undirected edge is dialed once; the QUIC connection is bidirectional.
 func (n *Node) ConnectToPeers(peers []int) {
+	out := peers[:0:0]
+	for _, p := range peers {
+		if p > n.Num {
+			out = append(out, p)
+		}
+	}
+	n.Dial(out)
+}
+
+// Dial connects to the given node numbers (no dedup skip — for the per-slot subnet
+// dials). An already-open connection is reused.
+func (n *Node) Dial(peers []int) {
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	sema := make(chan struct{}, 20)
 	for _, peerNum := range peers {
-		if peerNum <= n.Num {
-			continue
-		}
 		sema <- struct{}{}
 		wg.Go(func() {
 			defer func() { <-sema }()
@@ -281,6 +290,20 @@ func (n *Node) ConnectToPeers(peers []int) {
 		})
 	}
 	wg.Wait()
+}
+
+// Disconnect closes the connections to the given node numbers (the per-slot subnet dials
+// dropped at slot end).
+func (n *Node) Disconnect(peers []int) {
+	for _, peerNum := range peers {
+		peerID, err := PeerIDFromNodeNum(peerNum)
+		if err != nil {
+			continue
+		}
+		if err := n.Host.Network().ClosePeer(peerID); err != nil {
+			slog.Error("disconnect failed", "node", n.Num, "peer", peerNum, "err", err)
+		}
+	}
 }
 
 // Publish sends payload on the named (already-joined) topic.

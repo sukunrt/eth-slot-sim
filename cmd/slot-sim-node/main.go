@@ -107,7 +107,8 @@ func main() {
 		AttestPerItem:     *attestPerItem, AttestBatchWindow: *attestWindow,
 		D: *d, Dlo: *dlo, Dhi: *dhi,
 	}
-	runner := driver.NewRunner(*nodeNum, nd, val, comm, tracer, *slotDur, *attDue, *prep)
+	peers := parseIntList(*peerNumsStr)
+	runner := driver.NewRunner(*nodeNum, nd, val, comm, tracer, *slotDur, *attDue, *prep, *seed, peers)
 	runner.Attach() // sets nd.OnReceive before JoinTopics
 
 	ctx := context.Background()
@@ -119,13 +120,13 @@ func main() {
 	// fleet doesn't dial then GRAFT in lockstep. The -startup window then lets
 	// every host settle and mesh before slot 0.
 	time.Sleep(rand.N(time.Second))
-	nd.ConnectToPeers(parseIntList(*peerNumsStr))
+	nd.ConnectToPeers(peers)
 	slog.Info("peers connected", "node", *nodeNum)
 	time.Sleep(rand.N(meshJoinStagger))
 	if err := nd.JoinTopics(ctx); err != nil {
 		log.Fatalf("join topics: %v", err)
 	}
-	runner.Prepare(*numSlots) // backbone subscribe + duty-subnet joins, before the settle
+	runner.Prepare() // subscribe this node's own subnets, before the settle
 
 	runStart := programStart.Add(*startup)
 	time.Sleep(time.Until(runStart)) // chillax until slot 0 — every host has meshed

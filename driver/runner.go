@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -26,6 +27,8 @@ type NodeRunner struct {
 	slotDur time.Duration
 	due     time.Duration // attestation deadline, offset into the slot
 	prep    time.Duration // Δ_prep before emitting on block receipt
+	seed    uint64        // seeds the per-slot subnet-peer dial choice
+	base    map[int]bool  // the node's long-lived peers (so we know which dials are extra)
 
 	runCtx context.Context // set at Run; used by emit/publish
 	mu     sync.Mutex
@@ -34,60 +37,50 @@ type NodeRunner struct {
 
 // slotState is the per-(node, slot) coupling holder.
 type slotState struct {
-	deadline   time.Time
-	duties     []committee.AttestDuty
-	aggSubnets []int
-	timer      *time.Timer
-	emitOnce   sync.Once
+	deadline time.Time
+	duties   []committee.AttestDuty
+	dialed   []int // extra peers dialed this slot, dropped at slot end
+	timer    *time.Timer
+	emitOnce sync.Once
 
 	seen       bool
 	seenAt     time.Time
 	seenOrigin int
 }
 
-// NewRunner builds a runner for one node. comm may be nil (block-only).
+// NewRunner builds a runner for one node. comm may be nil (block-only). basePeers is the
+// node's long-lived peer set (so per-slot subnet dials it adds on top can be dropped).
 func NewRunner(num int, nd *node.Node, val *validator.Validator, comm *committee.Assignment,
-	tracer metrics.Tracer, slotDur, due, prep time.Duration) *NodeRunner {
+	tracer metrics.Tracer, slotDur, due, prep time.Duration, seed uint64, basePeers []int) *NodeRunner {
+	base := make(map[int]bool, len(basePeers))
+	for _, p := range basePeers {
+		base[p] = true
+	}
 	return &NodeRunner{
 		num: num, nd: nd, val: val, comm: comm, tracer: tracer,
-		slotDur: slotDur, due: due, prep: prep, slots: make(map[int]*slotState),
+		slotDur: slotDur, due: due, prep: prep, seed: seed, base: base,
+		slots: make(map[int]*slotState),
 	}
 }
 
 // Attach wires the runner as the node's receive sink. Call before JoinTopics.
 func (r *NodeRunner) Attach() { r.nd.OnReceive = r.onReceive }
 
-// Prepare joins the node's long-lived backbone subnet meshes and (publish-only) every
-// subnet it will attest on across the run. Call during bring-up (before the settle) so
-// both are processed before slot 0 — otherwise a fast block-driven emit in slot 0 would
-// publish into an ungrafted mesh or a topic the router hasn't set up yet, and be lost.
-// Per-slot aggregator subscribes still happen in beginSlot.
-func (r *NodeRunner) Prepare(numSlots int) {
+// Prepare subscribes the node's own subnets (its long-lived meshes). Call during bring-up,
+// before the settle, so the meshes form before slot 0.
+func (r *NodeRunner) Prepare() {
 	if r.comm == nil {
 		return
 	}
-	view := r.comm.Node(r.num)
-	for _, s := range view.Backbone() {
+	for _, s := range r.comm.Node(r.num).SubscribedSubnets() {
 		if err := r.nd.Subscribe(validator.AttestationTopic(s)); err != nil {
-			slog.Error("subscribe backbone failed", "node", r.num, "subnet", s, "err", err)
-		}
-	}
-	joined := map[int]bool{}
-	for slot := range numSlots {
-		for _, d := range view.AttestDuties(slot) {
-			if joined[d.Subnet] {
-				continue
-			}
-			joined[d.Subnet] = true
-			if err := r.nd.Join(validator.AttestationTopic(d.Subnet)); err != nil {
-				slog.Error("join duty subnet failed", "node", r.num, "subnet", d.Subnet, "err", err)
-			}
+			slog.Error("subscribe subnet failed", "node", r.num, "subnet", s, "err", err)
 		}
 	}
 }
 
-// Run executes numSlots slots from runStart: per slot publish block duties, arm the
-// attestation deadline, and clean up at slot end. Call SubscribeBackbone first.
+// Run executes numSlots slots from runStart: per slot publish block duties, dial this
+// slot's subnet peers, arm the attestation deadline, and clean up at slot end.
 func (r *NodeRunner) Run(ctx context.Context, runStart time.Time, numSlots int) {
 	r.runCtx = ctx
 	for slot := range numSlots {
@@ -98,23 +91,45 @@ func (r *NodeRunner) Run(ctx context.Context, runStart time.Time, numSlots int) 
 	}
 }
 
-// beginSlot caches this node's attest duties, subscribes this slot's aggregator subnets,
-// and arms the deadline timer (all before publishing the block, so a proposer that also
-// attests can self-vote its own block), then publishes its block duties.
+// beginSlot dials 2 subscribers of each subnet this node attests but doesn't subscribe
+// (so a fan-out publish has somewhere to land), arms the deadline timer, then publishes
+// the block — all before the block publish, so a proposer that also attests can self-vote.
 func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 	var ss *slotState
 	if r.comm != nil {
 		view := r.comm.Node(r.num)
-		ss = &slotState{
-			deadline:   slotStart.Add(r.due),
-			duties:     view.AttestDuties(slot),
-			aggSubnets: view.AggregatorSubnets(slot),
+		ss = &slotState{deadline: slotStart.Add(r.due), duties: view.AttestDuties(slot)}
+
+		subscribed := map[int]bool{}
+		for _, s := range view.SubscribedSubnets() {
+			subscribed[s] = true
 		}
-		for _, s := range ss.aggSubnets {
-			if err := r.nd.Subscribe(validator.AttestationTopic(s)); err != nil {
-				slog.Error("subscribe aggregator failed", "node", r.num, "subnet", s, "err", err)
+		needDial := map[int]bool{}
+		for _, d := range ss.duties {
+			if !subscribed[d.Subnet] {
+				needDial[d.Subnet] = true
 			}
 		}
+		picked := map[int]bool{}
+		for subnet := range needDial {
+			if err := r.nd.Join(validator.AttestationTopic(subnet)); err != nil {
+				slog.Error("join duty subnet failed", "node", r.num, "subnet", subnet, "err", err)
+			}
+			n := 0
+			for _, peer := range r.shuffledSubscribers(slot, subnet) {
+				if n >= 2 {
+					break
+				}
+				if peer == r.num || r.base[peer] || picked[peer] {
+					continue
+				}
+				picked[peer] = true
+				ss.dialed = append(ss.dialed, peer)
+				n++
+			}
+		}
+		r.nd.Dial(ss.dialed) // synchronous: connections are up before the slot proceeds
+
 		r.mu.Lock()
 		r.slots[slot] = ss
 		r.mu.Unlock()
@@ -126,16 +141,25 @@ func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 	return ss
 }
 
-// endSlot stops the deadline timer, leaves this slot's aggregator subnets, and prunes
-// the slot state so nothing leaks across a multi-slot run.
+// shuffledSubscribers returns subnet's subscribers in a seeded order (so the 2 dialed are
+// reproducible across runs/backends), keyed by (seed, slot, subnet).
+func (r *NodeRunner) shuffledSubscribers(slot, subnet int) []int {
+	subs := r.comm.Subscribers(subnet)
+	order := make([]int, len(subs))
+	copy(order, subs)
+	rng := rand.New(rand.NewPCG(r.seed, uint64(slot)*1_000_003+uint64(subnet)))
+	rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
+	return order
+}
+
+// endSlot stops the deadline timer, disconnects this slot's extra dials, and prunes the
+// slot state so connections and state don't leak across a multi-slot run.
 func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 	if ss == nil {
 		return
 	}
 	ss.timer.Stop()
-	for _, s := range ss.aggSubnets {
-		r.nd.Unsubscribe(validator.AttestationTopic(s))
-	}
+	r.nd.Disconnect(ss.dialed)
 	r.mu.Lock()
 	delete(r.slots, slot)
 	r.mu.Unlock()

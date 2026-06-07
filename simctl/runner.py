@@ -16,13 +16,35 @@ from typing import Any
 import yaml
 
 from analysis import check_arrivals
+from simctl import committee
 from simctl.config import SimConfig
 from simctl.manifest import format_dir_timestamp, random_suffix, write_json_atomic
 from simctl.topology import (
     Topology,
+    augment_subnet_edges,
     generate_random_topology,
     generate_ring_topology,
 )
+
+
+def _committee_assignment(config: SimConfig) -> committee.Assignment | None:
+    """The committee assignment for this run, or None if the attestation phase is off."""
+    a = config.attestation
+    if a is None:
+        return None
+    return committee.generate(
+        committee.Params(
+            n=config.topology.num_nodes,
+            v=a.validators,
+            c=a.committees,
+            sc=a.committee_size,
+            subnet_count=a.subnet_count,
+            backbone_per_node=a.backbone_per_node,
+            subscribe_floor=a.subscribe_floor,
+            seed=config.seed,
+            num_slots=config.num_slots,
+        )
+    )
 
 
 def get_root() -> Path:
@@ -73,7 +95,9 @@ def generate_gml(topology: Topology, latency_multiple: float = 1.0) -> str:
     return "\n".join(lines)
 
 
-def _host_args(config: SimConfig, node_num: int, num_nodes: int, peers: list[int]) -> str:
+def _host_args(
+    config: SimConfig, node_num: int, num_nodes: int, peers: list[int], committee_path: str
+) -> str:
     """Command-line args for one slot-sim-node host. Shared flags are identical
     across hosts; node-num and peer-nums are per-host."""
     args = [
@@ -91,6 +115,16 @@ def _host_args(config: SimConfig, node_num: int, num_nodes: int, peers: list[int
         f"-seed={config.seed}",
         f"-startup={config.startup_seconds}s",
     ]
+    if config.attestation is not None:
+        a = config.attestation
+        args += [
+            f"-committee={committee_path}",  # absolute: a host's cwd is its own data dir
+            f"-att-due={a.attestation_due_ms}ms",
+            f"-prep={a.prep_ms}ms",
+            f"-attest-verify-delay={a.verify_delay_ms}ms",
+            f"-attest-per-item={a.per_item_ms}ms",
+            f"-attest-batch-window={a.batch_window_ms}ms",
+        ]
     if peers:
         args.append(f"-peer-nums={','.join(str(p) for p in peers)}")
     return " ".join(args)
@@ -109,6 +143,7 @@ def generate_shadow_yaml(
     config: SimConfig,
     topology: Topology,
     peer_lists: dict[int, list[int]],
+    committee_path: str = "",
     binary_path: str = "./slot-sim-node",
 ) -> dict[str, Any]:
     """Shadow configuration: one host per node, plus the GML network."""
@@ -120,7 +155,7 @@ def generate_shadow_yaml(
             "network_node_id": node.num,
             "processes": [{
                 "path": binary_path,
-                "args": _host_args(config, node.num, num_nodes, peer_lists.get(node.num, [])),
+                "args": _host_args(config, node.num, num_nodes, peer_lists.get(node.num, []), committee_path),
                 "start_time": "0 sec",
             }],
         }
@@ -162,7 +197,7 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
     The harness reads these as JSON via SIMRUN_PARAMS; topology and csv paths are
     added per-run by run_simnet. latency_multiple mirrors the scaling generate_gml
     applies for Shadow."""
-    return {
+    params: dict[str, Any] = {
         "latency_multiple": config.topology.latency_multiple,
         "num_slots": config.num_slots,
         "slot_seconds": config.slot_duration_seconds,
@@ -175,24 +210,40 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
         "dhi": config.gossipsub.Dhigh,
         "seed": config.seed,
     }
+    if config.attestation is not None:
+        a = config.attestation
+        params.update(
+            att_due_ms=a.attestation_due_ms,
+            prep_ms=a.prep_ms,
+            att_verify_ms=a.verify_delay_ms,
+            att_per_item_ms=a.per_item_ms,
+            att_batch_window_ms=a.batch_window_ms,
+        )
+    return params
 
 
-def _build_topology(config: SimConfig) -> Topology:
+def _build_topology(config: SimConfig, assignment: committee.Assignment | None) -> Topology:
     tc = config.topology
     if tc.type == "random":
-        return generate_random_topology(
+        topology = generate_random_topology(
             num_nodes=tc.num_nodes,
             degree=tc.degree,
             seed=tc.seed,
             super_node_fraction=tc.super_node_fraction,
             min_latency_ms=tc.min_node_to_node_latency_ms,
         )
-    return generate_ring_topology(
-        num_nodes=tc.num_nodes,
-        seed=tc.seed,
-        super_node_fraction=tc.super_node_fraction,
-        min_latency_ms=tc.min_node_to_node_latency_ms,
-    )
+    else:
+        topology = generate_ring_topology(
+            num_nodes=tc.num_nodes,
+            seed=tc.seed,
+            super_node_fraction=tc.super_node_fraction,
+            min_latency_ms=tc.min_node_to_node_latency_ms,
+        )
+    if assignment is not None:
+        # Make the peer graph subnet-aware (the generator "plays discv5"): connect each
+        # subnet's backbone subscribers and link every publisher to them.
+        augment_subnet_edges(topology, assignment, min_latency_ms=tc.min_node_to_node_latency_ms)
+    return topology
 
 
 def _create_run_dir(output_dir: Path, config: SimConfig) -> Path:
@@ -214,14 +265,21 @@ def prepare_run_dir(config: SimConfig, output_dir: Path) -> Path:
     """Create a unique run dir and write topology.json, config.yaml, and
     shadow.yaml — everything except the Go binary and the shadow run itself.
     Shared by run_simulation and --dry-run."""
-    topology = _build_topology(config)
+    assignment = _committee_assignment(config)
+    topology = _build_topology(config, assignment)
     peer_lists = compute_peer_lists(topology)
 
     run_dir = _create_run_dir(output_dir, config)
     topology.save(run_dir / "topology.json")
+    committee_path = ""
+    if assignment is not None:
+        committee_path = str((run_dir / "committee.json").resolve())
+        write_json_atomic(run_dir / "committee.json", assignment.to_dict())
     with open(run_dir / "config.yaml", "w") as f:
         yaml.dump(config.model_dump(), f, default_flow_style=False, sort_keys=False)
-    write_shadow_config(generate_shadow_yaml(config, topology, peer_lists), run_dir / "shadow.yaml")
+    write_shadow_config(
+        generate_shadow_yaml(config, topology, peer_lists, committee_path), run_dir / "shadow.yaml"
+    )
     return run_dir
 
 
@@ -256,6 +314,9 @@ def run_simnet(config: SimConfig, run_dir: Path) -> Path:
     params = _simnet_params(config)
     params["topology"] = str((run_dir / "topology.json").resolve())
     params["csv"] = str(csv_path.resolve())
+    committee_path = run_dir / "committee.json"
+    if committee_path.exists():
+        params["committee"] = str(committee_path.resolve())
     params_path = run_dir / "simnet_params.json"
     write_json_atomic(params_path, params)
 
