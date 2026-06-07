@@ -109,7 +109,10 @@ func (d *Driver) BringUp(ctx context.Context) error {
 			return err
 		}
 	}
-	time.Sleep(time.Second) // let meshes form
+	for _, r := range d.runners {
+		r.SubscribeBackbone()
+	}
+	time.Sleep(time.Second) // let block + backbone meshes form
 	return nil
 }
 

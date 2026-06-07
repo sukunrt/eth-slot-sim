@@ -57,17 +57,24 @@ func NewRunner(num int, nd *node.Node, val *validator.Validator, comm *committee
 // Attach wires the runner as the node's receive sink. Call before JoinTopics.
 func (r *NodeRunner) Attach() { r.nd.OnReceive = r.onReceive }
 
-// Run executes numSlots slots from runStart: subscribe the backbone (whole-run), then
-// per slot publish block duties, arm the attestation deadline, and clean up at slot end.
-func (r *NodeRunner) Run(ctx context.Context, runStart time.Time, numSlots int) {
-	r.runCtx = ctx
-	if r.comm != nil {
-		for _, s := range r.comm.Node(r.num).Backbone() {
-			if err := r.nd.Subscribe(validator.AttestationTopic(s)); err != nil {
-				slog.Error("subscribe backbone failed", "node", r.num, "subnet", s, "err", err)
-			}
+// SubscribeBackbone joins the node's long-lived backbone subnet meshes. Call during
+// bring-up (before the settle) so the meshes form before slot 0 — otherwise a fast
+// block-driven emit in slot 0 would publish into an ungrafted mesh and be lost.
+func (r *NodeRunner) SubscribeBackbone() {
+	if r.comm == nil {
+		return
+	}
+	for _, s := range r.comm.Node(r.num).Backbone() {
+		if err := r.nd.Subscribe(validator.AttestationTopic(s)); err != nil {
+			slog.Error("subscribe backbone failed", "node", r.num, "subnet", s, "err", err)
 		}
 	}
+}
+
+// Run executes numSlots slots from runStart: per slot publish block duties, arm the
+// attestation deadline, and clean up at slot end. Call SubscribeBackbone first.
+func (r *NodeRunner) Run(ctx context.Context, runStart time.Time, numSlots int) {
+	r.runCtx = ctx
 	for slot := range numSlots {
 		slotStart := runStart.Add(time.Duration(slot) * r.slotDur)
 		ss := r.beginSlot(slot, slotStart)
@@ -76,30 +83,31 @@ func (r *NodeRunner) Run(ctx context.Context, runStart time.Time, numSlots int) 
 	}
 }
 
-// beginSlot publishes this node's block duties and, if it has a committee, caches its
-// attest duties, subscribes this slot's aggregator subnets, and arms the deadline timer.
+// beginSlot caches this node's attest duties, subscribes this slot's aggregator subnets,
+// and arms the deadline timer (all before publishing the block, so a proposer that also
+// attests can self-vote its own block), then publishes its block duties.
 func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
+	var ss *slotState
+	if r.comm != nil {
+		view := r.comm.Node(r.num)
+		ss = &slotState{
+			deadline:   slotStart.Add(r.due),
+			duties:     view.AttestDuties(slot),
+			aggSubnets: view.AggregatorSubnets(slot),
+		}
+		for _, s := range ss.aggSubnets {
+			if err := r.nd.Subscribe(validator.AttestationTopic(s)); err != nil {
+				slog.Error("subscribe aggregator failed", "node", r.num, "subnet", s, "err", err)
+			}
+		}
+		r.mu.Lock()
+		r.slots[slot] = ss
+		r.mu.Unlock()
+		ss.timer = time.AfterFunc(time.Until(ss.deadline), func() { r.onDeadline(slot, ss) })
+	}
 	for _, duty := range r.val.Duties(slot) {
 		go r.publishBlock(slotStart.Add(duty.At), duty.Msg)
 	}
-	if r.comm == nil {
-		return nil
-	}
-	view := r.comm.Node(r.num)
-	ss := &slotState{
-		deadline:   slotStart.Add(r.due),
-		duties:     view.AttestDuties(slot),
-		aggSubnets: view.AggregatorSubnets(slot),
-	}
-	for _, s := range ss.aggSubnets {
-		if err := r.nd.Subscribe(validator.AttestationTopic(s)); err != nil {
-			slog.Error("subscribe aggregator failed", "node", r.num, "subnet", s, "err", err)
-		}
-	}
-	r.mu.Lock()
-	r.slots[slot] = ss
-	r.mu.Unlock()
-	ss.timer = time.AfterFunc(time.Until(ss.deadline), func() { r.onDeadline(slot, ss) })
 	return ss
 }
 
@@ -118,13 +126,18 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 	r.mu.Unlock()
 }
 
-// publishBlock waits until when, records the publish, then publishes the block.
+// publishBlock waits until when, records the publish, then publishes the block. A
+// proposer that also attests this slot votes for its own block (block_processed = now);
+// loopback is not routed through the tracer, so this is the only place self-block-seen
+// is set.
 func (r *NodeRunner) publishBlock(when time.Time, msg validator.Message) {
 	time.Sleep(time.Until(when))
-	r.tracer.OnPublish(metrics.BlockID(msg.Slot, r.num), false, time.Now())
+	now := time.Now()
+	r.tracer.OnPublish(metrics.BlockID(msg.Slot, r.num), false, now)
 	if err := r.nd.Publish(r.runCtx, msg.Topic, msg.Payload); err != nil {
 		slog.Error("publish block failed", "node", r.num, "slot", msg.Slot, "err", err)
 	}
+	r.onBlockProcessed(msg.Slot, r.num, now)
 }
 
 // onReceive routes a decoded receipt: record block/attestation arrivals (skipping the
@@ -137,6 +150,7 @@ func (r *NodeRunner) onReceive(rec node.Received) {
 			return
 		}
 		r.tracer.OnReceive(r.num, metrics.BlockID(int(blk.Slot), int(blk.Origin)), rec.At)
+		r.onBlockProcessed(int(blk.Slot), int(blk.Origin), rec.At)
 	case node.KindAttestation:
 		att := rec.Obj.(*pb.Attestation)
 		if int(att.Origin) == r.num {
@@ -146,8 +160,38 @@ func (r *NodeRunner) onReceive(rec node.Received) {
 	}
 }
 
-// onDeadline emits this slot's attestations if not already emitted. With no block seen
-// it votes prior head; the coupling (block-driven early emit) is layered on in M5.
+// onBlockProcessed is the causal edge: the slot's block was processed at `at`. It
+// records block-seen once and, if processed (plus Δ_prep) by the deadline, emits this
+// node's attestations early, voting for the block. A late block is left to the deadline
+// timer (which votes prior). Both paths run emitDecision, so the vote is the same no
+// matter which fires first; emitOnce guarantees a single emission.
+func (r *NodeRunner) onBlockProcessed(slot, origin int, at time.Time) {
+	r.mu.Lock()
+	ss, ok := r.slots[slot]
+	if !ok { // no attest duties this slot (or already pruned)
+		r.mu.Unlock()
+		return
+	}
+	if !ss.seen {
+		ss.seen, ss.seenAt, ss.seenOrigin = true, at, origin
+	}
+	seenAt, seenOrigin, deadline := ss.seenAt, ss.seenOrigin, ss.deadline
+	r.mu.Unlock()
+
+	emitAt, voteBlock := emitDecision(true, seenAt, deadline, r.prep)
+	if !voteBlock {
+		return
+	}
+	if d := time.Until(emitAt); d > 0 { // honor Δ_prep before emitting
+		time.AfterFunc(d, func() { r.emit(slot, ss, seenOrigin) })
+	} else {
+		r.emit(slot, ss, seenOrigin)
+	}
+}
+
+// onDeadline emits this slot's attestations if not already emitted, re-deriving the
+// vote from block-seen state (so a block recorded exactly at the deadline still votes
+// block); otherwise it votes prior head.
 func (r *NodeRunner) onDeadline(slot int, ss *slotState) {
 	r.mu.Lock()
 	seen, seenAt, origin := ss.seen, ss.seenAt, ss.seenOrigin
