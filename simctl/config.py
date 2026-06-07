@@ -71,6 +71,7 @@ class SimConfig(BaseModel):
     # Shadow's own log level (shadow accepts error|warning|info|debug|trace).
     log_level: Literal["error", "warning", "info", "debug", "trace"] = "info"
     seed: int = 1  # validator rng seed (combined per-node with node number)
+    rpc_log_node: int = -1  # node-num to enable gossipsub debug RPC logging on (-1 = off)
 
 
 def load_config(path: Path) -> SimConfig:

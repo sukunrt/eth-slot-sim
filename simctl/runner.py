@@ -115,6 +115,7 @@ def _host_args(
         f"-Dhi={config.gossipsub.Dhigh}",
         f"-seed={config.seed}",
         f"-startup={config.startup_seconds}s",
+        f"-rpc-log-node={config.rpc_log_node}",
     ]
     if config.attestation is not None:
         a = config.attestation

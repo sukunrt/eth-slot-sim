@@ -83,6 +83,7 @@ func main() {
 		attestVerify  = flag.Duration("attest-verify-delay", 10*time.Millisecond, "attestation batch base verify delay")
 		attestPerItem = flag.Duration("attest-per-item", 0, "attestation per-item verify cost")
 		attestWindow  = flag.Duration("attest-batch-window", 50*time.Millisecond, "attestation batch window")
+		rpcLogNode    = flag.Int("rpc-log-node", -1, "node-num to enable gossipsub debug RPC logging on (-1 = off)")
 	)
 	flag.Parse()
 	if settleWindow(*startup, meshJoinStagger) <= 0 {
@@ -106,6 +107,9 @@ func main() {
 		AttestVerifyDelay: func() time.Duration { return *attestVerify },
 		AttestPerItem:     *attestPerItem, AttestBatchWindow: *attestWindow,
 		D: *d, Dlo: *dlo, Dhi: *dhi,
+	}
+	if *rpcLogNode == *nodeNum {
+		nd.RPCLogger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	peers := parseIntList(*peerNumsStr)
 	runner := driver.NewRunner(*nodeNum, nd, val, comm, tracer, *slotDur, *attDue, *prep, *seed, peers)

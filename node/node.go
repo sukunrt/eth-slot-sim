@@ -61,6 +61,11 @@ type Node struct {
 	AttestPerItem     time.Duration
 	AttestBatchWindow time.Duration
 
+	// RPCLogger, when non-nil, enables gossipsub's built-in debug RPC logger (every
+	// RPC sent/received, with topics + data length) — a diagnostic for how many block
+	// copies a node sources via mesh push vs gossip IWANT pull. Off by default.
+	RPCLogger *slog.Logger
+
 	ps       *pubsub.PubSub
 	verifier *batchVerifier
 
@@ -98,7 +103,7 @@ func (n *Node) Start(ctx context.Context) error {
 	// pubsub default is 1 MiB, which silently drops a 1 MiB block once wrapped in
 	// its protobuf/pubsub envelope.
 	const maxMessageSize = 10 * 1024 * 1024
-	ps, err := pubsub.NewGossipSub(ctx, n.Host,
+	opts := []pubsub.Option{
 		pubsub.WithGossipSubParams(params),
 		pubsub.WithMessageIdFn(MessageIDFunc),
 		pubsub.WithMessageSignaturePolicy(pubsub.StrictNoSign),
@@ -106,7 +111,11 @@ func (n *Node) Start(ctx context.Context) error {
 		pubsub.WithPeerOutboundQueueSize(1000),
 		pubsub.WithValidateQueueSize(600),
 		pubsub.WithMaxMessageSize(maxMessageSize),
-	)
+	}
+	if n.RPCLogger != nil {
+		opts = append(opts, pubsub.WithRPCLogger(n.RPCLogger))
+	}
+	ps, err := pubsub.NewGossipSub(ctx, n.Host, opts...)
 	if err != nil {
 		return err
 	}

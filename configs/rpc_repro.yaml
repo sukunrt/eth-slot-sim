@@ -1,0 +1,28 @@
+# Diagnostic repro: does a low-bandwidth (25 Mbit) proposer source the 1 MiB block
+# only to its gossipsub mesh (~D copies), or to ~every peer (gossip IWANT pull)?
+# All-regular (super_node_fraction 0 ⇒ node 0 is 25/50), high K so node 0 has many
+# peers that could pull, 1 block, 1 slot. RPC debug logging on node 0 only.
+topology:
+  num_nodes: 80
+  degree: 70               # K: node 0 ends up connected to ~70 peers
+  type: random
+  seed: 42
+  super_node_fraction: 0.0 # all regular: node 0 (the slot-0 proposer) is 25/50 Mbit
+  min_node_to_node_latency_ms: 0
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+num_slots: 1
+slot_duration_seconds: 30
+block_size: 1048576          # 1 MiB
+verify_delay_ms: 10
+offset_ms: 0
+jitter_ms: 0                 # publish exactly at slot 0 start (deterministic)
+startup_seconds: 40          # > 30 s mesh-join stagger
+stop_time_minutes: 2.5       # 40 startup + 30 slot + 30 drain + margin
+log_level: warning
+seed: 1
+rpc_log_node: 0              # gossipsub debug RPC logging on the proposer
