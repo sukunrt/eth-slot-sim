@@ -127,6 +127,68 @@ def get_bandwidth(
     return 25, 50  # Regular node
 
 
+class _Graph:
+    """Undirected simple-graph builder mirroring netsim/graph.go: random spanning trees give
+    connectivity, random fill tops nodes up to a target degree. Edges are symmetric;
+    self-loops and duplicates are dropped."""
+
+    def __init__(self, n: int):
+        self.n = n
+        self.adj: dict[int, set[int]] = {i: set() for i in range(n)}
+
+    def add(self, i: int, j: int) -> None:
+        if i == j or not (0 <= i < self.n and 0 <= j < self.n):
+            return
+        self.adj[i].add(j)
+        self.adj[j].add(i)
+
+    def random_tree(self, ids: list[int], rng: random.Random) -> None:
+        """Link ids into one connected component: each id after the first attaches to a
+        random earlier one. Fewer than two ids is a no-op (trivially connected)."""
+        for i in range(1, len(ids)):
+            self.add(ids[i], ids[rng.randrange(i)])
+
+    def fill(self, k: int, rng: random.Random) -> None:
+        """Top every node up toward degree k with random peers; bounded retries so a small
+        or dense graph degrades gracefully instead of spinning."""
+        for i in range(self.n):
+            tries = 0
+            while len(self.adj[i]) < k and tries < k * 4:
+                self.add(i, rng.randrange(self.n))
+                tries += 1
+
+
+def _make_country_nodes(
+    num_nodes: int, super_node_fraction: float, selector: CountrySelector
+) -> list[NodeSpec]:
+    """One NodeSpec per node: a bandwidth class plus a weighted-random country, both drawn
+    from the selector's rng so the draw order stays stable."""
+    nodes = []
+    for i in range(num_nodes):
+        up, down = get_bandwidth(i, super_node_fraction, selector.rng)
+        nodes.append(
+            NodeSpec(num=i, upload_bw_mbps=up, download_bw_mbps=down, country=selector.select())
+        )
+    return nodes
+
+
+def _edges_from_adjacency(
+    adj: dict[int, set[int]],
+    nodes: list[NodeSpec],
+    latencies: dict[str, dict[str, int]],
+    min_latency_ms: int,
+) -> list[Edge]:
+    """One directed Edge per adjacency entry with the source→target country latency, so a
+    symmetric adjacency yields both directions. Latency is floored at min_latency_ms."""
+    country = {n.num: n.country for n in nodes}
+    edges = []
+    for u in sorted(adj):
+        for v in adj[u]:
+            lat = max(latencies.get(country[u], {}).get(country[v], 100), min_latency_ms)
+            edges.append(Edge(source=u, target=v, latency_ms=lat))
+    return edges
+
+
 def generate_random_topology(
     num_nodes: int,
     degree: int,
@@ -148,18 +210,7 @@ def generate_random_topology(
     latencies = load_latencies()
     selector = CountrySelector(weights, rng)
 
-    # Create mesh nodes
-    nodes = []
-    for i in range(num_nodes):
-        up, down = get_bandwidth(i, super_node_fraction, rng)
-        nodes.append(
-            NodeSpec(
-                num=i,
-                upload_bw_mbps=up,
-                download_bw_mbps=down,
-                country=selector.select(),
-            )
-        )
+    nodes = _make_country_nodes(num_nodes, super_node_fraction, selector)
 
     # Create mesh edges - first ensure connectivity
     adjacency: dict[int, set[int]] = {i: set() for i in range(num_nodes)}
@@ -179,16 +230,7 @@ def generate_random_topology(
                 adjacency[v].add(u)
             attempts += 1
 
-    # Convert to edges with latencies
-    edges = []
-    for u, neighbors in adjacency.items():
-        for v in neighbors:
-            src_country = nodes[u].country
-            dst_country = nodes[v].country
-            latency = max(
-                latencies.get(src_country, {}).get(dst_country, 100), min_latency_ms
-            )
-            edges.append(Edge(source=u, target=v, latency_ms=latency))
+    edges = _edges_from_adjacency(adjacency, nodes, latencies, min_latency_ms)
 
     # Create fanout nodes and connect each to random mesh peers
     fanout_node_nums = set()
@@ -219,37 +261,36 @@ def generate_random_topology(
     return Topology(nodes=nodes, edges=edges, fanout_nodes=fanout_node_nums)
 
 
-def augment_subnet_edges(topology, assignment, min_latency_ms: int = 0) -> None:
-    """Connect each subnet's subscribers to each other (a ring plus a few chords) so they
-    form a mesh — an attestation handed to a couple of them spreads to all of them. The
-    base random graph already gives general/block connectivity, and publishers dial into a
-    subnet they don't subscribe per slot (the Go runner), so no static publisher→subscriber
-    edges are needed here. Mirrors netsim's discv5Graph. Mutates topology.
+def generate_subnet_topology(
+    num_nodes: int,
+    k: int,
+    seed: int,
+    assignment,
+    super_node_fraction: float = 0.0,
+    min_latency_ms: int = 0,
+) -> Topology:
+    """discv5-biased topology: every node targets K long-lived peers, biased so each subnet's
+    subscribers form a connected subgraph (an attestation handed to a couple of them floods to
+    all of them); the block topic rides the same graph. Mirrors netsim/subnet.go discv5Graph —
+    a global random spanning tree, then a random spanning tree per subnet's subscribers, then
+    random fill up to K (subnet edges counted toward K). K is clamped to N-1 and the fill is
+    best-effort, so a small or dense graph degrades gracefully.
 
-    `assignment` is a simctl.committee.Assignment.
+    `assignment` is a simctl.committee.Assignment; its subnet_subscribers drive the bias.
     """
-    chords = 8  # ~gossipsub D: in-subnet links per subscriber
+    rng = random.Random(seed)
+    selector = CountrySelector(load_weights(), rng)
     latencies = load_latencies()
-    country = {n.num: n.country for n in topology.nodes}
-    existing = {(e.source, e.target) for e in topology.edges}
-    rng = random.Random(assignment.params.seed * 1_000_003 + 4)
+    nodes = _make_country_nodes(num_nodes, super_node_fraction, selector)
 
-    def add(u: int, v: int) -> None:
-        if u == v:
-            return
-        for a, b in ((u, v), (v, u)):
-            if (a, b) not in existing:
-                lat = max(latencies.get(country[a], {}).get(country[b], 100), min_latency_ms)
-                topology.edges.append(Edge(source=a, target=b, latency_ms=lat))
-                existing.add((a, b))
-
+    g = _Graph(num_nodes)
+    g.random_tree(list(range(num_nodes)), rng)  # global: keep the block topic connected
     for subs in assignment.subnet_subscribers:
-        m = len(subs)
-        for i in range(m):
-            add(subs[i], subs[(i + 1) % m])  # ring → guaranteed connected
-        for u in subs:  # chords → ~D-degree mesh within the subnet
-            for _ in range(min(chords, m - 1)):
-                add(u, subs[rng.randrange(m)])
+        g.random_tree(list(subs), rng)  # each subnet's subscribers: one connected piece
+    g.fill(min(k, num_nodes - 1), rng)
+
+    edges = _edges_from_adjacency(g.adj, nodes, latencies, min_latency_ms)
+    return Topology(nodes=nodes, edges=edges, fanout_nodes=set())
 
 
 def generate_ring_topology(
@@ -264,17 +305,7 @@ def generate_ring_topology(
     latencies = load_latencies()
     selector = CountrySelector(weights, rng)
 
-    nodes = []
-    for i in range(num_nodes):
-        up, down = get_bandwidth(i, super_node_fraction, rng)
-        nodes.append(
-            NodeSpec(
-                num=i,
-                upload_bw_mbps=up,
-                download_bw_mbps=down,
-                country=selector.select(),
-            )
-        )
+    nodes = _make_country_nodes(num_nodes, super_node_fraction, selector)
 
     edges = []
     for i in range(num_nodes):

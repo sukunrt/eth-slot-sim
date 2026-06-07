@@ -17,7 +17,7 @@ class TopologyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     num_nodes: int = 25
-    degree: int = 8
+    degree: int = 8  # target peers per node (K); attestation runs need it >= a node's subnet-mates
     type: Literal["random", "ring"] = "random"
     seed: int = 42
     super_node_fraction: float = 0.0

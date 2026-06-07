@@ -21,9 +21,9 @@ from simctl.config import SimConfig
 from simctl.manifest import format_dir_timestamp, random_suffix, write_json_atomic
 from simctl.topology import (
     Topology,
-    augment_subnet_edges,
     generate_random_topology,
     generate_ring_topology,
+    generate_subnet_topology,
 )
 
 
@@ -224,26 +224,32 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
 
 def _build_topology(config: SimConfig, assignment: committee.Assignment | None) -> Topology:
     tc = config.topology
+    if assignment is not None:
+        # Attestation runs: one discv5-biased graph at target degree K (= tc.degree) where
+        # each subnet's subscribers are a connected piece, so attestations flood within the
+        # subnet and the block topic rides the same peers. (tc.type is ignored here.)
+        return generate_subnet_topology(
+            num_nodes=tc.num_nodes,
+            k=tc.degree,
+            seed=tc.seed,
+            assignment=assignment,
+            super_node_fraction=tc.super_node_fraction,
+            min_latency_ms=tc.min_node_to_node_latency_ms,
+        )
     if tc.type == "random":
-        topology = generate_random_topology(
+        return generate_random_topology(
             num_nodes=tc.num_nodes,
             degree=tc.degree,
             seed=tc.seed,
             super_node_fraction=tc.super_node_fraction,
             min_latency_ms=tc.min_node_to_node_latency_ms,
         )
-    else:
-        topology = generate_ring_topology(
-            num_nodes=tc.num_nodes,
-            seed=tc.seed,
-            super_node_fraction=tc.super_node_fraction,
-            min_latency_ms=tc.min_node_to_node_latency_ms,
-        )
-    if assignment is not None:
-        # Make the peer graph subnet-aware (the generator "plays discv5"): connect each
-        # subnet's backbone subscribers and link every publisher to them.
-        augment_subnet_edges(topology, assignment, min_latency_ms=tc.min_node_to_node_latency_ms)
-    return topology
+    return generate_ring_topology(
+        num_nodes=tc.num_nodes,
+        seed=tc.seed,
+        super_node_fraction=tc.super_node_fraction,
+        min_latency_ms=tc.min_node_to_node_latency_ms,
+    )
 
 
 def _create_run_dir(output_dir: Path, config: SimConfig) -> Path:

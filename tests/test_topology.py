@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from simctl import topology
+from simctl import committee, topology
 
 
 def _adjacency(topo: topology.Topology) -> dict[int, set[int]]:
@@ -11,6 +11,21 @@ def _adjacency(topo: topology.Topology) -> dict[int, set[int]]:
         adj[e.source].add(e.target)
         adj[e.target].add(e.source)
     return adj
+
+
+def _connected(adj: dict[int, set[int]], members) -> bool:
+    """True if members form one connected piece using only edges internal to the set."""
+    members = list(members)
+    if len(members) < 2:
+        return True
+    inset = set(members)
+    seen, stack = {members[0]}, [members[0]]
+    while stack:
+        for nb in adj[stack.pop()]:
+            if nb in inset and nb not in seen:
+                seen.add(nb)
+                stack.append(nb)
+    return seen == inset
 
 
 def test_random_topology_is_connected_with_latencies():
@@ -51,3 +66,42 @@ def test_super_node_fraction_assigns_high_bandwidth():
     )
     supers = [n for n in topo.nodes if n.upload_bw_mbps >= 1024]
     assert supers, "expected some supernodes at fraction 0.5"
+
+
+def test_subnet_topology_connects_every_subnet_within_k():
+    a = committee.generate(
+        committee.Params(
+            n=30, v=60, c=4, sc=4, subnets_per_node=2, subscribe_floor=10, seed=1, num_slots=1
+        )
+    )
+    k = 12
+    topo = topology.generate_subnet_topology(num_nodes=30, k=k, seed=42, assignment=a)
+
+    assert {n.num for n in topo.nodes} == set(range(30))
+    assert all(e.latency_ms > 0 for e in topo.edges), "edges need positive latency"
+
+    adj = _adjacency(topo)
+    for e in topo.edges:  # symmetric
+        assert e.source in adj[e.target] and e.target in adj[e.source]
+    assert _connected(adj, range(30)), "block topic would partition"
+    for subnet, subs in enumerate(a.subnet_subscribers):
+        assert _connected(adj, subs), f"subnet {subnet} subscribers not connected: {subs}"
+
+    # Soft target K: fill ran (mean near K, well above the tree-only ~2), none exceeds N-1.
+    degrees = [len(adj[i]) for i in range(30)]
+    assert max(degrees) <= 29
+    assert sum(degrees) / 30 >= k - 1, "fill did not reach K"
+
+
+def test_subnet_topology_degrades_gracefully_for_small_n():
+    # K far larger than N-1, plus a singleton and an empty subnet: no crash/spin, degree
+    # capped at N-1, still connected.
+    a = committee.Assignment(
+        params=committee.Params(n=3, v=3, c=3, sc=1),
+        subnet_subscribers=[[0, 1, 2], [0], []],
+        slots=[],
+    )
+    topo = topology.generate_subnet_topology(num_nodes=3, k=10, seed=1, assignment=a)
+    adj = _adjacency(topo)
+    assert all(len(adj[i]) <= 2 for i in range(3)), "degree must not exceed N-1"
+    assert _connected(adj, range(3))
