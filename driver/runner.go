@@ -48,6 +48,13 @@ type slotState struct {
 	seenAt     time.Time
 	seenOrigin int
 
+	// Column custody gate (active when custody is non-empty). columnsComplete starts true
+	// when there's nothing to wait for (columns off ⇒ empty custody), so the gate is a no-op.
+	custody           []int        // this node's custody columns this slot
+	haveColumn        map[int]bool // custody columns received (post-verify); nil when none
+	columnsComplete   bool         // all custody columns in (or none to wait for)
+	columnsCompleteAt time.Time    // when custody completed (the gate's emit input)
+
 	aggSubnets  []int // subnets this node aggregates this slot (publishes M aggregates on each)
 	aggTimer    *time.Timer
 	aggEmitOnce sync.Once
@@ -117,6 +124,13 @@ func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 	if r.comm != nil {
 		view := r.comm.Node(r.num)
 		ss = &slotState{deadline: slotStart.Add(r.due), duties: view.AttestDuties(slot)}
+		if r.comm.NumColumns > 0 {
+			ss.custody = view.CustodyColumns()
+		}
+		ss.columnsComplete = len(ss.custody) == 0 // nothing to gate on ⇒ trivially complete
+		if !ss.columnsComplete {
+			ss.haveColumn = make(map[int]bool, len(ss.custody))
+		}
 
 		subscribed := map[int]bool{}
 		for _, s := range view.SubscribedSubnets() {
@@ -218,6 +232,9 @@ func (r *NodeRunner) publishBlock(when time.Time, msg validator.Message) {
 				slog.Error("publish column failed", "node", r.num, "slot", msg.Slot, "column", col, "err", err)
 			}
 		}
+		// The proposer holds every column it just made; mark custody complete so it can
+		// self-vote block immediately (it never self-receives — loopback is skipped).
+		r.markColumnsComplete(msg.Slot, now)
 	}
 	r.onBlockProcessed(msg.Slot, r.num, now)
 }
@@ -251,14 +268,14 @@ func (r *NodeRunner) onReceive(rec node.Received) {
 			return
 		}
 		r.tracer.OnReceive(r.num, metrics.ColumnID(int(col.Slot), int(col.Column), int(col.Origin)), rec.At)
+		r.onColumnProcessed(int(col.Slot), int(col.Column), rec.At)
 	}
 }
 
-// onBlockProcessed is the causal edge: the slot's block was processed at `at`. It
-// records block-seen once and, if processed (plus Δ_prep) by the deadline, emits this
-// node's attestations early, voting for the block. A late block is left to the deadline
-// timer (which votes prior). Both paths run emitDecision, so the vote is the same no
-// matter which fires first; emitOnce guarantees a single emission.
+// onBlockProcessed is the causal edge: the slot's block was processed at `at`. It records
+// block-seen once, then attempts the early vote (which the gate also conditions on all custody
+// columns; see tryEarlyEmit). A late block/column is left to the deadline timer (which votes
+// prior). emitOnce guarantees a single emission no matter which path fires first.
 func (r *NodeRunner) onBlockProcessed(slot, origin int, at time.Time) {
 	r.mu.Lock()
 	ss, ok := r.slots[slot]
@@ -269,10 +286,58 @@ func (r *NodeRunner) onBlockProcessed(slot, origin int, at time.Time) {
 	if !ss.seen {
 		ss.seen, ss.seenAt, ss.seenOrigin = true, at, origin
 	}
-	seenAt, seenOrigin, deadline := ss.seenAt, ss.seenOrigin, ss.deadline
+	r.mu.Unlock()
+	r.tryEarlyEmit(slot, ss)
+}
+
+// onColumnProcessed records a custody column's arrival (post-verify, so consistent with
+// block-seen). When it completes the node's custody set it attempts the early vote — a
+// late-completing column can unblock a block vote that was waiting on custody. A no-op once
+// custody is already complete (covers the columns-off and proposer cases).
+func (r *NodeRunner) onColumnProcessed(slot, col int, at time.Time) {
+	r.mu.Lock()
+	ss, ok := r.slots[slot]
+	if !ok || ss.columnsComplete {
+		r.mu.Unlock()
+		return
+	}
+	if !ss.haveColumn[col] {
+		ss.haveColumn[col] = true
+		if len(ss.haveColumn) == len(ss.custody) {
+			ss.columnsComplete, ss.columnsCompleteAt = true, at
+		}
+	}
+	complete := ss.columnsComplete
+	r.mu.Unlock()
+	if complete {
+		r.tryEarlyEmit(slot, ss)
+	}
+}
+
+// markColumnsComplete records custody completion at `at` without a per-column count — used by
+// the proposer, which holds every column it just published (it never self-receives).
+func (r *NodeRunner) markColumnsComplete(slot int, at time.Time) {
+	r.mu.Lock()
+	if ss, ok := r.slots[slot]; ok && !ss.columnsComplete {
+		ss.columnsComplete, ss.columnsCompleteAt = true, at
+	}
+	r.mu.Unlock()
+}
+
+// tryEarlyEmit attempts this node's early vote-block attestation. The gate: vote block only
+// once the block is processed AND all custody columns are in, emitted at
+// max(block, columns_complete)+Δ_prep and only if that lands by the deadline (else the
+// deadline timer votes prior head). Reuses the pure emitDecision by feeding it the gated
+// readiness and the later of the two times; emitOnce collapses the racing block/column/
+// deadline attempts into one emission.
+func (r *NodeRunner) tryEarlyEmit(slot int, ss *slotState) {
+	r.mu.Lock()
+	ready := ss.seen && ss.columnsComplete
+	processed := laterOf(ss.seenAt, ss.columnsCompleteAt)
+	seenOrigin, deadline := ss.seenOrigin, ss.deadline
 	r.mu.Unlock()
 
-	emitAt, voteBlock := emitDecision(true, seenAt, deadline, r.prep)
+	emitAt, voteBlock := emitDecision(ready, processed, deadline, r.prep)
 	if !voteBlock {
 		return
 	}
@@ -283,19 +348,30 @@ func (r *NodeRunner) onBlockProcessed(slot, origin int, at time.Time) {
 	}
 }
 
-// onDeadline emits this slot's attestations if not already emitted, re-deriving the
-// vote from block-seen state (so a block recorded exactly at the deadline still votes
-// block); otherwise it votes prior head.
+// onDeadline emits this slot's attestations if not already emitted, re-deriving the vote from
+// block-seen + custody-complete state (so a block/column recorded exactly at the deadline
+// still votes block); otherwise it votes prior head — a node with the block but a missing
+// custody column votes prior, the column phase's measurable effect on the slot.
 func (r *NodeRunner) onDeadline(slot int, ss *slotState) {
 	r.mu.Lock()
-	seen, seenAt, origin := ss.seen, ss.seenAt, ss.seenOrigin
+	ready := ss.seen && ss.columnsComplete
+	processed := laterOf(ss.seenAt, ss.columnsCompleteAt)
+	origin := ss.seenOrigin
 	r.mu.Unlock()
-	_, voteBlock := emitDecision(seen, seenAt, ss.deadline, r.prep)
+	_, voteBlock := emitDecision(ready, processed, ss.deadline, r.prep)
 	votedOrigin := -1
 	if voteBlock {
 		votedOrigin = origin
 	}
 	r.emit(slot, ss, votedOrigin)
+}
+
+// laterOf returns the later of two times (the gate emits at max(block, columns_complete)).
+func laterOf(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 // emit publishes one attestation per duty, at most once per slot (the emit-once guard).
