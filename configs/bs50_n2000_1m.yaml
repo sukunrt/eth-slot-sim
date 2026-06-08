@@ -1,0 +1,44 @@
+# Block-size sweep @ 50% supernodes: 2000 nodes, 1 MiB, 10 slots, block-only, new latencies.
+# Measure dispersion for the LAST slot only (slot index 9) on a settled mesh.
+# attestations turned off. The committee is still built — so supernodes propose on the same
+# schedule and the subnet-biased topology is the same — but no attestation traffic is emitted.
+# Measures how long it takes to push just the block, on the same network as the attestation run.
+# Heavy — run with `simctl run --remote`.
+topology:
+  num_nodes: 2000
+  degree: 70               # K: target peers per node
+  type: random
+  seed: 42
+  super_node_fraction: 0.5 # 50% super nodes (1024/1024 Mbit); rest 25/50
+  latency_multiple: 1.0
+  min_node_to_node_latency_ms: 0
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+attestation:
+  enabled: false           # build the committee (proposer schedule + subnet topology), emit no attestations
+  validators: 2000         # V
+  committees: 64           # C = all 64 subnets active/slot
+  committee_size: 8        # s_c (C*s_c = 512 <= V)
+  subnet_count: 64
+  subnets_per_node: 2      # ~2 subnets/node -> ~31 subscribers/subnet
+  subscribe_floor: 10      # min subscribers per active subnet
+  attestation_due_ms: 4000
+  prep_ms: 0
+  verify_delay_ms: 10
+  per_item_ms: 0
+  batch_window_ms: 50
+
+num_slots: 10
+slot_duration_seconds: 12
+block_size: 1048576        # 1 MiB
+verify_delay_ms: 10
+offset_ms: 0
+jitter_ms: 2000
+startup_seconds: 180       # larger fleet: extra dial+settle margin
+stop_time_minutes: 10      # 180 startup + 60 run + 30 drain + margin
+log_level: warning         # 1000 hosts: keep Shadow's own log small
+seed: 1

@@ -153,7 +153,7 @@ func main() {
 	runner.Prepare() // subscribe this node's own subnets, before the settle
 
 	runStart := programStart.Add(*startup)
-	time.Sleep(time.Until(runStart)) // chillax until slot 0 — every host has meshed
+	time.Sleep(time.Until(runStart)) // until slot 0 — every host has meshed
 	runner.Run(ctx, runStart, *numSlots)
 	time.Sleep(drainWindow) // capture the last block's dissemination tail
 	nd.Close()
