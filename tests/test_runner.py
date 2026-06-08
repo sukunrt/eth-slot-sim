@@ -61,6 +61,29 @@ def test_generate_shadow_yaml_structure():
     assert sh["general"]["stop_time"].endswith("min")
 
 
+def test_host_args_attestations_toggle():
+    # With attestations off, the host still gets -committee (for the proposer schedule) but
+    # -attestations=false so the Go binary runs block-only on the same network.
+    cfg_off = config.SimConfig(
+        attestation=config.AttestationConfig(enabled=False),
+    )
+    args_off = runner._host_args(cfg_off, 0, 3, [1, 2], "/run/committee.json")
+    assert "-committee=/run/committee.json" in args_off
+    assert "-attestations=false" in args_off
+
+    cfg_on = config.SimConfig(attestation=config.AttestationConfig())
+    args_on = runner._host_args(cfg_on, 0, 3, [1, 2], "/run/committee.json")
+    assert "-attestations=true" in args_on
+
+
+def test_simnet_params_carry_attest_flag():
+    # The simnet backend learns whether to attest from the same enabled flag.
+    cfg = config.SimConfig(attestation=config.AttestationConfig(enabled=False))
+    assert runner._simnet_params(cfg)["attest"] is False
+    cfg_on = config.SimConfig(attestation=config.AttestationConfig())
+    assert runner._simnet_params(cfg_on)["attest"] is True
+
+
 def test_simnet_params_match_scenario():
     # The simnet backend (a synctest go-test harness) takes the same scenario knobs
     # as a Shadow host; topology and csv paths are added per-run by run_simnet.

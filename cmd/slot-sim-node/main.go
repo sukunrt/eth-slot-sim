@@ -78,6 +78,7 @@ func main() {
 		startup     = flag.Duration("startup", 60*time.Second, "bring-up window before slot 0")
 
 		committeePath = flag.String("committee", "", "path to committee.json (empty → block-only)")
+		attestations  = flag.Bool("attestations", true, "emit attestations (false → block-only; committee still sets the proposer schedule)")
 		attDue        = flag.Duration("att-due", 4*time.Second, "attestation deadline offset into the slot")
 		prep          = flag.Duration("prep", 0, "extra processing before emitting on block receipt")
 		attestVerify  = flag.Duration("attest-verify-delay", 10*time.Millisecond, "attestation batch base verify delay")
@@ -98,8 +99,10 @@ func main() {
 		if err != nil {
 			log.Fatalf("load committee %s: %v", *committeePath, err)
 		}
-		comm = c
-		proposers = c.ProposerSchedule()
+		proposers = c.ProposerSchedule() // supernode block schedule (used even when block-only)
+		if *attestations {
+			comm = c // nil ⇒ the runner is block-only
+		}
 	}
 	val := validator.New(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
 		rand.New(rand.NewPCG(*seed, uint64(*nodeNum))), proposers)

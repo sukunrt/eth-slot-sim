@@ -33,6 +33,11 @@ def test_defaults_have_no_attestation_fields():
         assert not hasattr(cfg, absent), f"slim config should not have {absent}"
 
 
+def test_attestation_enabled_defaults_true_and_toggles():
+    assert config.AttestationConfig().enabled is True
+    assert config.AttestationConfig(enabled=False).enabled is False
+
+
 def test_unknown_key_is_rejected(tmp_path):
     p = tmp_path / "c.yaml"
     p.write_text("num_attestors: 8\n")

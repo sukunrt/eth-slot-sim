@@ -42,8 +42,11 @@ type Config struct {
 	D, Dlo, Dhi  int
 	Seed         uint64 // per-node validator rng seed
 
-	// Attestation knobs (optional). Committee nil ⇒ block-only (Phase 1).
+	// Attestation knobs (optional). Committee nil ⇒ block-only (Phase 1). Attest false
+	// with a Committee set ⇒ block-only too, but the Committee's proposer schedule still
+	// applies (so block dissemination is measured on the same network, sans attestations).
 	Committee         *committee.Assignment
+	Attest            bool          // emit attestations (requires Committee)
 	AttestationDue    time.Duration // emit deadline as an offset into the slot
 	Prep              time.Duration // Δ_prep before emitting on block receipt
 	AttestVerifyDelay func() time.Duration
@@ -72,8 +75,12 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		slotDur: cfg.SlotDuration,
 	}
 	var proposers []int // supernode proposer schedule; nil ⇒ cyclic (block-only)
+	runnerComm := cfg.Committee
 	if cfg.Committee != nil {
 		proposers = cfg.Committee.ProposerSchedule()
+	}
+	if !cfg.Attest {
+		runnerComm = nil // block-only: keep the proposer schedule, drop attestation duties
 	}
 	for i := range n {
 		val := validator.New(i, n, cfg.BlockSize, cfg.Offset, cfg.Jitter,
@@ -86,7 +93,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 			AttestBatchWindow: cfg.AttestBatchWindow,
 			D:                 cfg.D, Dlo: cfg.Dlo, Dhi: cfg.Dhi,
 		}
-		r := NewRunner(i, nd, val, cfg.Committee, tracer, cfg.SlotDuration, cfg.AttestationDue,
+		r := NewRunner(i, nd, val, runnerComm, tracer, cfg.SlotDuration, cfg.AttestationDue,
 			cfg.Prep, cfg.Seed, nw.Peers(i))
 		r.Attach()
 		d.nodes[i] = nd

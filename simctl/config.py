@@ -39,6 +39,7 @@ class AttestationConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    enabled: bool = True  # False ⇒ build the committee (proposer schedule + subnet topology) but emit no attestations — block-only on the same network
     validators: int = 64  # V, mapped over the N nodes
     committees: int = 1  # C, active attestation subnets per slot
     committee_size: int = 8  # s_c, attesters per committee per slot

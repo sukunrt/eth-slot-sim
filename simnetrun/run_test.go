@@ -39,8 +39,10 @@ type params struct {
 	Dhi             int     `json:"dhi"`
 	Seed            uint64  `json:"seed"`
 
-	// Attestation phase (empty Committee ⇒ block-only).
+	// Attestation phase (empty Committee ⇒ block-only). Attest false with a Committee set
+	// keeps the proposer schedule but emits no attestations (block-only on the same network).
 	Committee        string `json:"committee"`
+	Attest           bool   `json:"attest"`
 	AttDueMs         int    `json:"att_due_ms"`
 	PrepMs           int    `json:"prep_ms"`
 	AttVerifyMs      int    `json:"att_verify_ms"`
@@ -95,6 +97,7 @@ func TestRun(t *testing.T) {
 				t.Fatalf("load committee %s: %v", p.Committee, err)
 			}
 			cfg.Committee = a
+			cfg.Attest = p.Attest
 			cfg.AttestationDue = time.Duration(p.AttDueMs) * time.Millisecond
 			cfg.Prep = time.Duration(p.PrepMs) * time.Millisecond
 			cfg.AttestVerifyDelay = func() time.Duration { return time.Duration(p.AttVerifyMs) * time.Millisecond }

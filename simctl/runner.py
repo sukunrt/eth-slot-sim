@@ -124,10 +124,15 @@ def _host_args(
         f"-startup={config.startup_seconds}s",
         f"-rpc-log-node={config.rpc_log_node}",
     ]
+    if committee_path:
+        # Always passed (absolute: a host's cwd is its own data dir). It carries the proposer
+        # schedule, which applies whether or not attestations are on; -attestations alone gates
+        # attestation traffic.
+        args.append(f"-committee={committee_path}")
     if config.attestation is not None:
         a = config.attestation
         args += [
-            f"-committee={committee_path}",  # absolute: a host's cwd is its own data dir
+            f"-attestations={'true' if a.enabled else 'false'}",  # false ⇒ block-only, schedule kept
             f"-att-due={a.attestation_due_ms}ms",
             f"-prep={a.prep_ms}ms",
             f"-attest-verify-delay={a.verify_delay_ms}ms",
@@ -222,6 +227,7 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
     if config.attestation is not None:
         a = config.attestation
         params.update(
+            attest=a.enabled,
             att_due_ms=a.attestation_due_ms,
             prep_ms=a.prep_ms,
             att_verify_ms=a.verify_delay_ms,
@@ -377,8 +383,11 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
 
     # Attestation phase: report both backends' coverage/no-leak + CDF. The simnet check
     # against committee.json is the only automated coverage test of the real topology.json
-    # graph (the Go suites only exercise the in-process discv5Graph).
-    subscribers = check_arrivals.load_committee(run_dir)
+    # graph (the Go suites only exercise the in-process discv5Graph). Skipped when
+    # attestations are disabled — committee.json still exists (for the proposer schedule),
+    # but no attestation traffic was emitted, so coverage would be a spurious all-missing.
+    attest_on = config.attestation is not None and config.attestation.enabled
+    subscribers = check_arrivals.load_committee(run_dir) if attest_on else None
     if subscribers is not None:
         committee_data = json.loads((run_dir / "committee.json").read_text())
         shadow_att = check_arrivals.analyze_attestations(pubs, arrs, subscribers)
