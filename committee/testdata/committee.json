@@ -7,6 +7,8 @@
     "subnet_count": 64,
     "subnets_per_node": 1,
     "subscribe_floor": 2,
+    "target_aggregators": 16,
+    "m": 1,
     "seed": 1,
     "num_slots": 1
   },
@@ -70,6 +72,18 @@
       "subnet_of": [
         0,
         1
+      ],
+      "aggregators": [
+        [
+          1,
+          2,
+          4,
+          5
+        ],
+        [
+          0,
+          3
+        ]
       ],
       "proposer": 0
     }

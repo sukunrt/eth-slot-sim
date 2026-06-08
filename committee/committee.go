@@ -17,15 +17,19 @@ import (
 // Params are the assignment knobs (V, C, s_c independent; only C·s_c ≤ V is enforced,
 // in the generator). Fields mirror committee.json.
 type Params struct {
-	N              int    `json:"n"`
-	V              int    `json:"v"`
-	C              int    `json:"c"`
-	Sc             int    `json:"sc"`
-	SubnetCount    int    `json:"subnet_count"`
-	SubnetsPerNode int    `json:"subnets_per_node"`
-	SubscribeFloor int    `json:"subscribe_floor"`
-	Seed           uint64 `json:"seed"`
-	NumSlots       int    `json:"num_slots"`
+	N              int `json:"n"`
+	V              int `json:"v"`
+	C              int `json:"c"`
+	Sc             int `json:"sc"`
+	SubnetCount    int `json:"subnet_count"`
+	SubnetsPerNode int `json:"subnets_per_node"`
+	SubscribeFloor int `json:"subscribe_floor"`
+	// TargetAggregators is the aggregators drawn per committee (clamped to the subnet's
+	// subscriber count); M is how many distinct aggregates each committee's aggregators publish.
+	TargetAggregators int    `json:"target_aggregators"`
+	M                 int    `json:"m"`
+	Seed              uint64 `json:"seed"`
+	NumSlots          int    `json:"num_slots"`
 }
 
 // AttesterRef is one committee seat: which node publishes, which validator, on which
@@ -37,12 +41,14 @@ type AttesterRef struct {
 	Position int `json:"position"`
 }
 
-// SlotPlan is one slot's committee draw (who attests where) plus its block proposer.
+// SlotPlan is one slot's committee draw (who attests where) plus its block proposer
+// and aggregators.
 type SlotPlan struct {
-	Slot       int             `json:"slot"`
-	Committees [][]AttesterRef `json:"committees"` // [committee] → its s_c attesters
-	SubnetOf   []int           `json:"subnet_of"`  // [committee] → subnet id
-	Proposer   int             `json:"proposer"`   // node that publishes this slot's block (a supernode)
+	Slot        int             `json:"slot"`
+	Committees  [][]AttesterRef `json:"committees"`  // [committee] → its s_c attesters
+	SubnetOf    []int           `json:"subnet_of"`   // [committee] → subnet id
+	Proposer    int             `json:"proposer"`    // node that publishes this slot's block (a supernode)
+	Aggregators [][]int         `json:"aggregators"` // [committee] → aggregator node ids
 }
 
 // Assignment is the whole run's plan: the stable per-subnet subscribe set plus the
@@ -125,6 +131,23 @@ func (v View) SubscribedSubnets() []int {
 	for subnet, members := range v.a.SubnetSubscribers {
 		if slices.Contains(members, v.node) {
 			out = append(out, subnet)
+		}
+	}
+	return out
+}
+
+// AggregateSubnets returns the subnets this node aggregates this slot — the committees whose
+// aggregator set includes it. It publishes Params.M aggregates on each (on the global
+// aggregate topic). Empty if the node isn't an aggregator this slot.
+func (v View) AggregateSubnets(slot int) []int {
+	if slot < 0 || slot >= len(v.a.Slots) {
+		return nil
+	}
+	sp := v.a.Slots[slot]
+	var out []int
+	for ci, aggs := range sp.Aggregators {
+		if slices.Contains(aggs, v.node) {
+			out = append(out, sp.SubnetOf[ci])
 		}
 	}
 	return out

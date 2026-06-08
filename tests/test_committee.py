@@ -148,3 +148,50 @@ def test_params_from_v_fills_the_mainnet_formula():
     big = committee.params_from_v(v=64 * 4096, n=1000)  # 262144 validators
     assert big.c == 64 and big.sc == (big.v // 32) // 64
     assert big.c * big.sc <= big.v
+
+
+# --- aggregators (the t≈8s phase) ---------------------------------------------
+#
+# An aggregator is, for now, a node drawn from its committee's subnet subscribers
+# (so it already receives the attestations). Each committee gets
+# min(target_aggregators, |subscribers|) of them, seeded per slot.
+
+
+def test_aggregators_are_subscribers_and_meet_target_count():
+    p = committee.Params(
+        n=40, v=80, c=4, sc=4, subnets_per_node=2, subscribe_floor=10,
+        target_aggregators=6, num_slots=3,
+    )
+    a = committee.generate(p)
+    for slot in a.slots:
+        assert len(slot.aggregators) == p.c
+        for ci, aggs in enumerate(slot.aggregators):
+            subs = a.subnet_subscribers[slot.subnet_of[ci]]
+            assert len(aggs) == min(p.target_aggregators, len(subs))
+            assert aggs == sorted(set(aggs))  # sorted, distinct
+            assert set(aggs) <= set(subs)  # drawn only from subscribers
+
+
+def test_aggregators_clamped_to_subscriber_count():
+    # target_aggregators (default 16) > subscribers ⇒ every subscriber aggregates.
+    p = committee.Params(n=12, v=24, c=1, sc=2, subscribe_floor=5, num_slots=1)
+    a = committee.generate(p)
+    subs = a.subnet_subscribers[0]
+    assert len(subs) <= p.target_aggregators
+    assert a.slots[0].aggregators[0] == subs
+
+
+def test_aggregators_seeded_vary_across_slots_and_with_seed():
+    base = committee.Params(
+        n=40, v=80, c=2, sc=4, subscribe_floor=20, target_aggregators=4, seed=7, num_slots=4
+    )
+    a = committee.generate(base)
+    # Different slots draw different aggregators (not all identical across slots).
+    per_slot = [tuple(s.aggregators[0]) for s in a.slots]
+    assert len(set(per_slot)) > 1, "aggregators should be re-drawn per slot"
+    # Same seed ⇒ identical; seed+1 ⇒ differs.
+    assert committee.generate(base).slots[0].aggregators == a.slots[0].aggregators
+    other = committee.Params(
+        n=40, v=80, c=2, sc=4, subscribe_floor=20, target_aggregators=4, seed=8, num_slots=4
+    )
+    assert committee.generate(other).slots[0].aggregators != a.slots[0].aggregators

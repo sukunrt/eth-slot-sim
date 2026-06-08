@@ -74,6 +74,30 @@ func TestLoadFixtureContract(t *testing.T) {
 		}
 	}
 
+	// Aggregators: ⊆ the subnet's subscribers, count == min(target, |subscribers|), sorted.
+	if a.Params.TargetAggregators != 16 || a.Params.M != 1 {
+		t.Fatalf("params = %+v, want target_aggregators16 m1", a.Params)
+	}
+	for _, sp := range a.Slots {
+		if len(sp.Aggregators) != a.Params.C {
+			t.Fatalf("slot %d aggregators %d, want %d", sp.Slot, len(sp.Aggregators), a.Params.C)
+		}
+		for ci, aggs := range sp.Aggregators {
+			subs := a.SubnetSubscribers[sp.SubnetOf[ci]]
+			if len(aggs) != min(a.Params.TargetAggregators, len(subs)) {
+				t.Fatalf("slot %d committee %d aggregators %d, want %d", sp.Slot, ci,
+					len(aggs), min(a.Params.TargetAggregators, len(subs)))
+			}
+			if !slices.IsSorted(aggs) {
+				t.Fatalf("slot %d committee %d aggregators %v not sorted", sp.Slot, ci, aggs)
+			}
+			for _, ag := range aggs {
+				if !slices.Contains(subs, ag) {
+					t.Fatalf("slot %d committee %d aggregator %d not a subscriber", sp.Slot, ci, ag)
+				}
+			}
+		}
+	}
 	// Accessors agree with the raw structure.
 	for subnet := range a.Params.C {
 		if got := a.Subscribers(subnet); !slices.Equal(got, a.SubnetSubscribers[subnet]) {
@@ -151,5 +175,29 @@ func TestLiteralAssignmentAccessors(t *testing.T) {
 	}
 	if got := a.Node(0).SubscribedSubnets(); !slices.Equal(got, []int{1}) {
 		t.Fatalf("node0 SubscribedSubnets = %v, want [1]", got)
+	}
+}
+
+// AggregateSubnets returns the subnets a node aggregates this slot — the committees whose
+// aggregator set includes it. A node can aggregate several committees, or none.
+func TestAggregateSubnets(t *testing.T) {
+	a := &Assignment{
+		Params:            Params{N: 4, V: 8, C: 2, Sc: 2, SubnetCount: 64, M: 1, NumSlots: 1},
+		SubnetSubscribers: [][]int{{0, 1, 2}, {0, 3}},
+		Slots: []SlotPlan{{
+			Slot:        0,
+			Committees:  [][]AttesterRef{{}, {}},
+			SubnetOf:    []int{0, 1},
+			Aggregators: [][]int{{0, 2}, {0, 3}}, // node 0 aggregates both committees
+		}},
+	}
+	if got := a.Node(0).AggregateSubnets(0); !slices.Equal(got, []int{0, 1}) {
+		t.Fatalf("node0 AggregateSubnets = %v, want [0 1]", got)
+	}
+	if got := a.Node(2).AggregateSubnets(0); !slices.Equal(got, []int{0}) {
+		t.Fatalf("node2 AggregateSubnets = %v, want [0]", got)
+	}
+	if got := a.Node(1).AggregateSubnets(0); got != nil {
+		t.Fatalf("node1 AggregateSubnets = %v, want nil (aggregates nothing)", got)
 	}
 }

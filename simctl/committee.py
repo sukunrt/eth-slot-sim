@@ -28,6 +28,8 @@ class Params:
     subnet_count: int = 64
     subnets_per_node: int = 2  # subnets a node subscribes (capped at C)
     subscribe_floor: int = 10  # min subscribers per active subnet
+    target_aggregators: int = 16  # aggregators per committee (TARGET_AGGREGATORS_PER_COMMITTEE)
+    m: int = 1  # distinct aggregates each committee's aggregators publish
     seed: int = 1
     num_slots: int = 1
 
@@ -45,6 +47,7 @@ class SlotPlan:
     slot: int
     committees: list[list[AttesterRef]]  # [committee] → its s_c attesters
     subnet_of: list[int]  # [committee] → subnet id
+    aggregators: list[list[int]]  # [committee] → aggregator node ids (subset of its subscribers)
     proposer: int = 0  # node that publishes this slot's block (a supernode; see generate)
 
 
@@ -64,6 +67,8 @@ class Assignment:
                 "subnet_count": self.params.subnet_count,
                 "subnets_per_node": self.params.subnets_per_node,
                 "subscribe_floor": self.params.subscribe_floor,
+                "target_aggregators": self.params.target_aggregators,
+                "m": self.params.m,
                 "seed": self.params.seed,
                 "num_slots": self.params.num_slots,
             },
@@ -73,6 +78,7 @@ class Assignment:
                     "slot": s.slot,
                     "committees": [[_ref_dict(r) for r in com] for com in s.committees],
                     "subnet_of": s.subnet_of,
+                    "aggregators": s.aggregators,
                     "proposer": s.proposer,
                 }
                 for s in self.slots
@@ -112,7 +118,7 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
         raise ValueError(f"C ({p.c}) > subnet_count ({p.subnet_count}): no committee→subnet map")
     subscribers = _subnet_subscribers(p)
     pool = sorted(supers) if supers else list(range(p.n))
-    slots = [_slot_plan(p, slot, pool[slot % len(pool)]) for slot in range(p.num_slots)]
+    slots = [_slot_plan(p, slot, subscribers, pool[slot % len(pool)]) for slot in range(p.num_slots)]
     return Assignment(params=p, subnet_subscribers=subscribers, slots=slots)
 
 
@@ -135,11 +141,13 @@ def _subnet_subscribers(p: Params) -> list[list[int]]:
     return [sorted(s) for s in subs]
 
 
-def _slot_plan(p: Params, slot: int, proposer: int) -> SlotPlan:
+def _slot_plan(p: Params, slot: int, subscribers: list[list[int]], proposer: int) -> SlotPlan:
     # Independent per-slot draw: s_c·C distinct validators, chunked into C committees.
     vals = _rng(p.seed, 2, slot).sample(range(p.v), p.c * p.sc)
+    agg_rng = _rng(p.seed, 3, slot)  # aggregator draw, independent of the committee draw
     committees: list[list[AttesterRef]] = []
     subnet_of: list[int] = []
+    aggregators: list[list[int]] = []
     for ci in range(p.c):
         subnet = ci  # identity: committee ci → subnet ci (C ≤ subnet_count)
         members = [
@@ -148,4 +156,9 @@ def _slot_plan(p: Params, slot: int, proposer: int) -> SlotPlan:
         ]
         committees.append(members)
         subnet_of.append(subnet)
-    return SlotPlan(slot=slot, committees=committees, subnet_of=subnet_of, proposer=proposer)
+        # Aggregators are drawn from the subnet's stable subscribers (they already receive
+        # the attestations); ~target_aggregators of them, clamped to the subscriber count.
+        subs = subscribers[subnet]
+        k = min(p.target_aggregators, len(subs))
+        aggregators.append(sorted(agg_rng.sample(subs, k)))
+    return SlotPlan(slot=slot, committees=committees, subnet_of=subnet_of, aggregators=aggregators, proposer=proposer)
