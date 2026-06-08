@@ -339,3 +339,105 @@ def test_analyze_aggregates_csv_detects_missing_and_leak(tmp_path):
     assert res.missing == [(2, 0, 0, 0), (3, 0, 0, 0)]
     assert res.leaked == [(0, 0, 0, 0)]
     assert not res.ok
+
+
+# --- data columns (kind=4, per-column subnet, distinct per proposer burst) ------
+#
+# Each column (the column index in the subnet field, origin = proposer) must reach exactly its
+# custodiers \ {proposer}, once — missing/leaked/duplicate all fail.
+
+
+def _cpub(slot, col, origin, t_ms):
+    return (
+        f'{{"msg":"publish","kind":4,"slot":{slot},"subnet":{col},"attester":-1,'
+        f'"origin":{origin},"voted_block":false,"t_ns":{t_ms * MS}}}'
+    )
+
+
+def _carr(node, slot, col, origin, t_ms):
+    return (
+        f'{{"msg":"arrival","node":{node},"kind":4,"slot":{slot},"subnet":{col},'
+        f'"attester":-1,"origin":{origin},"t_ns":{t_ms * MS}}}'
+    )
+
+
+def test_column_full_coverage_ok():
+    # column 0, proposer 0; custodiers {0,1,2}; reaches {1,2}.
+    custodiers = {0: {0, 1, 2}}
+    lines = [_cpub(0, 0, 0, 0), _carr(1, 0, 0, 0, 100), _carr(2, 0, 0, 0, 150)]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_columns(pubs, arrs, custodiers)
+    assert res.expected == 2 and res.arrivals == 2 and res.published == 1
+    assert res.missing == [] and res.leaked == [] and res.duplicates == []
+    assert res.ok
+
+
+def test_column_detects_missing():
+    custodiers = {0: {0, 1, 2}}
+    lines = [_cpub(0, 0, 0, 0), _carr(1, 0, 0, 0, 100)]  # node 2 missing
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_columns(pubs, arrs, custodiers)
+    assert res.missing == [(2, 0, 0, 0)]
+    assert not res.ok
+
+
+def test_column_detects_leak():
+    # node 9 is not a custodier of column 0 — receiving it is a leak.
+    custodiers = {0: {0, 1, 2}}
+    lines = [_cpub(0, 0, 0, 0), _carr(1, 0, 0, 0, 100), _carr(2, 0, 0, 0, 100), _carr(9, 0, 0, 0, 100)]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_columns(pubs, arrs, custodiers)
+    assert res.leaked == [(9, 0, 0, 0)]
+    assert not res.ok
+
+
+def _committee_col(column_subscribers, proposer=0):
+    return {
+        "params": {"n": 4},
+        "subnet_subscribers": [],
+        "num_columns": len(column_subscribers),
+        "column_subscribers": column_subscribers,
+        "slots": [{"slot": 0, "committees": [], "subnet_of": [], "proposer": proposer}],
+    }
+
+
+def test_analyze_columns_csv_coverage_ok(tmp_path):
+    data = _committee_col([[0, 1, 2]], proposer=0)
+    csv_path = tmp_path / "simnet_arrivals.csv"
+    csv_path.write_text(
+        "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
+        "1,0,4,0,-1,40,false\n"
+        "2,0,4,0,-1,55,false\n"
+    )
+    res = ca.analyze_columns_csv(csv_path, data)
+    assert res.expected == 2 and res.arrivals == 2 and res.published == 1
+    assert res.missing == [] and res.leaked == [] and res.duplicates == []
+    assert res.ok
+
+
+def test_analyze_columns_csv_detects_missing_and_leak(tmp_path):
+    data = _committee_col([[0, 1, 2]], proposer=0)
+    csv_path = tmp_path / "a.csv"
+    csv_path.write_text(
+        "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
+        "1,0,4,0,-1,40,false\n"  # node 2 (a custodier) never receives -> missing
+        "9,0,4,0,-1,40,false\n"  # node 9 not a custodier -> leak
+    )
+    res = ca.analyze_columns_csv(csv_path, data)
+    assert res.missing == [(2, 0, 0, 0)]
+    assert res.leaked == [(9, 0, 0, 0)]
+    assert not res.ok
+
+
+def test_load_column_subscribers(tmp_path):
+    (tmp_path / "committee.json").write_text(
+        '{"subnet_subscribers": [], "num_columns": 2, '
+        '"column_subscribers": [[0,1,2],[0,3]], '
+        '"slots": [{"slot":0,"committees":[],"subnet_of":[],"proposer":0}]}'
+    )
+    assert ca.load_column_subscribers(tmp_path) == {0: {0, 1, 2}, 1: {0, 3}}
+
+
+def test_load_column_subscribers_none_without_columns(tmp_path):
+    (tmp_path / "committee.json").write_text('{"subnet_subscribers": [], "slots": []}')
+    assert ca.load_column_subscribers(tmp_path) is None

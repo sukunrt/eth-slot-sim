@@ -28,6 +28,7 @@ from typing import Iterable
 BLOCK_KIND = 1
 ATTEST_KIND = 2
 AGGREGATE_KIND = 3
+COLUMN_KIND = 4
 
 # pub key: (kind, slot, subnet, attester, origin) -> (t_ns, voted_block)
 PubKey = tuple[int, int, int, int, int]
@@ -163,6 +164,105 @@ def analyze_attestations(
 
 
 @dataclass
+class ColumnResult:
+    """Column check: each column reaches exactly its custodiers \\ {proposer}, once."""
+
+    arrivals: int
+    expected: int
+    missing: list[tuple[int, int, int, int]] = field(default_factory=list)
+    leaked: list[tuple[int, int, int, int]] = field(default_factory=list)
+    duplicates: list[tuple[int, int, int, int]] = field(default_factory=list)
+    delays_ms: list[float] = field(default_factory=list)
+    published: int = 0  # distinct columns (one per active column per slot)
+
+    @property
+    def ok(self) -> bool:
+        return (
+            not self.missing
+            and not self.leaked
+            and not self.duplicates
+            and self.arrivals == self.expected
+        )
+
+
+def analyze_columns(
+    pubs: dict[PubKey, tuple[int, bool]],
+    arrs: list[Arrival],
+    custodiers: dict[int, set[int]],
+) -> ColumnResult:
+    """Cross-check column arrivals (Shadow slog) against the custody sets: each column reaches
+    exactly custodiers(column) \\ {origin} — no missing, leaked, or dup. The column index is in
+    the subnet field; origin is the proposer (attester is unused, -1)."""
+    col_pubs = {(s, col, o): t for (k, s, col, _a, o), (t, _v) in pubs.items() if k == COLUMN_KIND}
+    col_arrs = [(n, s, col, o, t) for (n, k, s, col, _a, o, t) in arrs if k == COLUMN_KIND]
+
+    counts = Counter((n, s, col, o) for n, s, col, o, _ in col_arrs)
+    received = set(counts)
+    duplicates = sorted(k for k, c in counts.items() if c > 1)
+
+    missing: list[tuple[int, int, int, int]] = []
+    expected = 0
+    for slot, col, origin in col_pubs:
+        for node in custodiers.get(col, set()):
+            if node == origin:
+                continue
+            expected += 1
+            if (node, slot, col, origin) not in received:
+                missing.append((node, slot, col, origin))
+    missing.sort()
+
+    leaked = sorted(
+        (n, s, col, o) for n, s, col, o, _ in col_arrs if n not in custodiers.get(col, set())
+    )
+    delays_ms = sorted(
+        (t - col_pubs[(s, col, o)]) / 1e6 for n, s, col, o, t in col_arrs if (s, col, o) in col_pubs
+    )
+    return ColumnResult(len(col_arrs), expected, missing, leaked, duplicates, delays_ms, len(col_pubs))
+
+
+def analyze_columns_csv(path: Path, committee_data: dict) -> ColumnResult:
+    """Column coverage for the simnet backend. The CSV is keyed by (slot, subnet=column) with
+    no origin column, so each column's origin is its slot's proposer (which originates every
+    column). Custodiers come from committee.json's column_subscribers; all columns are active
+    each slot."""
+    custodiers = {col: set(m) for col, m in enumerate(committee_data["column_subscribers"])}
+    proposer_of = {sp["slot"]: sp["proposer"] for sp in committee_data["slots"]}
+
+    received: dict[tuple[int, int], set[int]] = {}
+    counts: Counter = Counter()
+    delays_ms: list[float] = []
+    leaked: list[tuple[int, int, int, int]] = []
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            if int(r.get("kind", BLOCK_KIND)) != COLUMN_KIND:
+                continue
+            slot, col, node = int(r["slot"]), int(r["subnet"]), int(r["node"])
+            origin = proposer_of.get(slot, -1)
+            counts[(node, slot, col, origin)] += 1
+            received.setdefault((slot, col), set()).add(node)
+            delays_ms.append(float(r["delay_ms"]))
+            if node not in custodiers.get(col, set()):
+                leaked.append((node, slot, col, origin))
+
+    missing: list[tuple[int, int, int, int]] = []
+    expected = 0
+    for slot, origin in proposer_of.items():
+        for col in range(len(custodiers)):
+            for node in custodiers.get(col, set()):
+                if node == origin:
+                    continue
+                expected += 1
+                if node not in received.get((slot, col), set()):
+                    missing.append((node, slot, col, origin))
+    duplicates = sorted(k for k, c in counts.items() if c > 1)
+    published = len(proposer_of) * len(custodiers)
+    return ColumnResult(
+        sum(counts.values()), expected, sorted(missing), sorted(leaked), duplicates,
+        sorted(delays_ms), published,
+    )
+
+
+@dataclass
 class AggregateResult:
     """Aggregate check: each aggregator publishes one distinct aggregate (signed with its key)
     on the global topic, which reaches every node EXCEPT that aggregator, exactly once. A node
@@ -277,6 +377,18 @@ def load_committee(run_dir: Path) -> dict[int, set[int]] | None:
         return None
     data = json.loads(path.read_text())
     return {subnet: set(members) for subnet, members in enumerate(data["subnet_subscribers"])}
+
+
+def load_column_subscribers(run_dir: Path) -> dict[int, set[int]] | None:
+    """Custodier sets keyed by column (stable for the run) from committee.json's
+    column_subscribers, or None if absent (a run without the data-columns phase)."""
+    path = run_dir / "committee.json"
+    if not path.exists():
+        return None
+    cols = json.loads(path.read_text()).get("column_subscribers")
+    if cols is None:
+        return None
+    return {col: set(members) for col, members in enumerate(cols)}
 
 
 def load_proposers(run_dir: Path) -> list[int] | None:
@@ -459,6 +571,17 @@ def main(argv: list[str]) -> int:
             if gres.delays_ms:
                 c = cdf(gres.delays_ms)
                 print(f"  aggregate CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
+
+        if committee_data.get("column_subscribers"):
+            custodiers = {col: set(m) for col, m in enumerate(committee_data["column_subscribers"])}
+            cres = analyze_columns(pubs, arrs, custodiers)
+            ok = ok and cres.ok
+            print(f"columns published (distinct): {cres.published}")
+            print(f"column arrivals: {cres.arrivals} (expected {cres.expected})")
+            print(f"  missing: {len(cres.missing)}  leaked: {len(cres.leaked)}  duplicates: {len(cres.duplicates)}")
+            if cres.delays_ms:
+                c = cdf(cres.delays_ms)
+                print(f"  column CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
 
     proposers = load_proposers(run_dir)
     supernodes = load_supernodes(run_dir)
