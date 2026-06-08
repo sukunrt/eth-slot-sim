@@ -45,7 +45,8 @@ func buildScenario(t *testing.T, a *committee.Assignment, due time.Duration, sup
 	for i := range n {
 		// A small publish offset keeps the proposer off the exact instant the settle
 		// unparks every goroutine (which drops the first flood).
-		val := validator.New(i, n, 1024, 200*time.Millisecond, 0, rand.New(rand.NewPCG(1, uint64(i))))
+		val := validator.New(i, n, 1024, 200*time.Millisecond, 0,
+			rand.New(rand.NewPCG(1, uint64(i))), a.ProposerSchedule())
 		nd := &node.Node{
 			Num: i, Host: nw.Host(i), Network: nw,
 			VerifyDelay:       func() time.Duration { return 0 },

@@ -71,9 +71,13 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		nw:      nw,
 		slotDur: cfg.SlotDuration,
 	}
+	var proposers []int // supernode proposer schedule; nil ⇒ cyclic (block-only)
+	if cfg.Committee != nil {
+		proposers = cfg.Committee.ProposerSchedule()
+	}
 	for i := range n {
 		val := validator.New(i, n, cfg.BlockSize, cfg.Offset, cfg.Jitter,
-			rand.New(rand.NewPCG(cfg.Seed, uint64(i))))
+			rand.New(rand.NewPCG(cfg.Seed, uint64(i))), proposers)
 		nd := &node.Node{
 			Num: i, Host: nw.Host(i), Network: nw,
 			VerifyDelay:       cfg.VerifyDelay,

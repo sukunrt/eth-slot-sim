@@ -39,18 +39,28 @@ type Validator struct {
 	offset    time.Duration
 	jitter    time.Duration
 	rng       *rand.Rand
+	proposers []int // proposers[slot] = proposing node; nil ⇒ cyclic slot%n
 }
 
-// New returns a Validator that proposes blockSize-byte blocks on its turn,
-// publishing at offset + rand(0, jitter) into the slot. rng should be seeded by
-// the caller for reproducibility.
-func New(self, n, blockSize int, offset, jitter time.Duration, rng *rand.Rand) *Validator {
-	return &Validator{self: self, n: n, blockSize: blockSize, offset: offset, jitter: jitter, rng: rng}
+// New returns a Validator that proposes blockSize-byte blocks on its turn, publishing at
+// offset + rand(0, jitter) into the slot. proposers is the per-slot proposer schedule (from
+// committee.json, all supernodes); nil falls back to the cyclic slot%n rule (block-only
+// runs). rng should be seeded by the caller for reproducibility.
+func New(self, n, blockSize int, offset, jitter time.Duration, rng *rand.Rand, proposers []int) *Validator {
+	return &Validator{
+		self: self, n: n, blockSize: blockSize,
+		offset: offset, jitter: jitter, rng: rng, proposers: proposers,
+	}
 }
 
-// Duties returns this slot's duties. Phase 1: propose a block iff it's our turn.
+// Duties returns this slot's duties: propose a block iff this node is the slot's proposer
+// (from the schedule when set, else the cyclic slot%n rule).
 func (v *Validator) Duties(slot int) []Duty {
-	if slot%v.n != v.self {
+	proposer := slot % v.n
+	if len(v.proposers) > 0 {
+		proposer = v.proposers[slot]
+	}
+	if proposer != v.self {
 		return nil
 	}
 	at := v.offset

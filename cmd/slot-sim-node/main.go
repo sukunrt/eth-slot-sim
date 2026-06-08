@@ -91,16 +91,18 @@ func main() {
 	}
 
 	tracer := metrics.NewSlogTracer(slog.NewJSONHandler(os.Stdout, nil))
-	val := validator.New(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
-		rand.New(rand.NewPCG(*seed, uint64(*nodeNum))))
 	var comm *committee.Assignment
+	var proposers []int // supernode proposer schedule; nil ⇒ cyclic (block-only)
 	if *committeePath != "" {
 		c, err := committee.Load(*committeePath)
 		if err != nil {
 			log.Fatalf("load committee %s: %v", *committeePath, err)
 		}
 		comm = c
+		proposers = c.ProposerSchedule()
 	}
+	val := validator.New(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
+		rand.New(rand.NewPCG(*seed, uint64(*nodeNum))), proposers)
 	nd := &node.Node{
 		Num: *nodeNum, Host: newShadowHost(*nodeNum), Network: &shadowNetwork{},
 		VerifyDelay:       func() time.Duration { return *verifyDelay },
