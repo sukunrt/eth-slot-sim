@@ -158,6 +158,53 @@ func (r *Recorder) FractionVotedBlock(slot int) float64 {
 	return float64(block) / float64(total)
 }
 
+// CustodyCompleteRate is the gate's companion to FractionVotedBlock: over a slot's custodiers,
+// the share that had ALL their custody columns by the deadline `due`. Together they attribute a
+// prior-head vote to a missing column (rate < 1) vs. a missing block. custody[node] is the
+// node's custody column set (from committee.View.CustodyColumns); the Recorder lacks the
+// custody sets and the deadline, so they're passed in. The proposer (the slot's block origin)
+// holds every column it made and counts complete without arrivals. 0 if no custodiers.
+func (r *Recorder) CustodyCompleteRate(slot int, custody map[int][]int, due time.Duration) float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	proposer := -1
+	for id := range r.pub {
+		if id.Kind == node.KindBlock && id.Slot == slot {
+			proposer = id.Origin
+			break
+		}
+	}
+	arrived := map[int]map[int]bool{} // node → columns received by the deadline
+	for _, a := range r.arrivals {
+		if a.ID.Kind != node.KindColumn || a.ID.Slot != slot || a.Delay > due {
+			continue
+		}
+		if arrived[a.Node] == nil {
+			arrived[a.Node] = map[int]bool{}
+		}
+		arrived[a.Node][a.ID.Subnet] = true
+	}
+	var total, complete int
+	for nd, cols := range custody {
+		if len(cols) == 0 {
+			continue
+		}
+		total++
+		if nd == proposer {
+			complete++
+			continue
+		}
+		got := arrived[nd]
+		if slices.IndexFunc(cols, func(c int) bool { return !got[c] }) < 0 {
+			complete++
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(complete) / float64(total)
+}
+
 // WriteCSV dumps every arrival as node,slot,kind,subnet,attester,delay_ms,voted_block.
 func (r *Recorder) WriteCSV(w io.Writer) error {
 	cw := csv.NewWriter(w)

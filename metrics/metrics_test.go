@@ -108,6 +108,30 @@ func TestRecorderFractionVotedBlock(t *testing.T) {
 	}
 }
 
+// CustodyCompleteRate is the gate's companion to FractionVotedBlock: the share of custodiers
+// that had all their custody columns by the deadline. The proposer (block origin) holds every
+// column it made, so it counts complete without arrivals; a missing or late column drops a
+// custodier.
+func TestRecorderCustodyCompleteRate(t *testing.T) {
+	r := NewRecorder()
+	t0 := time.Unix(1000, 0)
+	r.OnPublish(BlockID(1, 0), false, t0) // node 0 is the proposer (full custody)
+	r.OnPublish(ColumnID(1, 0, 0), false, t0)
+	r.OnPublish(ColumnID(1, 1, 0), false, t0)
+	// node 1 gets both custody columns in time; node 2 misses column 1; node 3 gets column 1
+	// only after the 4 s deadline.
+	r.OnReceive(1, ColumnID(1, 0, 0), t0.Add(10*time.Millisecond))
+	r.OnReceive(1, ColumnID(1, 1, 0), t0.Add(20*time.Millisecond))
+	r.OnReceive(2, ColumnID(1, 0, 0), t0.Add(10*time.Millisecond))
+	r.OnReceive(3, ColumnID(1, 0, 0), t0.Add(10*time.Millisecond))
+	r.OnReceive(3, ColumnID(1, 1, 0), t0.Add(5*time.Second)) // late: after the deadline
+
+	custody := map[int][]int{0: {0, 1}, 1: {0, 1}, 2: {0, 1}, 3: {0, 1}}
+	if got, want := r.CustodyCompleteRate(1, custody, 4*time.Second), 0.5; got != want {
+		t.Fatalf("CustodyCompleteRate = %v, want %v (proposer + node1 complete of 4)", got, want)
+	}
+}
+
 // An aggregate's identity is (slot, subnet, aggregator) — the aggregator node (in Attester)
 // makes each aggregator's aggregate distinct (no dedup). Delay joins to the publish record.
 func TestRecorderAggregate(t *testing.T) {
