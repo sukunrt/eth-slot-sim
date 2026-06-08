@@ -108,6 +108,39 @@ def test_committed_go_fixture_is_current():
     assert committee.generate(_FIXTURE_PARAMS).to_dict() == on_disk, "stale fixture; regenerate it"
 
 
+def test_proposers_are_supernodes_round_robin():
+    # Block proposers are drawn only from the supernode set, round-robin over its sorted ids.
+    p = committee.Params(n=10, v=40, c=2, sc=4, num_slots=5)
+    supers = [9, 3, 5]
+    a = committee.generate(p, supers=supers)
+    pool = sorted(supers)
+    for sp in a.slots:
+        assert sp.proposer == pool[sp.slot % len(pool)]
+        assert sp.proposer in supers
+    assert [s["proposer"] for s in a.to_dict()["slots"]] == [
+        pool[i % len(pool)] for i in range(p.num_slots)
+    ]
+
+
+def test_proposers_fall_back_to_cyclic_without_supernodes():
+    p = committee.Params(n=4, v=16, c=1, sc=2, num_slots=6)
+    want = [i % p.n for i in range(p.num_slots)]
+    assert [s.proposer for s in committee.generate(p).slots] == want
+    assert [s.proposer for s in committee.generate(p, supers=[]).slots] == want
+
+
+def test_proposers_match_topology_supernodes():
+    # The proposer pool is exactly topology.supernode_ids(...) — the single source of truth.
+    from simctl import topology
+
+    p = committee.Params(n=20, v=80, c=2, sc=4, num_slots=8)
+    supers = topology.supernode_ids(p.n, 0.2, seed=42)
+    assert supers, "fixture needs supernodes"
+    a = committee.generate(p, supers=sorted(supers))
+    for sp in a.slots:
+        assert sp.proposer in supers
+
+
 def test_params_from_v_fills_the_mainnet_formula():
     # C = min(64, V/4096); s_c = (V/32)/C.
     p = committee.params_from_v(v=4096, n=64)

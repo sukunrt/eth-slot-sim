@@ -45,6 +45,7 @@ class SlotPlan:
     slot: int
     committees: list[list[AttesterRef]]  # [committee] → its s_c attesters
     subnet_of: list[int]  # [committee] → subnet id
+    proposer: int = 0  # node that publishes this slot's block (a supernode; see generate)
 
 
 @dataclass
@@ -72,6 +73,7 @@ class Assignment:
                     "slot": s.slot,
                     "committees": [[_ref_dict(r) for r in com] for com in s.committees],
                     "subnet_of": s.subnet_of,
+                    "proposer": s.proposer,
                 }
                 for s in self.slots
             ],
@@ -99,13 +101,18 @@ def params_from_v(v: int, n: int) -> Params:
     return Params(n=n, v=v, c=c, sc=sc)
 
 
-def generate(p: Params) -> Assignment:
+def generate(p: Params, supers: list[int] | None = None) -> Assignment:
+    """Build the assignment. ``supers`` is the supernode id set (from
+    topology.supernode_ids): block proposers are drawn from it round-robin over its sorted
+    ids. Empty/None ⇒ cyclic over all nodes (``slot % n``), preserving the pre-supernode
+    behavior for runs without supernodes."""
     if p.c * p.sc > p.v:
         raise ValueError(f"C*s_c ({p.c * p.sc}) > V ({p.v}): too many committee positions")
     if p.c > p.subnet_count:
         raise ValueError(f"C ({p.c}) > subnet_count ({p.subnet_count}): no committee→subnet map")
     subscribers = _subnet_subscribers(p)
-    slots = [_slot_plan(p, slot) for slot in range(p.num_slots)]
+    pool = sorted(supers) if supers else list(range(p.n))
+    slots = [_slot_plan(p, slot, pool[slot % len(pool)]) for slot in range(p.num_slots)]
     return Assignment(params=p, subnet_subscribers=subscribers, slots=slots)
 
 
@@ -128,7 +135,7 @@ def _subnet_subscribers(p: Params) -> list[list[int]]:
     return [sorted(s) for s in subs]
 
 
-def _slot_plan(p: Params, slot: int) -> SlotPlan:
+def _slot_plan(p: Params, slot: int, proposer: int) -> SlotPlan:
     # Independent per-slot draw: s_c·C distinct validators, chunked into C committees.
     vals = _rng(p.seed, 2, slot).sample(range(p.v), p.c * p.sc)
     committees: list[list[AttesterRef]] = []
@@ -141,4 +148,4 @@ def _slot_plan(p: Params, slot: int) -> SlotPlan:
         ]
         committees.append(members)
         subnet_of.append(subnet)
-    return SlotPlan(slot=slot, committees=committees, subnet_of=subnet_of)
+    return SlotPlan(slot=slot, committees=committees, subnet_of=subnet_of, proposer=proposer)

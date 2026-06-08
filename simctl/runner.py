@@ -1,9 +1,10 @@
 """Shadow + simnet run orchestration.
 
 Generates the committee assignment (when the run has an attestation phase), the
-topology and GML network, and one Shadow host per node. The cyclic proposer and the
-attestation duties are computed in Go from committee.json + flags, so Python only sets
-up inputs. Also drives the simnet backend and the cross-backend comparison.
+topology and GML network, and one Shadow host per node. The per-slot block proposer
+(a supernode) lives in committee.json; the attestation duties are computed in Go from
+committee.json + flags. So Python sets up inputs and both backends read the same files.
+Also drives the simnet backend and the cross-backend comparison.
 """
 
 import json
@@ -25,17 +26,22 @@ from simctl.topology import (
     generate_random_topology,
     generate_ring_topology,
     generate_subnet_topology,
+    supernode_ids,
 )
 
 
 def _committee_assignment(config: SimConfig) -> committee.Assignment | None:
-    """The committee assignment for this run, or None if the attestation phase is off."""
+    """The committee assignment for this run, or None if the attestation phase is off. Block
+    proposers are drawn from the topology's supernode set (the same supernode_ids the topology
+    bandwidth uses, keyed by the topology seed), so only supernodes propose."""
     a = config.attestation
     if a is None:
         return None
+    tc = config.topology
+    supers = sorted(supernode_ids(tc.num_nodes, tc.super_node_fraction, tc.seed))
     return committee.generate(
         committee.Params(
-            n=config.topology.num_nodes,
+            n=tc.num_nodes,
             v=a.validators,
             c=a.committees,
             sc=a.committee_size,
@@ -44,7 +50,8 @@ def _committee_assignment(config: SimConfig) -> committee.Assignment | None:
             subscribe_floor=a.subscribe_floor,
             seed=config.seed,
             num_slots=config.num_slots,
-        )
+        ),
+        supers=supers,
     )
 
 

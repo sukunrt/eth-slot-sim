@@ -70,7 +70,8 @@
       "subnet_of": [
         0,
         1
-      ]
+      ],
+      "proposer": 0
     }
   ]
 }
