@@ -108,6 +108,34 @@ func TestRecorderFractionVotedBlock(t *testing.T) {
 	}
 }
 
+// An aggregate's identity is (slot, subnet, agg_idx) with NO origin (-1): a committee's
+// aggregators publish byte-identical copies of the same logical aggregate, so the id is
+// shared. Two aggregators publishing it (multi-source) then a receive yields one arrival.
+func TestRecorderAggregateMultiSource(t *testing.T) {
+	r := NewRecorder()
+	t0 := time.Unix(1000, 0)
+	id := AggregateID(2, 5, 1) // slot2 subnet5 aggIdx1
+	if want := (MsgID{Kind: node.KindAggregate, Slot: 2, Subnet: 5, Attester: 1, Origin: -1}); id != want {
+		t.Fatalf("AggregateID = %+v, want %+v", id, want)
+	}
+	// Two aggregators publish the same logical aggregate at the same instant.
+	r.OnPublish(id, false, t0)
+	r.OnPublish(id, false, t0)
+	r.OnReceive(9, id, t0.Add(4*time.Millisecond))
+
+	arr := r.Arrivals()
+	if len(arr) != 1 {
+		t.Fatalf("got %d arrivals, want 1", len(arr))
+	}
+	if a := arr[0]; a.ID.Kind != node.KindAggregate || a.ID.Subnet != 5 ||
+		a.ID.Attester != 1 || a.Delay != 4*time.Millisecond {
+		t.Fatalf("arrival = %+v, want aggregate subnet5 aggIdx1 delay4ms", a)
+	}
+	if r.Orphans() != 0 {
+		t.Fatalf("orphans = %d, want 0", r.Orphans())
+	}
+}
+
 func TestRecorderConcurrent(t *testing.T) {
 	r := NewRecorder()
 	t0 := time.Unix(1000, 0)

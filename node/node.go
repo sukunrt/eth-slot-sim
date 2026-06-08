@@ -34,6 +34,7 @@ type Kind int
 const (
 	KindBlock       Kind = 1
 	KindAttestation Kind = 2
+	KindAggregate   Kind = 3
 )
 
 // Received is the node's outward hand-off for one decoded message: the node
