@@ -56,7 +56,15 @@ type Assignment struct {
 	Params Params `json:"params"`
 	// SubnetSubscribers[s] = nodes subscribing active subnet s (stable for the run); the
 	// receivers/relayers a publisher dials into.
-	SubnetSubscribers [][]int    `json:"subnet_subscribers"`
+	SubnetSubscribers [][]int `json:"subnet_subscribers"`
+	// Data-columns custody (the dissemination + gate phase). Empty/0 when the phase is off.
+	// NumColumns is the column-subnet count; ColumnSubscribers[i] = nodes custodying column
+	// i (the full-custody backbone ∪ the ordinary nodes that drew i); FullCustody = nodes
+	// holding every column. Generated in Python, carried here verbatim (Go never re-derives
+	// the full-custody set — see data-columns-spec.md §3).
+	NumColumns        int        `json:"num_columns,omitempty"`
+	ColumnSubscribers [][]int    `json:"column_subscribers,omitempty"`
+	FullCustody       []int      `json:"full_custody,omitempty"`
 	Slots             []SlotPlan `json:"slots"`
 }
 
@@ -80,6 +88,15 @@ func (a *Assignment) Subscribers(subnet int) []int {
 		return nil
 	}
 	return a.SubnetSubscribers[subnet]
+}
+
+// ColumnSubscribersOf returns the nodes custodying column col (its stable subscriber/relay
+// set) — the expected receiver set for that column's sidecar. Nil if col is out of range.
+func (a *Assignment) ColumnSubscribersOf(col int) []int {
+	if col < 0 || col >= len(a.ColumnSubscribers) {
+		return nil
+	}
+	return a.ColumnSubscribers[col]
 }
 
 // ProposerSchedule returns the per-slot block proposer (a supernode), one entry per slot in
@@ -130,6 +147,32 @@ func (v View) SubscribedSubnets() []int {
 	for subnet, members := range v.a.SubnetSubscribers {
 		if slices.Contains(members, v.node) {
 			out = append(out, subnet)
+		}
+	}
+	return out
+}
+
+// IsFullCustody reports whether this node holds every column — a data-column supernode that
+// forms the relay backbone (drawn from the 1 Gbit supernodes; see data-columns-spec.md §3).
+func (v View) IsFullCustody() bool {
+	return slices.Contains(v.a.FullCustody, v.node)
+}
+
+// CustodyColumns returns the column subnets this node custodies (subscribes + relays), stable
+// for the run. A full-custody node holds all NumColumns; an ordinary node holds the
+// seeded-random subset it drew (its membership in ColumnSubscribers).
+func (v View) CustodyColumns() []int {
+	if v.IsFullCustody() {
+		out := make([]int, v.a.NumColumns)
+		for i := range out {
+			out[i] = i
+		}
+		return out
+	}
+	var out []int
+	for col, members := range v.a.ColumnSubscribers {
+		if slices.Contains(members, v.node) {
+			out = append(out, col)
 		}
 	}
 	return out

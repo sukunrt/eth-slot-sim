@@ -181,6 +181,65 @@ def test_aggregators_clamped_to_subscriber_count():
     assert a.slots[0].aggregators[0] == subs
 
 
+# --- data-column custody (the dissemination + gate phase) ---------------------
+#
+# Uniform custody: every ordinary node holds custody_floor columns (a seeded-random
+# subset), full-custody nodes (F = round(full_custody_fraction · |supers|), a subset of
+# the supernodes) hold all columns and form the relay backbone. Proposers are full-custody.
+
+
+def test_column_subscribers_uniform_custody_and_backbone():
+    supers = list(range(8))  # 8 supernodes
+    p = committee.Params(
+        n=20, v=40, c=2, sc=4, num_columns=32, custody_floor=8,
+        full_custody_fraction=0.5, column_backbone_floor=3, seed=1, num_slots=4,
+    )
+    a = committee.generate(p, supers=supers)
+    # F = round(0.5 * 8) = 4 full-custody nodes, a sorted subset of the supernodes.
+    assert a.full_custody is not None and len(a.full_custody) == 4
+    assert set(a.full_custody) <= set(supers)
+    assert a.full_custody == sorted(a.full_custody)
+
+    full = set(a.full_custody)
+    assert len(a.column_subscribers) == p.num_columns
+    for members in a.column_subscribers:
+        assert full <= set(members)  # every column has the full-custody backbone
+        assert members == sorted(set(members))
+        assert all(0 <= m < p.n for m in members)
+
+    held = Counter(m for members in a.column_subscribers for m in members)
+    for node in range(p.n):
+        want = p.num_columns if node in full else p.custody_floor
+        assert held[node] == want  # uniform: full hold all, ordinary hold custody_floor
+
+    for sp in a.slots:
+        assert sp.proposer in full  # proposers originate all columns ⇒ full-custody
+
+
+def test_full_custody_below_backbone_floor_raises():
+    # F = round(0.5 * 4) = 2 < column_backbone_floor 3 ⇒ generation errors loudly.
+    p = committee.Params(
+        n=10, v=20, c=1, sc=2, num_columns=16, full_custody_fraction=0.5,
+        column_backbone_floor=3, num_slots=1,
+    )
+    with pytest.raises(ValueError):
+        committee.generate(p, supers=list(range(4)))
+
+
+def test_columns_require_supernodes():
+    # No supernodes ⇒ no full-custody backbone ⇒ the column network can't relay.
+    p = committee.Params(n=10, v=20, c=1, sc=2, num_columns=16, num_slots=1)
+    with pytest.raises(ValueError):
+        committee.generate(p, supers=[])
+
+
+def test_columns_off_keeps_committee_json_unchanged():
+    # num_columns=0 (off) ⇒ no column keys in committee.json (back-compat with non-column runs).
+    p = committee.Params(n=8, v=16, c=2, sc=4, num_slots=1)
+    d = committee.generate(p, supers=[0, 1]).to_dict()
+    assert "column_subscribers" not in d and "full_custody" not in d and "num_columns" not in d
+
+
 def test_aggregators_seeded_vary_across_slots_and_with_seed():
     base = committee.Params(
         n=40, v=80, c=2, sc=4, subscribe_floor=20, target_aggregators=4, seed=7, num_slots=4

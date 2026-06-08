@@ -178,6 +178,53 @@ func TestLiteralAssignmentAccessors(t *testing.T) {
 	}
 }
 
+// CustodyColumns / IsFullCustody / ColumnSubscribersOf expose the data-column custody set
+// carried in committee.json: a full-custody node holds every column (the relay backbone); an
+// ordinary node holds its seeded-random membership in column_subscribers.
+func TestCustodyColumns(t *testing.T) {
+	a := &Assignment{
+		Params:     Params{N: 5, V: 8, NumSlots: 1},
+		NumColumns: 4,
+		// full-custody nodes 0,1 hold all columns; ordinary 2,3,4 drew subsets.
+		FullCustody: []int{0, 1},
+		ColumnSubscribers: [][]int{
+			{0, 1, 2},    // column 0
+			{0, 1, 3},    // column 1
+			{0, 1, 2, 4}, // column 2
+			{0, 1, 4},    // column 3
+		},
+		Slots: []SlotPlan{{Slot: 0, Proposer: 0}},
+	}
+
+	if !a.Node(0).IsFullCustody() || !a.Node(1).IsFullCustody() {
+		t.Fatal("nodes 0,1 should be full-custody")
+	}
+	if a.Node(2).IsFullCustody() {
+		t.Fatal("node 2 should not be full-custody")
+	}
+	// Full-custody node holds every column.
+	if got := a.Node(0).CustodyColumns(); !slices.Equal(got, []int{0, 1, 2, 3}) {
+		t.Fatalf("node0 custody = %v, want all 4 columns", got)
+	}
+	// Ordinary nodes hold their column_subscribers membership (sorted).
+	if got := a.Node(2).CustodyColumns(); !slices.Equal(got, []int{0, 2}) {
+		t.Fatalf("node2 custody = %v, want [0 2]", got)
+	}
+	if got := a.Node(4).CustodyColumns(); !slices.Equal(got, []int{2, 3}) {
+		t.Fatalf("node4 custody = %v, want [2 3]", got)
+	}
+	if got := a.Node(3).CustodyColumns(); !slices.Equal(got, []int{1}) {
+		t.Fatalf("node3 custody = %v, want [1]", got)
+	}
+	// ColumnSubscribersOf returns a column's custodier set; out-of-range ⇒ nil.
+	if got := a.ColumnSubscribersOf(2); !slices.Equal(got, []int{0, 1, 2, 4}) {
+		t.Fatalf("ColumnSubscribersOf(2) = %v, want [0 1 2 4]", got)
+	}
+	if got := a.ColumnSubscribersOf(99); got != nil {
+		t.Fatalf("ColumnSubscribersOf(99) = %v, want nil", got)
+	}
+}
+
 // AggregateSubnets returns the subnets a node aggregates this slot — the committees whose
 // aggregator set includes it. A node can aggregate several committees, or none.
 func TestAggregateSubnets(t *testing.T) {

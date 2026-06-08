@@ -31,6 +31,15 @@ class Params:
     target_aggregators: int = 16  # aggregators per committee (TARGET_AGGREGATORS_PER_COMMITTEE)
     seed: int = 1
     num_slots: int = 1
+    # Data-columns phase (num_columns 0 ⇒ off). Uniform custody: every ordinary node holds
+    # custody_floor columns (a seeded-random subset); full-custody nodes — F = round(
+    # full_custody_fraction · |supers|), a subset of the supernodes — hold all columns and
+    # form the relay backbone. See data-columns-spec.md.
+    num_columns: int = 0
+    custody_floor: int = 8
+    full_custody_fraction: float = 0.5
+    column_backbone_floor: int = 3  # min F so every column subnet has a backbone core
+    per_subnet_floor: int = 0  # optional thin-column backstop (0 = off; the backbone covers it)
 
 
 @dataclass(frozen=True)
@@ -55,9 +64,13 @@ class Assignment:
     params: Params
     subnet_subscribers: list[list[int]]  # [active subnet] → subscribing node ids (stable)
     slots: list[SlotPlan]
+    # Data-columns custody (None when the phase is off). column_subscribers[i] = the nodes
+    # custodying column i; full_custody = the nodes holding every column (the relay backbone).
+    column_subscribers: list[list[int]] | None = None
+    full_custody: list[int] | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "params": {
                 "n": self.params.n,
                 "v": self.params.v,
@@ -82,6 +95,13 @@ class Assignment:
                 for s in self.slots
             ],
         }
+        # Column custody keys appear only when the phase is on (back-compat: a non-column
+        # committee.json is byte-identical to before).
+        if self.params.num_columns > 0:
+            d["num_columns"] = self.params.num_columns
+            d["column_subscribers"] = self.column_subscribers
+            d["full_custody"] = self.full_custody
+        return d
 
 
 def _ref_dict(r: AttesterRef) -> dict:
@@ -109,15 +129,72 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
     """Build the assignment. ``supers`` is the supernode id set (from
     topology.supernode_ids): block proposers are drawn from it round-robin over its sorted
     ids. Empty/None ⇒ cyclic over all nodes (``slot % n``), preserving the pre-supernode
-    behavior for runs without supernodes."""
+    behavior for runs without supernodes.
+
+    With ``num_columns > 0`` the data-columns phase is added: a full-custody backbone (a
+    subset of ``supers``) plus per-node custody, and proposers are drawn from the full-custody
+    set instead (a proposer originates all columns, so it must hold them all)."""
     if p.c * p.sc > p.v:
         raise ValueError(f"C*s_c ({p.c * p.sc}) > V ({p.v}): too many committee positions")
     if p.c > p.subnet_count:
         raise ValueError(f"C ({p.c}) > subnet_count ({p.subnet_count}): no committee→subnet map")
     subscribers = _subnet_subscribers(p)
-    pool = sorted(supers) if supers else list(range(p.n))
-    slots = [_slot_plan(p, slot, subscribers, pool[slot % len(pool)]) for slot in range(p.num_slots)]
-    return Assignment(params=p, subnet_subscribers=subscribers, slots=slots)
+
+    column_subscribers: list[list[int]] | None = None
+    full_custody: list[int] | None = None
+    proposer_pool = sorted(supers) if supers else list(range(p.n))
+    if p.num_columns > 0:
+        if not supers:
+            raise ValueError("data columns need supernodes (super_node_fraction > 0) for the backbone")
+        full_custody = _full_custody(p, sorted(supers))
+        column_subscribers = _column_subscribers(p, full_custody)
+        proposer_pool = full_custody  # proposers originate all columns ⇒ must be full-custody
+
+    slots = [
+        _slot_plan(p, slot, subscribers, proposer_pool[slot % len(proposer_pool)])
+        for slot in range(p.num_slots)
+    ]
+    return Assignment(
+        params=p, subnet_subscribers=subscribers, slots=slots,
+        column_subscribers=column_subscribers, full_custody=full_custody,
+    )
+
+
+def _full_custody(p: Params, supers: list[int]) -> list[int]:
+    """The full-custody backbone: a seeded subset of the supernodes that hold every column
+    (they have the 1 Gbit pipe). F = round(full_custody_fraction · |supers|), validated
+    ≥ column_backbone_floor so every column subnet has a relay core."""
+    f = round(p.full_custody_fraction * len(supers))
+    if f < p.column_backbone_floor:
+        raise ValueError(
+            f"full-custody F={f} < column_backbone_floor ({p.column_backbone_floor}): "
+            "raise full_custody_fraction or super_node_fraction"
+        )
+    return sorted(_rng(p.seed, 4).sample(supers, f))
+
+
+def _column_subscribers(p: Params, full_custody: list[int]) -> list[list[int]]:
+    """column_subscribers[i] = the nodes custodying column i = every full-custody node (the
+    relay backbone) ∪ the ordinary nodes that drew i. Each ordinary node draws custody_floor
+    random columns (seeded), mirroring _subnet_subscribers. per_subnet_floor optionally tops
+    up any thin column (off by default — the backbone already covers every column)."""
+    rng = _rng(p.seed, 5)
+    full = set(full_custody)
+    cols: list[set[int]] = [set(full_custody) for _ in range(p.num_columns)]
+    custody = min(p.custody_floor, p.num_columns)
+    for node in range(p.n):
+        if node in full:
+            continue  # full-custody nodes already hold every column
+        for c in rng.sample(range(p.num_columns), custody):
+            cols[c].add(node)
+    floor = min(p.per_subnet_floor, p.n)
+    if floor > 0:
+        for c in range(p.num_columns):
+            if len(cols[c]) < floor:
+                extra = [node for node in range(p.n) if node not in cols[c]]
+                rng.shuffle(extra)
+                cols[c].update(extra[: floor - len(cols[c])])
+    return [sorted(s) for s in cols]
 
 
 def _subnet_subscribers(p: Params) -> list[list[int]]:

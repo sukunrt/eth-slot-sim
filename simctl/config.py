@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class TopologyConfig(BaseModel):
@@ -57,6 +57,27 @@ class AttestationConfig(BaseModel):
     aggregate_due_ms: int = 8000  # AGGREGATE_DUE (6667 bp of a 12 s slot); 0 ⇒ aggregates off
 
 
+class DataColumnsConfig(BaseModel):
+    """Data-columns phase knobs (gossip dissemination + custody + the attestation gate).
+    Present+enabled ⇒ the proposer bursts one DataColumnSidecar per column subnet at t=0 and,
+    with attestations on, a node votes block only once it has the block AND all its custody
+    columns by the deadline. Uniform custody; requires super_node_fraction > 0 and V ≥ N (so
+    every node validates ⇒ custody 8). See data-columns-spec.md."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    num_columns: int = 128  # all active each slot (tests: 32)
+    blobs: int = 6  # B → column size B*2144+356 ≈ 12.9 KiB
+    custody_floor: int = 8  # columns an ordinary node holds (uniform; skew later)
+    full_custody_fraction: float = 0.5  # share of supernodes that are full-custody; F=round(frac·n_super)
+    column_backbone_floor: int = 3  # min F so every subnet has a backbone core (else generation errors)
+    per_subnet_floor: int = 0  # optional thin-subnet backstop (0 = off)
+    verify_service_ms: int = 3  # per-column validation-as-sleep
+    verify_parallelism_super: int = 16  # P for a full-custody node
+    verify_parallelism_regular: int = 4  # P for everyone else
+
+
 class SimConfig(BaseModel):
     """Root configuration for a single block-dissemination run."""
 
@@ -65,6 +86,7 @@ class SimConfig(BaseModel):
     topology: TopologyConfig = Field(default_factory=TopologyConfig)
     gossipsub: GossipsubParams = Field(default_factory=GossipsubParams)
     attestation: AttestationConfig | None = None  # present ⇒ run the attestation phase
+    data_columns: DataColumnsConfig | None = None  # present+enabled ⇒ run the data-columns phase
     num_slots: int = 5
     slot_duration_seconds: int = 12
     block_size: int = 128 * 1024
@@ -77,6 +99,24 @@ class SimConfig(BaseModel):
     log_level: Literal["error", "warning", "info", "debug", "trace"] = "info"
     seed: int = 1  # validator rng seed (combined per-node with node number)
     rpc_log_node: int = -1  # node-num to enable gossipsub debug RPC logging on (-1 = off)
+
+    @model_validator(mode="after")
+    def _check_data_columns(self) -> "SimConfig":
+        dc = self.data_columns
+        if dc is None or not dc.enabled:
+            return self
+        # Custody needs the committee (proposer schedule + column membership), which is built
+        # from the attestation block; columns-only runs use attestation.enabled=False.
+        if self.attestation is None:
+            raise ValueError("data_columns need an attestation block (V and the committee)")
+        if self.topology.super_node_fraction <= 0:
+            raise ValueError("data_columns need topology.super_node_fraction > 0 (the full-custody backbone)")
+        if self.attestation.validators < self.topology.num_nodes:
+            raise ValueError(
+                f"data_columns need V ({self.attestation.validators}) >= N "
+                f"({self.topology.num_nodes}): every node must validate (uniform custody)"
+            )
+        return self
 
 
 def load_config(path: Path) -> SimConfig:
