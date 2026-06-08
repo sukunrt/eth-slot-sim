@@ -164,6 +164,43 @@ def test_analyze_attestations_csv_coverage_ok(tmp_path):
     assert res.ok and res.fraction_voted_block == 1.0
 
 
+def test_check_proposers_flags_non_supernode():
+    # Every scheduled proposer must be a supernode.
+    assert ca.check_proposers([2, 3], {2, 3, 5}) == []
+    bad = ca.check_proposers([2, 4], {2, 3, 5})
+    assert len(bad) == 1 and "proposer 4" in bad[0]
+
+
+def test_check_proposers_flags_origin_off_schedule():
+    # When per-slot block origins are known (the Shadow event path), each block must be
+    # published by its slot's scheduled proposer.
+    bad = ca.check_proposers([2, 3], {2, 3, 9}, block_origins={0: 2, 1: 9})
+    assert len(bad) == 1 and "slot 1" in bad[0]
+
+
+def test_load_proposers_and_supernodes(tmp_path):
+    (tmp_path / "committee.json").write_text(
+        '{"subnet_subscribers": [], "slots": ['
+        '{"slot":0,"committees":[],"subnet_of":[],"proposer":2},'
+        '{"slot":1,"committees":[],"subnet_of":[],"proposer":3}]}'
+    )
+    (tmp_path / "topology.json").write_text(
+        '{"nodes":['
+        '{"num":0,"upload_bw_mbps":25,"download_bw_mbps":50,"country":"x"},'
+        '{"num":2,"upload_bw_mbps":1024,"download_bw_mbps":1024,"country":"x"},'
+        '{"num":3,"upload_bw_mbps":1024,"download_bw_mbps":1024,"country":"x"}],'
+        '"edges":[]}'
+    )
+    assert ca.load_proposers(tmp_path) == [2, 3]
+    assert ca.load_supernodes(tmp_path) == {2, 3}
+    assert ca.check_proposers(ca.load_proposers(tmp_path), ca.load_supernodes(tmp_path)) == []
+
+
+def test_load_proposers_none_for_block_only(tmp_path):
+    assert ca.load_proposers(tmp_path) is None  # no committee.json
+    assert ca.load_supernodes(tmp_path) is None  # no topology.json
+
+
 def test_analyze_attestations_csv_detects_missing_and_leak(tmp_path):
     data = _committee([[1, 2]], [[{"node": 0, "val": 5, "subnet": 0, "position": 0}]])
     csv_path = tmp_path / "a.csv"

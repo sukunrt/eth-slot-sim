@@ -389,6 +389,19 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
             "simnet": _att_summary(simnet_att),
         }
 
+    # Proposer guard: every scheduled proposer is a supernode, and every Shadow block was
+    # published by its slot's proposer. Both backends read this one committee.json, so a
+    # failure means the schedule or the two generated files disagree.
+    proposers = check_arrivals.load_proposers(run_dir)
+    supernodes = check_arrivals.load_supernodes(run_dir)
+    if proposers is not None and supernodes is not None:
+        problems = check_arrivals.check_proposers(
+            proposers, supernodes, check_arrivals.block_origins(pubs)
+        )
+        if problems:
+            raise RuntimeError("proposer guard failed: " + "; ".join(problems))
+        comparison["proposers_are_supernodes"] = True
+
     write_json_atomic(run_dir / "compare.json", comparison)
     return comparison
 

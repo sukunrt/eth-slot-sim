@@ -170,6 +170,49 @@ def load_committee(run_dir: Path) -> dict[int, set[int]] | None:
     return {subnet: set(members) for subnet, members in enumerate(data["subnet_subscribers"])}
 
 
+def load_proposers(run_dir: Path) -> list[int] | None:
+    """Per-slot block proposer (a supernode) from committee.json, or None (block-only run)."""
+    path = run_dir / "committee.json"
+    if not path.exists():
+        return None
+    return [sp["proposer"] for sp in json.loads(path.read_text())["slots"]]
+
+
+def load_supernodes(run_dir: Path) -> set[int] | None:
+    """Node ids with supernode (>=1024 Mbit) upload from topology.json, or None if absent."""
+    path = run_dir / "topology.json"
+    if not path.exists():
+        return None
+    nodes = json.loads(path.read_text())["nodes"]
+    return {n["num"] for n in nodes if n["upload_bw_mbps"] >= 1024}
+
+
+def block_origins(pubs: dict[PubKey, tuple[int, bool]]) -> dict[int, int]:
+    """slot -> publishing node for each block publish (the Shadow event path)."""
+    return {s: o for (k, s, _sub, _a, o) in pubs if k == BLOCK_KIND}
+
+
+def check_proposers(
+    proposers: list[int],
+    supernodes: set[int],
+    block_origins: dict[int, int] | None = None,
+) -> list[str]:
+    """Cross-backend proposer guard: every scheduled proposer must be a supernode, and — when
+    per-slot block origins are available (the Shadow event path) — each block must be published
+    by its slot's scheduled proposer. Returns human-readable violations ([] means OK), so both
+    backends fail loudly if they, or committee.json and topology.json, ever disagree."""
+    problems = []
+    for slot, p in enumerate(proposers):
+        if p not in supernodes:
+            problems.append(f"slot {slot}: proposer {p} is not a supernode")
+    for slot, origin in (block_origins or {}).items():
+        if slot < len(proposers) and origin != proposers[slot]:
+            problems.append(
+                f"slot {slot}: block origin {origin} != scheduled proposer {proposers[slot]}"
+            )
+    return problems
+
+
 def percentile(values: list[float], p: float) -> float:
     """Nearest-rank percentile (matches the Go metrics package)."""
     if not values:
@@ -295,6 +338,15 @@ def main(argv: list[str]) -> int:
             c = cdf(ares.delays_ms)
             print(f"  attestation CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
         print(f"  fraction voted block: {ares.fraction_voted_block:.3f}")
+
+    proposers = load_proposers(run_dir)
+    supernodes = load_supernodes(run_dir)
+    if proposers is not None and supernodes is not None:
+        problems = check_proposers(proposers, supernodes, block_origins(pubs))
+        ok = ok and not problems
+        print(f"proposer guard: {'OK' if not problems else 'FAIL'} (all proposers are supernodes)")
+        for p in problems[:10]:
+            print("  ", p)
 
     print("RESULT:", "OK" if ok else "FAIL")
     return 0 if ok else 1
