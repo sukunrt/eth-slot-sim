@@ -200,15 +200,22 @@ func (n *Node) Subscribe(topic string) error {
 	return nil
 }
 
-// registerVerifyHook registers topic's validation-as-sleep hook once: attestation
-// subnets share the batched verifier (the M/D/1 flood queue); everything else (the
+// batchedTopic reports whether topic's verification routes through the per-node batched
+// verifier (the t≈4s attestation flood and the t≈8s aggregate flood) rather than the
+// block's fixed per-hop delay (one block per slot).
+func batchedTopic(topic string) bool {
+	return strings.HasPrefix(topic, validator.AttestationTopicPrefix) || topic == validator.AggregateTopic
+}
+
+// registerVerifyHook registers topic's validation-as-sleep hook once: the attestation and
+// aggregate floods share the batched verifier (the M/D/1 flood queue); everything else (the
 // block) gets the fixed per-hop delay. Caller holds n.mu.
 func (n *Node) registerVerifyHook(topic string) error {
 	if n.validated[topic] {
 		return nil
 	}
 	var hook pubsub.ValidatorEx
-	if strings.HasPrefix(topic, validator.AttestationTopicPrefix) {
+	if batchedTopic(topic) {
 		hook = func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
 			n.verifier.submitAndWait(verificationItem{Attestations: []any{nil}})
 			return pubsub.ValidationAccept
@@ -340,6 +347,12 @@ func decode(topic string, data []byte, at time.Time) (Received, error) {
 			return Received{}, err
 		}
 		return Received{Kind: KindAttestation, Obj: att, At: at}, nil
+	case topic == validator.AggregateTopic:
+		agg := new(pb.Aggregate)
+		if err := proto.Unmarshal(data, agg); err != nil {
+			return Received{}, err
+		}
+		return Received{Kind: KindAggregate, Obj: agg, At: at}, nil
 	default:
 		return Received{}, fmt.Errorf("unknown topic %q", topic)
 	}

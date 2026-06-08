@@ -99,6 +99,55 @@ func TestNodePublishReceive(t *testing.T) {
 	})
 }
 
+// An aggregate published on the global aggregate topic is received and decoded as
+// KindAggregate with its fields intact. The aggregate topic isn't joined by JoinTopics
+// (the driver does that), so the test subscribes it explicitly.
+func TestNodeAggregateDecodes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		nw, err := netsim.New(netsim.Config{N: 2, P: 1, Seed: 1, MinLatency: 5 * time.Millisecond, MaxLatency: 5 * time.Millisecond})
+		if err != nil {
+			t.Fatalf("netsim: %v", err)
+		}
+		t.Cleanup(nw.Close)
+
+		nodes := buildNodes(nw, 2)
+		got := make(chan node.Received, 8)
+		nodes[1].OnReceive = func(r node.Received) { got <- r }
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		bringUp(t, ctx, nodes, nw)
+		defer func() {
+			for _, nd := range nodes {
+				nd.Close()
+			}
+		}()
+		for _, nd := range nodes {
+			if err := nd.Subscribe(validator.AggregateTopic); err != nil {
+				t.Fatalf("subscribe aggregate %d: %v", nd.Num, err)
+			}
+		}
+		time.Sleep(time.Second) // let the aggregate mesh form
+
+		msg := validator.MakeAggregate(2, 5, 1) // slot2 subnet5 aggIdx1
+		if err := nodes[0].Publish(ctx, validator.AggregateTopic, msg.Payload); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+
+		r := <-got
+		if r.Kind != node.KindAggregate {
+			t.Fatalf("kind = %d, want KindAggregate", r.Kind)
+		}
+		agg, ok := r.Obj.(*pb.Aggregate)
+		if !ok {
+			t.Fatalf("obj type %T, want *pb.Aggregate", r.Obj)
+		}
+		if agg.Slot != 2 || agg.Subnet != 5 || agg.AggIdx != 1 {
+			t.Fatalf("decoded %+v, want slot2 subnet5 aggIdx1", agg)
+		}
+	})
+}
+
 // Publishing to a topic the node never joined is an error, not a panic.
 func TestPublishUnjoinedTopic(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
