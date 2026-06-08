@@ -64,6 +64,16 @@ func TestLoadFixtureContract(t *testing.T) {
 		}
 	}
 
+	// Proposer survived the round-trip (one per slot, in range).
+	if got, want := a.ProposerSchedule(), []int{a.Slots[0].Proposer}; !slices.Equal(got, want) {
+		t.Fatalf("ProposerSchedule() = %v, want %v", got, want)
+	}
+	for _, sp := range a.Slots {
+		if sp.Proposer < 0 || sp.Proposer >= a.Params.N {
+			t.Fatalf("slot %d proposer %d out of range", sp.Slot, sp.Proposer)
+		}
+	}
+
 	// Accessors agree with the raw structure.
 	for subnet := range a.Params.C {
 		if got := a.Subscribers(subnet); !slices.Equal(got, a.SubnetSubscribers[subnet]) {
@@ -82,6 +92,22 @@ func TestLoadFixtureContract(t *testing.T) {
 				t.Fatalf("node %d SubscribedSubnets includes %d but isn't a member", node, subnet)
 			}
 		}
+	}
+}
+
+// ProposerSchedule exposes the per-slot block proposer the Python generator wrote (a
+// supernode), one entry per slot, in slot order.
+func TestProposerSchedule(t *testing.T) {
+	a := &Assignment{
+		Params: Params{N: 6, NumSlots: 3},
+		Slots: []SlotPlan{
+			{Slot: 0, Proposer: 5},
+			{Slot: 1, Proposer: 2},
+			{Slot: 2, Proposer: 5},
+		},
+	}
+	if got, want := a.ProposerSchedule(), []int{5, 2, 5}; !slices.Equal(got, want) {
+		t.Fatalf("ProposerSchedule() = %v, want %v", got, want)
 	}
 }
 

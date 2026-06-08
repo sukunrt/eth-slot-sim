@@ -37,11 +37,12 @@ type AttesterRef struct {
 	Position int `json:"position"`
 }
 
-// SlotPlan is one slot's committee draw (who attests where).
+// SlotPlan is one slot's committee draw (who attests where) plus its block proposer.
 type SlotPlan struct {
 	Slot       int             `json:"slot"`
 	Committees [][]AttesterRef `json:"committees"` // [committee] → its s_c attesters
 	SubnetOf   []int           `json:"subnet_of"`  // [committee] → subnet id
+	Proposer   int             `json:"proposer"`   // node that publishes this slot's block (a supernode)
 }
 
 // Assignment is the whole run's plan: the stable per-subnet subscribe set plus the
@@ -74,6 +75,17 @@ func (a *Assignment) Subscribers(subnet int) []int {
 		return nil
 	}
 	return a.SubnetSubscribers[subnet]
+}
+
+// ProposerSchedule returns the per-slot block proposer (a supernode), one entry per slot in
+// slot order — the schedule the Validator obeys instead of the cyclic slot%N rule. Both
+// backends read it from the same committee.json, so they propose identically.
+func (a *Assignment) ProposerSchedule() []int {
+	out := make([]int, len(a.Slots))
+	for i, sp := range a.Slots {
+		out[i] = sp.Proposer
+	}
+	return out
 }
 
 // AttestDuty is one attestation a node owes: which validator, on which subnet.
