@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package block;
+
+option go_package = "github.com/ethp2p/slot-sim/pb";
+
+// Column is the DataColumnSidecar wire message (~12.9 KiB at blobs=6), one per column
+// subnet per slot. The proposer erasure-codes the block into num_columns columns and
+// publishes one on each column topic in a t=0 burst; a node receives the columns on the
+// subnets it custodies. column is the column / subnet index; origin is the proposer node
+// (gossip origin, for the loopback skip).
+message Column {
+  uint32 slot    = 1;
+  uint32 column  = 2; // column / subnet index, 0 .. num_columns-1
+  uint32 origin  = 3; // proposer node (gossip origin; for the loopback skip)
+  bytes  payload = 4; // random filler so the marshaled message ≈ blobs*2144 + 356 bytes
+}

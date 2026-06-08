@@ -227,6 +227,12 @@ func (r *NodeRunner) onReceive(rec node.Received) {
 			return
 		}
 		r.tracer.OnReceive(r.num, metrics.AggregateID(int(agg.Slot), int(agg.Subnet), int(agg.Origin)), rec.At)
+	case node.KindColumn:
+		col := rec.Obj.(*pb.Column)
+		if int(col.Origin) == r.num { // skip our own published column (loopback)
+			return
+		}
+		r.tracer.OnReceive(r.num, metrics.ColumnID(int(col.Slot), int(col.Column), int(col.Origin)), rec.At)
 	}
 }
 

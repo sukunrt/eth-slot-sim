@@ -35,6 +35,7 @@ const (
 	KindBlock       Kind = 1
 	KindAttestation Kind = 2
 	KindAggregate   Kind = 3
+	KindColumn      Kind = 4
 )
 
 // Received is the node's outward hand-off for one decoded message: the node
@@ -353,6 +354,12 @@ func decode(topic string, data []byte, at time.Time) (Received, error) {
 			return Received{}, err
 		}
 		return Received{Kind: KindAggregate, Obj: agg, At: at}, nil
+	case strings.HasPrefix(topic, validator.ColumnTopicPrefix):
+		col := new(pb.Column)
+		if err := proto.Unmarshal(data, col); err != nil {
+			return Received{}, err
+		}
+		return Received{Kind: KindColumn, Obj: col, At: at}, nil
 	default:
 		return Received{}, fmt.Errorf("unknown topic %q", topic)
 	}

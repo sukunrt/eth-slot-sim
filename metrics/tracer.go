@@ -46,6 +46,13 @@ func AggregateID(slot, subnet, aggregator int) MsgID {
 	return MsgID{Kind: node.KindAggregate, Slot: slot, Subnet: subnet, Attester: aggregator, Origin: -1}
 }
 
+// ColumnID is the MsgID for the data column (column/subnet index) published by origin (the
+// proposer) in slot. The column index rides the Subnet field so it survives the CSV;
+// Attester is unused (-1), exactly as a block's is.
+func ColumnID(slot, column, origin int) MsgID {
+	return MsgID{Kind: node.KindColumn, Slot: slot, Subnet: column, Attester: -1, Origin: origin}
+}
+
 // Tracer receives app-level publish/receive events. votedBlock is meaningful only for
 // attestations (false for blocks); the receive side recovers it by joining to the
 // publish record, so OnReceive needs only the identity.
