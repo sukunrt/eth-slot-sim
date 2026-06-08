@@ -54,7 +54,7 @@ func buildScenario(t *testing.T, a *committee.Assignment, due time.Duration, sup
 			AttestBatchWindow: 10 * time.Millisecond,
 			D:                 8, Dlo: 6, Dhi: 12,
 		}
-		r := driver.NewRunner(i, nd, val, a, tracer, slotDur, due, 0, 1, nw.Peers(i))
+		r := driver.NewRunner(i, nd, val, a, tracer, slotDur, due, 0, 0, 1, nw.Peers(i))
 		r.Attach()
 		if suppressBlock[i] {
 			orig := nd.OnReceive

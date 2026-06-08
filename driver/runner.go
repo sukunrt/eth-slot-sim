@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"time"
 
@@ -26,6 +27,7 @@ type NodeRunner struct {
 	tracer  metrics.Tracer
 	slotDur time.Duration
 	due     time.Duration // attestation deadline, offset into the slot
+	aggDue  time.Duration // aggregate emit, offset into the slot (0 ⇒ no aggregates)
 	prep    time.Duration // Δ_prep before emitting on block receipt
 	seed    uint64        // seeds the per-slot subnet-peer dial choice
 	base    map[int]bool  // the node's long-lived peers (so we know which dials are extra)
@@ -46,19 +48,24 @@ type slotState struct {
 	seen       bool
 	seenAt     time.Time
 	seenOrigin int
+
+	aggSubnets  []int // subnets this node aggregates this slot (publishes M aggregates on each)
+	aggTimer    *time.Timer
+	aggEmitOnce sync.Once
 }
 
-// NewRunner builds a runner for one node. comm may be nil (block-only). basePeers is the
-// node's long-lived peer set (so per-slot subnet dials it adds on top can be dropped).
+// NewRunner builds a runner for one node. comm may be nil (block-only). aggDue 0 disables
+// the aggregate phase. basePeers is the node's long-lived peer set (so per-slot subnet dials
+// it adds on top can be dropped).
 func NewRunner(num int, nd *node.Node, val *validator.Validator, comm *committee.Assignment,
-	tracer metrics.Tracer, slotDur, due, prep time.Duration, seed uint64, basePeers []int) *NodeRunner {
+	tracer metrics.Tracer, slotDur, due, aggDue, prep time.Duration, seed uint64, basePeers []int) *NodeRunner {
 	base := make(map[int]bool, len(basePeers))
 	for _, p := range basePeers {
 		base[p] = true
 	}
 	return &NodeRunner{
 		num: num, nd: nd, val: val, comm: comm, tracer: tracer,
-		slotDur: slotDur, due: due, prep: prep, seed: seed, base: base,
+		slotDur: slotDur, due: due, aggDue: aggDue, prep: prep, seed: seed, base: base,
 		slots: make(map[int]*slotState),
 	}
 }
@@ -71,6 +78,11 @@ func (r *NodeRunner) Attach() { r.nd.OnReceive = r.onReceive }
 func (r *NodeRunner) Prepare() {
 	if r.comm == nil {
 		return
+	}
+	if r.aggDue > 0 { // every node joins the global aggregate mesh (it downloads all aggregates)
+		if err := r.nd.Subscribe(validator.AggregateTopic); err != nil {
+			slog.Error("subscribe aggregate topic failed", "node", r.num, "err", err)
+		}
 	}
 	for _, s := range r.comm.Node(r.num).SubscribedSubnets() {
 		if err := r.nd.Subscribe(validator.AttestationTopic(s)); err != nil {
@@ -134,6 +146,17 @@ func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 		r.slots[slot] = ss
 		r.mu.Unlock()
 		ss.timer = time.AfterFunc(time.Until(ss.deadline), func() { r.onDeadline(slot, ss) })
+
+		// Aggregate phase: if this node aggregates any committee this slot, arm a timer to
+		// publish its M aggregates at the aggregate deadline (fixed offset, no coupling).
+		if r.aggDue > 0 {
+			ss.aggSubnets = view.AggregateSubnets(slot)
+			if len(ss.aggSubnets) > 0 {
+				ss.aggTimer = time.AfterFunc(time.Until(slotStart.Add(r.aggDue)), func() {
+					r.emitAggregate(slot, ss)
+				})
+			}
+		}
 	}
 	for _, duty := range r.val.Duties(slot) {
 		go r.publishBlock(slotStart.Add(duty.At), duty.Msg)
@@ -159,6 +182,9 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 		return
 	}
 	ss.timer.Stop()
+	if ss.aggTimer != nil {
+		ss.aggTimer.Stop()
+	}
 	r.nd.Disconnect(ss.dialed)
 	r.mu.Lock()
 	delete(r.slots, slot)
@@ -196,7 +222,25 @@ func (r *NodeRunner) onReceive(rec node.Received) {
 			return
 		}
 		r.tracer.OnReceive(r.num, metrics.AttestID(int(att.Slot), int(att.Subnet), int(att.Val), int(att.Origin)), rec.At)
+	case node.KindAggregate:
+		agg := rec.Obj.(*pb.Aggregate)
+		// The aggregate carries no origin (a committee's aggregators publish identical
+		// copies). The loopback skip is therefore by aggregator membership: a node that
+		// aggregates this (slot, subnet) published it, so it must not record its own copy.
+		if r.isAggregator(int(agg.Slot), int(agg.Subnet)) {
+			return
+		}
+		r.tracer.OnReceive(r.num, metrics.AggregateID(int(agg.Slot), int(agg.Subnet), int(agg.AggIdx)), rec.At)
 	}
+}
+
+// isAggregator reports whether this node aggregates the committee on subnet in slot (so it
+// published that committee's aggregates and skips their loopback).
+func (r *NodeRunner) isAggregator(slot, subnet int) bool {
+	if r.comm == nil {
+		return false
+	}
+	return slices.Contains(r.comm.Node(r.num).AggregateSubnets(slot), subnet)
 }
 
 // onBlockProcessed is the causal edge: the slot's block was processed at `at`. It
@@ -259,6 +303,25 @@ func (r *NodeRunner) emit(slot int, ss *slotState, votedOrigin int) {
 			r.tracer.OnPublish(metrics.AttestID(slot, d.Subnet, d.Val, r.num), votedBlock, at)
 			if err := r.nd.Publish(r.runCtx, topic, msg.Payload); err != nil {
 				slog.Error("publish attestation failed", "node", r.num, "slot", slot, "subnet", d.Subnet, "err", err)
+			}
+		}
+	})
+}
+
+// emitAggregate publishes this node's M aggregates for each committee it aggregates this
+// slot, on the global aggregate topic, at most once per slot. The messages are byte-identical
+// across a committee's aggregators, so gossipsub deduplicates the copies (the multi-source
+// model); the recording id (slot, subnet, aggIdx) carries no origin.
+func (r *NodeRunner) emitAggregate(slot int, ss *slotState) {
+	ss.aggEmitOnce.Do(func() {
+		at := time.Now()
+		for _, subnet := range ss.aggSubnets {
+			for aggIdx := range r.comm.Params.M {
+				msg := validator.MakeAggregate(slot, subnet, aggIdx)
+				r.tracer.OnPublish(metrics.AggregateID(slot, subnet, aggIdx), false, at)
+				if err := r.nd.Publish(r.runCtx, msg.Topic, msg.Payload); err != nil {
+					slog.Error("publish aggregate failed", "node", r.num, "slot", slot, "subnet", subnet, "err", err)
+				}
 			}
 		}
 	})

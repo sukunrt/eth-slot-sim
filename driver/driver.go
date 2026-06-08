@@ -52,6 +52,10 @@ type Config struct {
 	AttestVerifyDelay func() time.Duration
 	AttestPerItem     time.Duration
 	AttestBatchWindow time.Duration
+
+	// Aggregate phase (optional). 0 ⇒ no aggregates. The number of aggregates per
+	// committee is carried by the committee assignment (Params.M).
+	AggregateDue time.Duration // aggregate emit, offset into the slot (≈8s)
 }
 
 // Driver builds and orchestrates the nodes on a Fabric.
@@ -94,7 +98,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 			D:                 cfg.D, Dlo: cfg.Dlo, Dhi: cfg.Dhi,
 		}
 		r := NewRunner(i, nd, val, runnerComm, tracer, cfg.SlotDuration, cfg.AttestationDue,
-			cfg.Prep, cfg.Seed, nw.Peers(i))
+			cfg.AggregateDue, cfg.Prep, cfg.Seed, nw.Peers(i))
 		r.Attach()
 		d.nodes[i] = nd
 		d.runners[i] = r

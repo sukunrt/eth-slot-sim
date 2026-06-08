@@ -80,6 +80,7 @@ func main() {
 		committeePath = flag.String("committee", "", "path to committee.json (empty → block-only)")
 		attestations  = flag.Bool("attestations", true, "emit attestations (false → block-only; committee still sets the proposer schedule)")
 		attDue        = flag.Duration("att-due", 4*time.Second, "attestation deadline offset into the slot")
+		aggDue        = flag.Duration("agg-due", 0, "aggregate emit offset into the slot (0 ⇒ aggregates off)")
 		prep          = flag.Duration("prep", 0, "extra processing before emitting on block receipt")
 		attestVerify  = flag.Duration("attest-verify-delay", 10*time.Millisecond, "attestation batch base verify delay")
 		attestPerItem = flag.Duration("attest-per-item", 0, "attestation per-item verify cost")
@@ -117,7 +118,7 @@ func main() {
 		nd.RPCLogger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	peers := parseIntList(*peerNumsStr)
-	runner := driver.NewRunner(*nodeNum, nd, val, comm, tracer, *slotDur, *attDue, *prep, *seed, peers)
+	runner := driver.NewRunner(*nodeNum, nd, val, comm, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers)
 	runner.Attach() // sets nd.OnReceive before JoinTopics
 
 	ctx := context.Background()
