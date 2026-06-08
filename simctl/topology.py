@@ -280,11 +280,13 @@ def generate_subnet_topology(
     """discv5-biased topology: every node targets K long-lived peers, biased so each subnet's
     subscribers form a connected subgraph (an attestation handed to a couple of them floods to
     all of them); the block topic rides the same graph. Mirrors netsim/subnet.go discv5Graph —
-    a global random spanning tree, then a random spanning tree per subnet's subscribers, then
-    random fill up to K (subnet edges counted toward K). K is clamped to N-1 and the fill is
-    best-effort, so a small or dense graph degrades gracefully.
+    a global random spanning tree, then a random spanning tree per subnet's subscribers, a
+    random spanning tree per column's custodiers (when the data-columns phase is on), then
+    random fill up to K (subnet/column edges counted toward K). K is clamped to N-1 and the
+    fill is best-effort, so a small or dense graph degrades gracefully.
 
-    `assignment` is a simctl.committee.Assignment; its subnet_subscribers drive the bias.
+    `assignment` is a simctl.committee.Assignment; its subnet_subscribers (and, for the column
+    phase, column_subscribers) drive the bias.
     """
     rng = random.Random(seed)
     selector = CountrySelector(load_weights(), rng)
@@ -296,6 +298,8 @@ def generate_subnet_topology(
     g.random_tree(list(range(num_nodes)), rng)  # global: keep the block topic connected
     for subs in assignment.subnet_subscribers:
         g.random_tree(list(subs), rng)  # each subnet's subscribers: one connected piece
+    for subs in assignment.column_subscribers or []:
+        g.random_tree(list(subs), rng)  # each column's custodiers: one connected piece (DA backbone)
     g.fill(min(k, num_nodes - 1), rng)
 
     edges = _edges_from_adjacency(g.adj, nodes, latencies, min_latency_ms)

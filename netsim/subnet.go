@@ -46,6 +46,9 @@ func discv5Graph(a *committee.Assignment, k int, seed uint64) [][]int {
 	for _, subs := range a.SubnetSubscribers {
 		g.randomTree(subs, rng) // each subnet's subscribers: one connected piece
 	}
+	for _, subs := range a.ColumnSubscribers {
+		g.randomTree(subs, rng) // each column's custodiers: one connected piece (the DA backbone)
+	}
 	g.fill(k, rng)
 	return g.adj
 }

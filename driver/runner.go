@@ -88,6 +88,13 @@ func (r *NodeRunner) Prepare() {
 			slog.Error("subscribe subnet failed", "node", r.num, "subnet", s, "err", err)
 		}
 	}
+	if r.comm.NumColumns > 0 { // the node's custody column meshes (the DA dissemination phase)
+		for _, c := range r.comm.Node(r.num).CustodyColumns() {
+			if err := r.nd.Subscribe(validator.ColumnTopic(c)); err != nil {
+				slog.Error("subscribe column failed", "node", r.num, "column", c, "err", err)
+			}
+		}
+	}
 }
 
 // Run executes numSlots slots from runStart: per slot publish block duties, dial this
@@ -190,9 +197,11 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 	r.mu.Unlock()
 }
 
-// publishBlock waits until when, records the publish, then publishes the block. A
-// proposer that also attests this slot votes for its own block (block_processed = now);
-// loopback is not routed through the tracer, so this is the only place self-block-seen
+// publishBlock waits until when, records the publish, then publishes the block and (when the
+// column phase is on) bursts one DataColumnSidecar on each column subnet — back-to-back, at
+// the block's instant, on meshes the proposer (a full-custody node) already joined at
+// bring-up. A proposer that also attests this slot votes for its own block (block_processed =
+// now); loopback is not routed through the tracer, so this is the only place self-block-seen
 // is set.
 func (r *NodeRunner) publishBlock(when time.Time, msg validator.Message) {
 	time.Sleep(time.Until(when))
@@ -200,6 +209,15 @@ func (r *NodeRunner) publishBlock(when time.Time, msg validator.Message) {
 	r.tracer.OnPublish(metrics.BlockID(msg.Slot, r.num), false, now)
 	if err := r.nd.Publish(r.runCtx, msg.Topic, msg.Payload); err != nil {
 		slog.Error("publish block failed", "node", r.num, "slot", msg.Slot, "err", err)
+	}
+	if r.comm != nil && r.comm.NumColumns > 0 {
+		for col := range r.comm.NumColumns {
+			cmsg := validator.MakeColumn(msg.Slot, col, r.num)
+			r.tracer.OnPublish(metrics.ColumnID(msg.Slot, col, r.num), false, now)
+			if err := r.nd.Publish(r.runCtx, cmsg.Topic, cmsg.Payload); err != nil {
+				slog.Error("publish column failed", "node", r.num, "slot", msg.Slot, "column", col, "err", err)
+			}
+		}
 	}
 	r.onBlockProcessed(msg.Slot, r.num, now)
 }

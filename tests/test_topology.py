@@ -115,6 +115,28 @@ def test_subnet_topology_connects_every_subnet_within_k():
     assert sum(degrees) / 30 >= k - 1, "fill did not reach K"
 
 
+def test_subnet_topology_connects_every_column_within_k():
+    # The column custodiers (the DA backbone ∪ ordinary drawers) form one connected piece per
+    # column, on top of the per-subnet + global trees, so each column's sidecar floods.
+    supers = list(range(6))
+    a = committee.generate(
+        committee.Params(
+            n=30, v=60, c=2, sc=4, subnets_per_node=2, subscribe_floor=10,
+            num_columns=16, custody_floor=4, full_custody_fraction=0.5,
+            column_backbone_floor=3, seed=1, num_slots=1,
+        ),
+        supers=supers,
+    )
+    topo = topology.generate_subnet_topology(num_nodes=30, k=12, seed=42, assignment=a)
+
+    adj = _adjacency(topo)
+    assert _connected(adj, range(30)), "block topic would partition"
+    for subnet, subs in enumerate(a.subnet_subscribers):
+        assert _connected(adj, subs), f"subnet {subnet} subscribers not connected"
+    for col, subs in enumerate(a.column_subscribers):
+        assert _connected(adj, subs), f"column {col} custodiers not connected: {subs}"
+
+
 def test_subnet_topology_degrades_gracefully_for_small_n():
     # K far larger than N-1, plus a singleton and an empty subnet: no crash/spin, degree
     # capped at N-1, still connected.
