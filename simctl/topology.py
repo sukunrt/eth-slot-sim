@@ -113,18 +113,25 @@ class CountrySelector:
         return self.countries[-1]
 
 
-def get_bandwidth(
-    node_num: int, super_node_fraction: float, rng: random.Random
-) -> tuple[int, int]:
-    """Determine upload/download bandwidth for a node."""
-    if node_num == 0:
-        if super_node_fraction > 0.0001:
-            return 1024, 1024  # Super node
-        return 25, 50  # Block builder
+# Distinct RNG stream constant so the supernode draw gets its own generator and doesn't
+# perturb the country-selection sequence.
+_SUPER_STREAM = 7
 
-    if rng.random() < super_node_fraction:
-        return 1024, 1024
-    return 25, 50  # Regular node
+
+def supernode_ids(num_nodes: int, super_node_fraction: float, seed: int) -> set[int]:
+    """The node ids that get supernode (1024/1024 Mbit) bandwidth — a pure, seeded function
+    so the committee proposer schedule (committee.py) and the topology bandwidth agree on
+    exactly the same set. Node 0 is always a supernode when the fraction is on (it is the
+    block builder); every other node is an independent draw. Empty when the fraction is ~0
+    (node 0 is then a 25/50 block builder)."""
+    if super_node_fraction <= 0.0001:
+        return set()
+    rng = random.Random(seed * 1_000_003 + _SUPER_STREAM)
+    supers = {0}
+    for i in range(1, num_nodes):
+        if rng.random() < super_node_fraction:
+            supers.add(i)
+    return supers
 
 
 class _Graph:
@@ -159,13 +166,13 @@ class _Graph:
 
 
 def _make_country_nodes(
-    num_nodes: int, super_node_fraction: float, selector: CountrySelector
+    num_nodes: int, supers: set[int], selector: CountrySelector
 ) -> list[NodeSpec]:
-    """One NodeSpec per node: a bandwidth class plus a weighted-random country, both drawn
-    from the selector's rng so the draw order stays stable."""
+    """One NodeSpec per node: a supernode (1024/1024) iff its id is in `supers`, else a
+    home-staker 25/50 link, plus a weighted-random country from the selector's rng."""
     nodes = []
     for i in range(num_nodes):
-        up, down = get_bandwidth(i, super_node_fraction, selector.rng)
+        up, down = (1024, 1024) if i in supers else (25, 50)
         nodes.append(
             NodeSpec(num=i, upload_bw_mbps=up, download_bw_mbps=down, country=selector.select())
         )
@@ -210,7 +217,8 @@ def generate_random_topology(
     latencies = load_latencies()
     selector = CountrySelector(weights, rng)
 
-    nodes = _make_country_nodes(num_nodes, super_node_fraction, selector)
+    supers = supernode_ids(num_nodes, super_node_fraction, seed)
+    nodes = _make_country_nodes(num_nodes, supers, selector)
 
     # Create mesh edges - first ensure connectivity
     adjacency: dict[int, set[int]] = {i: set() for i in range(num_nodes)}
@@ -240,7 +248,7 @@ def generate_random_topology(
         k = min(fanout_node_mesh_peers, num_nodes)
         for i in range(fanout_nodes):
             node_num = num_nodes + i
-            up, down = get_bandwidth(node_num, super_node_fraction, fanout_rng)
+            up, down = (1024, 1024) if fanout_rng.random() < super_node_fraction else (25, 50)
             node = NodeSpec(
                 num=node_num,
                 upload_bw_mbps=up,
@@ -281,7 +289,8 @@ def generate_subnet_topology(
     rng = random.Random(seed)
     selector = CountrySelector(load_weights(), rng)
     latencies = load_latencies()
-    nodes = _make_country_nodes(num_nodes, super_node_fraction, selector)
+    supers = supernode_ids(num_nodes, super_node_fraction, seed)
+    nodes = _make_country_nodes(num_nodes, supers, selector)
 
     g = _Graph(num_nodes)
     g.random_tree(list(range(num_nodes)), rng)  # global: keep the block topic connected
@@ -305,7 +314,8 @@ def generate_ring_topology(
     latencies = load_latencies()
     selector = CountrySelector(weights, rng)
 
-    nodes = _make_country_nodes(num_nodes, super_node_fraction, selector)
+    supers = supernode_ids(num_nodes, super_node_fraction, seed)
+    nodes = _make_country_nodes(num_nodes, supers, selector)
 
     edges = []
     for i in range(num_nodes):

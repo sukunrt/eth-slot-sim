@@ -68,6 +68,28 @@ def test_super_node_fraction_assigns_high_bandwidth():
     assert supers, "expected some supernodes at fraction 0.5"
 
 
+def test_supernode_ids_deterministic_and_matches_topology_bandwidth():
+    # Pure + deterministic: the proposer schedule and the topology bandwidth must agree
+    # on exactly the same set, so this function is the single source of truth for both.
+    a = topology.supernode_ids(20, 0.5, 7)
+    assert a == topology.supernode_ids(20, 0.5, 7)
+    assert 0 in a, "node 0 is the always-on supernode (block builder) when fraction is on"
+    assert all(0 <= i < 20 for i in a)
+    assert 0 < len(a) < 20
+
+    topo = topology.generate_random_topology(
+        num_nodes=20, degree=4, seed=7, super_node_fraction=0.5
+    )
+    bw_supers = {n.num for n in topo.nodes if n.upload_bw_mbps >= 1024}
+    assert bw_supers == a, "topology's 1024-Mbps nodes must equal supernode_ids(...)"
+
+
+def test_supernode_ids_empty_when_fraction_off():
+    assert topology.supernode_ids(20, 0.0, 7) == set()
+    topo = topology.generate_random_topology(num_nodes=20, degree=4, seed=7)
+    assert all(n.upload_bw_mbps < 1024 for n in topo.nodes), "no supernodes at fraction 0"
+
+
 def test_subnet_topology_connects_every_subnet_within_k():
     a = committee.generate(
         committee.Params(
