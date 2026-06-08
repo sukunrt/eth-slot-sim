@@ -22,16 +22,16 @@ const (
 )
 
 // Aggregate is the SignedAggregateAndProof wire message (~505 B), published on the global
-// beacon_aggregate_and_proof topic at the aggregate deadline. A committee has m distinct
-// aggregates (agg_idx 0..m-1); every aggregator of the committee publishes the same m,
-// byte-for-byte. There is deliberately NO aggregator/origin field: identical bytes ⇒
-// identical content-hash message-id ⇒ gossipsub dedups the copies (the multi-source model).
+// beacon_aggregate_and_proof topic at the aggregate deadline. Each committee has ~16
+// aggregators; every aggregator publishes exactly one aggregate. The aggregates are distinct
+// because each is signed by its aggregator — origin carries the aggregator node, which both
+// makes the message distinct (no dedup) and is the gossip origin for the loopback skip.
 type Aggregate struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Slot          uint32                 `protobuf:"varint,1,opt,name=slot,proto3" json:"slot,omitempty"`
-	Subnet        uint32                 `protobuf:"varint,2,opt,name=subnet,proto3" json:"subnet,omitempty"`               // committee → subnet
-	AggIdx        uint32                 `protobuf:"varint,3,opt,name=agg_idx,json=aggIdx,proto3" json:"agg_idx,omitempty"` // which of the committee's m aggregates (0..m-1)
-	Payload       []byte                 `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"`              // random filler so the marshaled message hits ~505 B
+	Subnet        uint32                 `protobuf:"varint,2,opt,name=subnet,proto3" json:"subnet,omitempty"`  // committee → subnet
+	Origin        uint32                 `protobuf:"varint,3,opt,name=origin,proto3" json:"origin,omitempty"`  // aggregator node (its key makes the aggregate distinct; gossip origin)
+	Payload       []byte                 `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"` // random filler so the marshaled message hits ~505 B
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -80,9 +80,9 @@ func (x *Aggregate) GetSubnet() uint32 {
 	return 0
 }
 
-func (x *Aggregate) GetAggIdx() uint32 {
+func (x *Aggregate) GetOrigin() uint32 {
 	if x != nil {
-		return x.AggIdx
+		return x.Origin
 	}
 	return 0
 }
@@ -98,11 +98,11 @@ var File_aggregate_proto protoreflect.FileDescriptor
 
 const file_aggregate_proto_rawDesc = "" +
 	"\n" +
-	"\x0faggregate.proto\x12\x05block\"j\n" +
+	"\x0faggregate.proto\x12\x05block\"i\n" +
 	"\tAggregate\x12\x12\n" +
 	"\x04slot\x18\x01 \x01(\rR\x04slot\x12\x16\n" +
-	"\x06subnet\x18\x02 \x01(\rR\x06subnet\x12\x17\n" +
-	"\aagg_idx\x18\x03 \x01(\rR\x06aggIdx\x12\x18\n" +
+	"\x06subnet\x18\x02 \x01(\rR\x06subnet\x12\x16\n" +
+	"\x06origin\x18\x03 \x01(\rR\x06origin\x12\x18\n" +
 	"\apayload\x18\x04 \x01(\fR\apayloadB\x1fZ\x1dgithub.com/ethp2p/slot-sim/pbb\x06proto3"
 
 var (

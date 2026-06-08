@@ -29,7 +29,6 @@ class Params:
     subnets_per_node: int = 2  # subnets a node subscribes (capped at C)
     subscribe_floor: int = 10  # min subscribers per active subnet
     target_aggregators: int = 16  # aggregators per committee (TARGET_AGGREGATORS_PER_COMMITTEE)
-    m: int = 1  # distinct aggregates each committee's aggregators publish
     seed: int = 1
     num_slots: int = 1
 
@@ -68,7 +67,6 @@ class Assignment:
                 "subnets_per_node": self.params.subnets_per_node,
                 "subscribe_floor": self.params.subscribe_floor,
                 "target_aggregators": self.params.target_aggregators,
-                "m": self.params.m,
                 "seed": self.params.seed,
                 "num_slots": self.params.num_slots,
             },

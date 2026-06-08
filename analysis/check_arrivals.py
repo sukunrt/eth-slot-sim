@@ -4,13 +4,13 @@ Each node logs JSON lines on stdout (slog): a `publish` per message it originate
 an `arrival` per message it receives, with absolute nanosecond timestamps (comparable
 across hosts — Shadow shares one clock) and the identity fields
 (kind, slot, subnet, attester, origin). Blocks are kind=1 (subnet/attester = -1);
-attestations are kind=2; aggregates are kind=3 (attester carries agg_idx, origin = -1).
+attestations are kind=2; aggregates are kind=3 (attester carries the aggregator, origin = -1).
 
 Blocks must reach every other node. Attestations must reach exactly their subnet's
-subscribers (from committee.json) and nobody else. Aggregates (global topic, multi-source)
-must reach every node except their committee's aggregators, exactly once — missing/leaked/
-duplicate are all failures. The headline attestation metric is the fraction that voted for
-the block. Stdlib only.
+subscribers (from committee.json) and nobody else. Aggregates (global topic): each
+aggregator publishes one distinct aggregate that must reach every node except that
+aggregator, exactly once — missing/leaked/duplicate are all failures. The headline
+attestation metric is the fraction that voted for the block. Stdlib only.
 
 Usage: python analysis/check_arrivals.py <run-dir>
 """
@@ -164,10 +164,10 @@ def analyze_attestations(
 
 @dataclass
 class AggregateResult:
-    """Aggregate check: each (slot, subnet, agg_idx) reaches every node EXCEPT that committee's
-    aggregators (which publish it; their loopback is skipped), exactly once. A committee's
-    aggregators publish byte-identical copies that gossipsub dedups, so a node receiving it
-    twice (duplicate) or an aggregator receiving its own (leaked) is a failure."""
+    """Aggregate check: each aggregator publishes one distinct aggregate (signed with its key)
+    on the global topic, which reaches every node EXCEPT that aggregator, exactly once. A node
+    receiving it twice (duplicate) or the aggregator receiving its own (leaked) is a failure.
+    The aggregator is carried in the attester field (the aggregates are NOT deduped)."""
 
     arrivals: int
     expected: int
@@ -175,7 +175,7 @@ class AggregateResult:
     leaked: list[tuple[int, int, int, int]] = field(default_factory=list)
     duplicates: list[tuple[int, int, int, int]] = field(default_factory=list)
     delays_ms: list[float] = field(default_factory=list)
-    published: int = 0  # distinct logical aggregates (m·C per slot)
+    published: int = 0  # distinct aggregates (one per aggregator, Σ_c |A_c|)
 
     @property
     def ok(self) -> bool:
@@ -187,73 +187,73 @@ class AggregateResult:
         )
 
 
-def _aggregate_logical(committee_data: dict) -> tuple[dict[tuple[int, int, int], set[int]], int]:
-    """Map each logical aggregate (slot, subnet, agg_idx) to its committee's aggregator node
-    set, with N. m aggregates per committee, both from committee.json."""
+def _aggregate_published(committee_data: dict) -> tuple[set[tuple[int, int, int]], int]:
+    """The published aggregates (slot, subnet, aggregator) — one per aggregator — and N."""
     n = committee_data["params"]["n"]
-    m = committee_data["params"]["m"]
-    logical: dict[tuple[int, int, int], set[int]] = {}
+    published: set[tuple[int, int, int]] = set()
     for sp in committee_data["slots"]:
         for ci, aggs in enumerate(sp["aggregators"]):
             subnet = sp["subnet_of"][ci]
-            for agg_idx in range(m):
-                logical[(sp["slot"], subnet, agg_idx)] = set(aggs)
-    return logical, n
+            for aggregator in aggs:
+                published.add((sp["slot"], subnet, aggregator))
+    return published, n
 
 
 def _aggregate_result(
-    logical: dict[tuple[int, int, int], set[int]],
+    published: set[tuple[int, int, int]],
     n: int,
     counts: Counter,
     received: dict[tuple[int, int, int], set[int]],
     delays_ms: list[float],
 ) -> AggregateResult:
-    """Shared core: expected = Σ (N − |aggregators|) over logical aggregates; an arrival at an
-    own-aggregator is a leak; a repeat arrival is a duplicate (dedup failed)."""
+    """Shared core: expected = Σ (N − 1) over published aggregates (each reaches every node
+    but its aggregator); an arrival at the aggregate's own aggregator is a leak (loopback not
+    skipped); a repeat arrival is a duplicate."""
     duplicates = sorted(k for k, c in counts.items() if c > 1)
     missing: list[tuple[int, int, int, int]] = []
     expected = 0
-    for (slot, subnet, agg_idx), aggs in logical.items():
+    for slot, subnet, aggregator in published:
         for node in range(n):
-            if node in aggs:
+            if node == aggregator:
                 continue
             expected += 1
-            if node not in received.get((slot, subnet, agg_idx), set()):
-                missing.append((node, slot, subnet, agg_idx))
+            if node not in received.get((slot, subnet, aggregator), set()):
+                missing.append((node, slot, subnet, aggregator))
     leaked = sorted(
-        (node, slot, subnet, agg_idx)
-        for (node, slot, subnet, agg_idx) in counts
-        if node in logical.get((slot, subnet, agg_idx), set())
+        (node, slot, subnet, aggregator)
+        for (node, slot, subnet, aggregator) in counts
+        if node == aggregator
     )
     return AggregateResult(
         sum(counts.values()), expected, sorted(missing), leaked, duplicates,
-        sorted(delays_ms), len(logical),
+        sorted(delays_ms), len(published),
     )
 
 
 def analyze_aggregates(
     pubs: dict[PubKey, tuple[int, bool]], arrs: list[Arrival], committee_data: dict
 ) -> AggregateResult:
-    """Cross-check aggregate arrivals (Shadow slog) against the aggregator sets."""
-    logical, n = _aggregate_logical(committee_data)
+    """Cross-check aggregate arrivals (Shadow slog) against the aggregator sets. The aggregator
+    is the attester field; origin is unused (-1)."""
+    published, n = _aggregate_published(committee_data)
     agg_pubs = {(s, sub, a): t for (k, s, sub, a, _o), (t, _v) in pubs.items() if k == AGGREGATE_KIND}
     counts: Counter = Counter()
     received: dict[tuple[int, int, int], set[int]] = {}
     delays_ms: list[float] = []
-    for node, k, slot, subnet, agg_idx, _o, t in arrs:
+    for node, k, slot, subnet, aggregator, _o, t in arrs:
         if k != AGGREGATE_KIND:
             continue
-        counts[(node, slot, subnet, agg_idx)] += 1
-        received.setdefault((slot, subnet, agg_idx), set()).add(node)
-        if (slot, subnet, agg_idx) in agg_pubs:
-            delays_ms.append((t - agg_pubs[(slot, subnet, agg_idx)]) / 1e6)
-    return _aggregate_result(logical, n, counts, received, delays_ms)
+        counts[(node, slot, subnet, aggregator)] += 1
+        received.setdefault((slot, subnet, aggregator), set()).add(node)
+        if (slot, subnet, aggregator) in agg_pubs:
+            delays_ms.append((t - agg_pubs[(slot, subnet, aggregator)]) / 1e6)
+    return _aggregate_result(published, n, counts, received, delays_ms)
 
 
 def analyze_aggregates_csv(path: Path, committee_data: dict) -> AggregateResult:
-    """Aggregate coverage/dedup for the simnet backend. The CSV is keyed by
-    (slot, subnet, attester=agg_idx) with no origin column."""
-    logical, n = _aggregate_logical(committee_data)
+    """Aggregate coverage for the simnet backend. The CSV is keyed by
+    (slot, subnet, attester=aggregator); there is no origin column."""
+    published, n = _aggregate_published(committee_data)
     counts: Counter = Counter()
     received: dict[tuple[int, int, int], set[int]] = {}
     delays_ms: list[float] = []
@@ -261,12 +261,12 @@ def analyze_aggregates_csv(path: Path, committee_data: dict) -> AggregateResult:
         for r in csv.DictReader(f):
             if int(r.get("kind", BLOCK_KIND)) != AGGREGATE_KIND:
                 continue
-            slot, subnet, agg_idx = int(r["slot"]), int(r["subnet"]), int(r["attester"])
+            slot, subnet, aggregator = int(r["slot"]), int(r["subnet"]), int(r["attester"])
             node = int(r["node"])
-            counts[(node, slot, subnet, agg_idx)] += 1
-            received.setdefault((slot, subnet, agg_idx), set()).add(node)
+            counts[(node, slot, subnet, aggregator)] += 1
+            received.setdefault((slot, subnet, aggregator), set()).add(node)
             delays_ms.append(float(r["delay_ms"]))
-    return _aggregate_result(logical, n, counts, received, delays_ms)
+    return _aggregate_result(published, n, counts, received, delays_ms)
 
 
 def load_committee(run_dir: Path) -> dict[int, set[int]] | None:
@@ -450,7 +450,7 @@ def main(argv: list[str]) -> int:
             print(f"  attestation CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
         print(f"  fraction voted block: {ares.fraction_voted_block:.3f}")
 
-        if committee_data["params"].get("m", 0) > 0 and committee_data["slots"][0].get("aggregators"):
+        if committee_data["slots"] and committee_data["slots"][0].get("aggregators"):
             gres = analyze_aggregates(pubs, arrs, committee_data)
             ok = ok and gres.ok
             print(f"aggregates published (distinct): {gres.published}")

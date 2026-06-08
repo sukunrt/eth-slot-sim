@@ -49,7 +49,6 @@ def _committee_assignment(config: SimConfig) -> committee.Assignment | None:
             subnets_per_node=a.subnets_per_node,
             subscribe_floor=a.subscribe_floor,
             target_aggregators=a.target_aggregators,
-            m=a.aggregates_per_committee,
             seed=config.seed,
             num_slots=config.num_slots,
         ),
@@ -401,7 +400,7 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
             "shadow": _att_summary(shadow_att),
             "simnet": _att_summary(simnet_att),
         }
-        if committee_data["params"].get("m", 0) > 0 and committee_data["slots"][0].get("aggregators"):
+        if committee_data["slots"] and committee_data["slots"][0].get("aggregators"):
             shadow_agg = check_arrivals.analyze_aggregates(pubs, arrs, committee_data)
             simnet_agg = check_arrivals.analyze_aggregates_csv(csv_path, committee_data)
             comparison["aggregates"] = {

@@ -59,7 +59,7 @@ func MakeAttestation(slot, subnet, val, origin, votedOrigin int) Message {
 // must have its (last) bytes payload field unset; sizedFiller measures the other fields and
 // accounts for the payload field's wire framing (tag + length varint). Shared by the
 // attestation and aggregate builders. The filler is deterministic (all-ones), so a message
-// built from the same scalars marshals byte-identically — the aggregate dedup precondition.
+// built from the same scalars marshals reproducibly across runs and backends.
 func sizedFiller(msg proto.Message, target int) []byte {
 	overhead := proto.Size(msg) // size of all fields except the unset payload
 	n := target - overhead - 1  // minus the payload field's tag byte

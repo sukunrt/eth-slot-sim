@@ -129,7 +129,7 @@ func TestNodeAggregateDecodes(t *testing.T) {
 		}
 		time.Sleep(time.Second) // let the aggregate mesh form
 
-		msg := validator.MakeAggregate(2, 5, 1) // slot2 subnet5 aggIdx1
+		msg := validator.MakeAggregate(2, 5, 0) // slot2 subnet5 origin0 (node 0 aggregates)
 		if err := nodes[0].Publish(ctx, validator.AggregateTopic, msg.Payload); err != nil {
 			t.Fatalf("publish: %v", err)
 		}
@@ -142,8 +142,8 @@ func TestNodeAggregateDecodes(t *testing.T) {
 		if !ok {
 			t.Fatalf("obj type %T, want *pb.Aggregate", r.Obj)
 		}
-		if agg.Slot != 2 || agg.Subnet != 5 || agg.AggIdx != 1 {
-			t.Fatalf("decoded %+v, want slot2 subnet5 aggIdx1", agg)
+		if agg.Slot != 2 || agg.Subnet != 5 || agg.Origin != 0 {
+			t.Fatalf("decoded %+v, want slot2 subnet5 origin0", agg)
 		}
 	})
 }

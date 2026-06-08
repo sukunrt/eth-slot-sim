@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
-	"slices"
 	"sync"
 	"time"
 
@@ -224,23 +223,11 @@ func (r *NodeRunner) onReceive(rec node.Received) {
 		r.tracer.OnReceive(r.num, metrics.AttestID(int(att.Slot), int(att.Subnet), int(att.Val), int(att.Origin)), rec.At)
 	case node.KindAggregate:
 		agg := rec.Obj.(*pb.Aggregate)
-		// The aggregate carries no origin (a committee's aggregators publish identical
-		// copies). The loopback skip is therefore by aggregator membership: a node that
-		// aggregates this (slot, subnet) published it, so it must not record its own copy.
-		if r.isAggregator(int(agg.Slot), int(agg.Subnet)) {
+		if int(agg.Origin) == r.num { // skip our own published aggregate (loopback)
 			return
 		}
-		r.tracer.OnReceive(r.num, metrics.AggregateID(int(agg.Slot), int(agg.Subnet), int(agg.AggIdx)), rec.At)
+		r.tracer.OnReceive(r.num, metrics.AggregateID(int(agg.Slot), int(agg.Subnet), int(agg.Origin)), rec.At)
 	}
-}
-
-// isAggregator reports whether this node aggregates the committee on subnet in slot (so it
-// published that committee's aggregates and skips their loopback).
-func (r *NodeRunner) isAggregator(slot, subnet int) bool {
-	if r.comm == nil {
-		return false
-	}
-	return slices.Contains(r.comm.Node(r.num).AggregateSubnets(slot), subnet)
 }
 
 // onBlockProcessed is the causal edge: the slot's block was processed at `at`. It
@@ -308,20 +295,18 @@ func (r *NodeRunner) emit(slot int, ss *slotState, votedOrigin int) {
 	})
 }
 
-// emitAggregate publishes this node's M aggregates for each committee it aggregates this
-// slot, on the global aggregate topic, at most once per slot. The messages are byte-identical
-// across a committee's aggregators, so gossipsub deduplicates the copies (the multi-source
-// model); the recording id (slot, subnet, aggIdx) carries no origin.
+// emitAggregate publishes one aggregate for each committee this node aggregates this slot, on
+// the global aggregate topic, at most once per slot. The aggregate carries this node as its
+// origin (standing in for the aggregator's signature), so each aggregator's aggregate is
+// distinct and gossipsub does not dedup them.
 func (r *NodeRunner) emitAggregate(slot int, ss *slotState) {
 	ss.aggEmitOnce.Do(func() {
 		at := time.Now()
 		for _, subnet := range ss.aggSubnets {
-			for aggIdx := range r.comm.Params.M {
-				msg := validator.MakeAggregate(slot, subnet, aggIdx)
-				r.tracer.OnPublish(metrics.AggregateID(slot, subnet, aggIdx), false, at)
-				if err := r.nd.Publish(r.runCtx, msg.Topic, msg.Payload); err != nil {
-					slog.Error("publish aggregate failed", "node", r.num, "slot", slot, "subnet", subnet, "err", err)
-				}
+			msg := validator.MakeAggregate(slot, subnet, r.num)
+			r.tracer.OnPublish(metrics.AggregateID(slot, subnet, r.num), false, at)
+			if err := r.nd.Publish(r.runCtx, msg.Topic, msg.Payload); err != nil {
+				slog.Error("publish aggregate failed", "node", r.num, "slot", slot, "subnet", subnet, "err", err)
 			}
 		}
 	})

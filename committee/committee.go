@@ -25,9 +25,8 @@ type Params struct {
 	SubnetsPerNode int `json:"subnets_per_node"`
 	SubscribeFloor int `json:"subscribe_floor"`
 	// TargetAggregators is the aggregators drawn per committee (clamped to the subnet's
-	// subscriber count); M is how many distinct aggregates each committee's aggregators publish.
+	// subscriber count); each publishes one distinct aggregate.
 	TargetAggregators int    `json:"target_aggregators"`
-	M                 int    `json:"m"`
 	Seed              uint64 `json:"seed"`
 	NumSlots          int    `json:"num_slots"`
 }
@@ -137,8 +136,8 @@ func (v View) SubscribedSubnets() []int {
 }
 
 // AggregateSubnets returns the subnets this node aggregates this slot — the committees whose
-// aggregator set includes it. It publishes Params.M aggregates on each (on the global
-// aggregate topic). Empty if the node isn't an aggregator this slot.
+// aggregator set includes it. It publishes one aggregate on each (on the global aggregate
+// topic). Empty if the node isn't an aggregator this slot.
 func (v View) AggregateSubnets(slot int) []int {
 	if slot < 0 || slot >= len(v.a.Slots) {
 		return nil

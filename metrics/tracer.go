@@ -19,9 +19,9 @@ import (
 // MsgID identifies one disseminated message. A block is the special case
 // {KindBlock, slot, -1, -1, origin} (no subnet/attester); an attestation is
 // {KindAttestation, slot, subnet, attester, origin}; an aggregate is
-// {KindAggregate, slot, subnet, aggIdx, -1} (Attester reused for agg_idx, no single origin
-// since a committee's aggregators share the id). The tuple is unique per logical message,
-// so arrival delay is recv - publish.
+// {KindAggregate, slot, subnet, aggregator, -1} (Attester carries the aggregator node; one
+// distinct aggregate per aggregator). The tuple is unique per message, so arrival delay is
+// recv - publish.
 type MsgID struct {
 	Kind                           node.Kind
 	Slot, Subnet, Attester, Origin int
@@ -38,11 +38,12 @@ func AttestID(slot, subnet, attester, origin int) MsgID {
 	return MsgID{Kind: node.KindAttestation, Slot: slot, Subnet: subnet, Attester: attester, Origin: origin}
 }
 
-// AggregateID is the MsgID for aggregate aggIdx of subnet's committee in slot. It carries no
-// origin (Origin: -1): a committee's aggregators publish byte-identical copies that gossipsub
-// deduplicates, so the id is shared across them (the Attester field carries agg_idx).
-func AggregateID(slot, subnet, aggIdx int) MsgID {
-	return MsgID{Kind: node.KindAggregate, Slot: slot, Subnet: subnet, Attester: aggIdx, Origin: -1}
+// AggregateID is the MsgID for the aggregate published by aggregator (a node) for subnet's
+// committee in slot. Each aggregator publishes one distinct aggregate, identified by the
+// aggregator — carried in the Attester field so it survives the CSV (which has no origin
+// column), exactly as an attestation's attester does.
+func AggregateID(slot, subnet, aggregator int) MsgID {
+	return MsgID{Kind: node.KindAggregate, Slot: slot, Subnet: subnet, Attester: aggregator, Origin: -1}
 }
 
 // Tracer receives app-level publish/receive events. votedBlock is meaningful only for

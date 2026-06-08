@@ -51,9 +51,9 @@ class AttestationConfig(BaseModel):
     verify_delay_ms: int = 10  # batched verifier base delay
     per_item_ms: int = 0  # batched verifier per-attestation cost
     batch_window_ms: int = 50  # batched verifier window
-    # Aggregate phase (the t≈8 s SignedAggregateAndProof flood on the global topic).
+    # Aggregate phase (the t≈8 s SignedAggregateAndProof flood on the global topic). Each
+    # committee's ~target_aggregators aggregators publish one distinct aggregate each.
     target_aggregators: int = 16  # aggregators per committee (TARGET_AGGREGATORS_PER_COMMITTEE)
-    aggregates_per_committee: int = 1  # m: distinct aggregates each committee's aggregators publish
     aggregate_due_ms: int = 8000  # AGGREGATE_DUE (6667 bp of a 12 s slot); 0 ⇒ aggregates off
 
 

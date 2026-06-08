@@ -15,9 +15,8 @@ import (
 
 // aggAssignment builds a one-slot assignment focused on the aggregate phase: C committees
 // (one nominal attester each, so the attestation phase is well-formed but not the subject),
-// the given per-subnet subscribers, and the given per-committee aggregator node sets. m is
-// aggregates-per-committee.
-func aggAssignment(n, m int, subscribers, aggregators [][]int) *committee.Assignment {
+// the given per-subnet subscribers, and the given per-committee aggregator node sets.
+func aggAssignment(n int, subscribers, aggregators [][]int) *committee.Assignment {
 	c := len(subscribers)
 	sp := committee.SlotPlan{Slot: 0}
 	for ci := range c {
@@ -30,7 +29,7 @@ func aggAssignment(n, m int, subscribers, aggregators [][]int) *committee.Assign
 	return &committee.Assignment{
 		Params: committee.Params{
 			N: n, V: n, C: c, Sc: 1, SubnetCount: 64, SubnetsPerNode: 1,
-			SubscribeFloor: 1, TargetAggregators: 16, M: m, Seed: 1, NumSlots: 1,
+			SubscribeFloor: 1, TargetAggregators: 16, Seed: 1, NumSlots: 1,
 		},
 		SubnetSubscribers: subscribers,
 		Slots:             []committee.SlotPlan{sp},
@@ -39,7 +38,7 @@ func aggAssignment(n, m int, subscribers, aggregators [][]int) *committee.Assign
 
 // aggDriver builds the real Driver over a committee-aware netsim with the aggregate phase
 // enabled (P=n-1 ⇒ the global aggregate topic is fully connected, so dissemination is
-// one-hop and the test isolates the dedup/coverage logic from the dial path).
+// one-hop and the test isolates the coverage logic from the dial path).
 func aggDriver(t *testing.T, a *committee.Assignment, aggDue time.Duration, tr metrics.Tracer) *driver.Driver {
 	t.Helper()
 	n := a.Params.N
@@ -60,12 +59,13 @@ func aggDriver(t *testing.T, a *committee.Assignment, aggDue time.Duration, tr m
 	}, tr)
 }
 
-type aggKey struct{ subnet, aggIdx int }
+type aggKey struct{ subnet, aggregator int }
 
-// assertAggregateCoverage is the headline invariant: each of a committee's m aggregates
-// reaches every node EXCEPT that committee's aggregators, EXACTLY ONCE. "Exactly once"
-// proves gossipsub deduped the byte-identical copies the |A_c| aggregators each published
-// (multi-source); the aggregator exclusion proves the publish loopback is skipped.
+// assertAggregateCoverage is the headline invariant: each aggregator publishes ONE distinct
+// aggregate (the aggregator carried in the Attester field) on the global topic, which reaches
+// every node EXCEPT that aggregator, exactly once. The aggregates are distinct per aggregator
+// (the signature), so a committee's other aggregators DO receive it — only the publisher's own
+// loopback is skipped.
 func assertAggregateCoverage(t *testing.T, a *committee.Assignment, rec *metrics.Recorder, slot int) {
 	t.Helper()
 	sp := a.Slots[slot]
@@ -81,20 +81,16 @@ func assertAggregateCoverage(t *testing.T, a *committee.Assignment, rec *metrics
 		got[k][ar.Node]++
 	}
 	for ci, subnet := range sp.SubnetOf {
-		isAgg := map[int]bool{}
-		for _, x := range sp.Aggregators[ci] {
-			isAgg[x] = true
-		}
-		for aggIdx := range a.Params.M {
-			recvd := got[aggKey{subnet, aggIdx}]
+		for _, aggregator := range sp.Aggregators[ci] {
+			recvd := got[aggKey{subnet, aggregator}]
 			for nd := range a.Params.N {
 				want := 1
-				if isAgg[nd] {
-					want = 0 // aggregators publish it; their loopback is skipped
+				if nd == aggregator {
+					want = 0 // the aggregator published it; its own loopback is skipped
 				}
 				if recvd[nd] != want {
-					t.Fatalf("subnet %d aggIdx %d node %d: got %d arrivals, want %d (dedup/loopback)",
-						subnet, aggIdx, nd, recvd[nd], want)
+					t.Fatalf("subnet %d aggregator %d node %d: got %d arrivals, want %d",
+						subnet, aggregator, nd, recvd[nd], want)
 				}
 			}
 		}
@@ -111,14 +107,13 @@ func aggregateArrivalCount(rec *metrics.Recorder, slot int) int {
 	return n
 }
 
-// The headline test. Committee 0's aggregators {0,1} both publish the same m=2 aggregates
-// (multi-source ⇒ dedup); node 0 also aggregates committee 1 (a node in two committees).
-// Every non-aggregator receives each aggregate exactly once; aggregators receive none of
-// their own committee's.
-func TestAggregatesDedupAndCover(t *testing.T) {
+// The headline test. Committee 0's aggregators {0,1} and committee 1's {0,3} (node 0
+// aggregates both — a node in two committees). Each aggregator publishes one distinct
+// aggregate that reaches every node except itself.
+func TestAggregatesDistinctAndCover(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		const n, m = 6, 2
-		a := aggAssignment(n, m, [][]int{{0, 1, 2}, {3, 4, 5}}, [][]int{{0, 1}, {0, 3}})
+		const n = 6
+		a := aggAssignment(n, [][]int{{0, 1, 2}, {3, 4, 5}}, [][]int{{0, 1}, {0, 3}})
 		rec := metrics.NewRecorder()
 		d := aggDriver(t, a, 8*time.Second, rec)
 
@@ -130,20 +125,19 @@ func TestAggregatesDedupAndCover(t *testing.T) {
 		d.Run(ctx, time.Now(), 1)
 
 		assertAggregateCoverage(t, a, rec, 0)
-		// Σ_c m·(N−|A_c|) = 2·(6−2) + 2·(6−2) = 16.
-		if got, want := aggregateArrivalCount(rec, 0), m*(n-2)+m*(n-2); got != want {
+		// Σ_c |A_c|·(N−1) = 2·5 + 2·5 = 20 (4 distinct aggregates, each reaching N−1).
+		if got, want := aggregateArrivalCount(rec, 0), (2+2)*(n-1); got != want {
 			t.Fatalf("aggregate arrivals = %d, want %d", got, want)
 		}
 	})
 }
 
-// Each aggregator publishes its committee's m aggregates, all at exactly slotStart+AggregateDue.
-// Total publishes = Σ_c |A_c|·m (multi-source: the same logical aggregate is published once
-// per aggregator, before gossipsub dedups them on the wire).
+// Each aggregator publishes exactly one aggregate per committee it aggregates, all at
+// slotStart+AggregateDue. Total publishes = Σ_c |A_c| (no m multiplier).
 func TestAggregatesPublishAtDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		const n, m = 6, 2
-		a := aggAssignment(n, m, [][]int{{0, 1, 2}, {3, 4, 5}}, [][]int{{0, 1}, {0, 3}})
+		const n = 6
+		a := aggAssignment(n, [][]int{{0, 1, 2}, {3, 4, 5}}, [][]int{{0, 1}, {0, 3}})
 		tr := &timeTracer{}
 		d := aggDriver(t, a, 8*time.Second, tr)
 
@@ -168,7 +162,7 @@ func TestAggregatesPublishAtDeadline(t *testing.T) {
 				t.Fatalf("aggregate %+v published at %v, want %v (slotStart+AggregateDue)", p.id, p.at, wantAt)
 			}
 		}
-		if want := (2 + 2) * m; aggPubs != want { // |A_0|=2, |A_1|=2, each ×m
+		if want := 2 + 2; aggPubs != want { // |A_0| + |A_1|, one aggregate each
 			t.Fatalf("aggregate publishes = %d, want %d", aggPubs, want)
 		}
 	})
@@ -178,7 +172,7 @@ func TestAggregatesPublishAtDeadline(t *testing.T) {
 // (block + attestation behavior unchanged).
 func TestAggregatesDisabled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		a := aggAssignment(6, 2, [][]int{{0, 1, 2}, {3, 4, 5}}, [][]int{{0, 1}, {0, 3}})
+		a := aggAssignment(6, [][]int{{0, 1, 2}, {3, 4, 5}}, [][]int{{0, 1}, {0, 3}})
 		rec := metrics.NewRecorder()
 		d := aggDriver(t, a, 0, rec) // aggregates disabled
 

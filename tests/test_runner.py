@@ -109,10 +109,9 @@ def _attest_config(**att_over) -> config.SimConfig:
 
 def test_committee_assignment_carries_aggregator_knobs():
     cfg = _attest_config(validators=24, committees=1, committee_size=2,
-                         subscribe_floor=2, target_aggregators=4, aggregates_per_committee=3)
+                         subscribe_floor=2, target_aggregators=4)
     a = runner._committee_assignment(cfg)
     assert a.params.target_aggregators == 4
-    assert a.params.m == 3
     assert len(a.slots[0].aggregators) == cfg.attestation.committees  # one set per committee
 
 

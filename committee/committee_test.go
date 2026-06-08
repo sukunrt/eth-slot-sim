@@ -75,8 +75,8 @@ func TestLoadFixtureContract(t *testing.T) {
 	}
 
 	// Aggregators: ⊆ the subnet's subscribers, count == min(target, |subscribers|), sorted.
-	if a.Params.TargetAggregators != 16 || a.Params.M != 1 {
-		t.Fatalf("params = %+v, want target_aggregators16 m1", a.Params)
+	if a.Params.TargetAggregators != 16 {
+		t.Fatalf("params = %+v, want target_aggregators16", a.Params)
 	}
 	for _, sp := range a.Slots {
 		if len(sp.Aggregators) != a.Params.C {
@@ -182,7 +182,7 @@ func TestLiteralAssignmentAccessors(t *testing.T) {
 // aggregator set includes it. A node can aggregate several committees, or none.
 func TestAggregateSubnets(t *testing.T) {
 	a := &Assignment{
-		Params:            Params{N: 4, V: 8, C: 2, Sc: 2, SubnetCount: 64, M: 1, NumSlots: 1},
+		Params:            Params{N: 4, V: 8, C: 2, Sc: 2, SubnetCount: 64, NumSlots: 1},
 		SubnetSubscribers: [][]int{{0, 1, 2}, {0, 3}},
 		Slots: []SlotPlan{{
 			Slot:        0,

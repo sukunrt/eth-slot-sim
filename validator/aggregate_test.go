@@ -17,7 +17,7 @@ func TestAggregateTopicIsGlobal(t *testing.T) {
 }
 
 func TestMakeAggregateFields(t *testing.T) {
-	msg := MakeAggregate(3, 7, 2) // slot, subnet, aggIdx
+	msg := MakeAggregate(3, 7, 2) // slot, subnet, origin (aggregator node)
 	if msg.Topic != AggregateTopic {
 		t.Fatalf("topic = %q, want %q", msg.Topic, AggregateTopic)
 	}
@@ -28,8 +28,8 @@ func TestMakeAggregateFields(t *testing.T) {
 	if err := proto.Unmarshal(msg.Payload, &agg); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if agg.Slot != 3 || agg.Subnet != 7 || agg.AggIdx != 2 {
-		t.Fatalf("decoded %+v, want slot3 subnet7 aggIdx2", &agg)
+	if agg.Slot != 3 || agg.Subnet != 7 || agg.Origin != 2 {
+		t.Fatalf("decoded %+v, want slot3 subnet7 origin2", &agg)
 	}
 }
 
@@ -49,22 +49,21 @@ func TestMakeAggregateSizeAndFiller(t *testing.T) {
 	}
 }
 
-// The dedup precondition: a committee's aggregators publish byte-identical messages, so the
-// content-hash message-id collapses them. MakeAggregate must therefore be a pure function of
-// (slot, subnet, aggIdx) — no origin, no randomness — while distinct logical aggregates
-// (different aggIdx/subnet/slot) must differ on the wire.
-func TestMakeAggregateByteIdentityAndDistinctness(t *testing.T) {
+// Each aggregator's aggregate is distinct because origin (its key) differs — so gossipsub
+// does NOT dedup them (16 aggregators ⇒ 16 distinct messages). Same (slot, subnet, origin) is
+// deterministic; a different aggregator, subnet, or slot yields different bytes.
+func TestMakeAggregateDistinctPerAggregator(t *testing.T) {
 	a := MakeAggregate(5, 3, 1)
 	if b := MakeAggregate(5, 3, 1); !bytes.Equal(a.Payload, b.Payload) {
-		t.Fatal("same (slot,subnet,aggIdx) must be byte-identical (the dedup precondition)")
+		t.Fatal("same (slot,subnet,origin) must be deterministic")
 	}
 	for _, other := range []Message{
-		MakeAggregate(5, 3, 0), // different aggIdx
+		MakeAggregate(5, 3, 2), // different aggregator
 		MakeAggregate(5, 4, 1), // different subnet
 		MakeAggregate(6, 3, 1), // different slot
 	} {
 		if bytes.Equal(a.Payload, other.Payload) {
-			t.Fatalf("distinct aggregate collided with %+v", other)
+			t.Fatalf("aggregate collided with %+v (each aggregator's must be distinct)", other)
 		}
 	}
 }

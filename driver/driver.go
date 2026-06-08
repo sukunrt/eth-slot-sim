@@ -53,8 +53,8 @@ type Config struct {
 	AttestPerItem     time.Duration
 	AttestBatchWindow time.Duration
 
-	// Aggregate phase (optional). 0 ⇒ no aggregates. The number of aggregates per
-	// committee is carried by the committee assignment (Params.M).
+	// Aggregate phase (optional). 0 ⇒ no aggregates. Each committee's aggregators (from the
+	// committee assignment) publish one distinct aggregate each at this offset.
 	AggregateDue time.Duration // aggregate emit, offset into the slot (≈8s)
 }
 
