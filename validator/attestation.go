@@ -55,12 +55,13 @@ func MakeAttestation(slot, subnet, val, origin, votedOrigin int) Message {
 	return Message{Topic: AttestationTopic(subnet), Payload: buf, Slot: slot}
 }
 
-// sizedFiller returns all-ones filler so proto.Marshal(att) lands near target bytes.
-// Accounts for the payload field's wire framing (tag + length varint) and the other
-// fields' current size, which varies (e.g. the prior-head sentinel is a 5-byte varint).
-func sizedFiller(att *pb.Attestation, target int) []byte {
-	att.Payload = nil
-	overhead := proto.Size(att) // size of fields 1..5, no payload
+// sizedFiller returns all-ones filler so proto.Marshal(msg) lands near target bytes. msg
+// must have its (last) bytes payload field unset; sizedFiller measures the other fields and
+// accounts for the payload field's wire framing (tag + length varint). Shared by the
+// attestation and aggregate builders. The filler is deterministic (all-ones), so a message
+// built from the same scalars marshals byte-identically — the aggregate dedup precondition.
+func sizedFiller(msg proto.Message, target int) []byte {
+	overhead := proto.Size(msg) // size of all fields except the unset payload
 	n := target - overhead - 1  // minus the payload field's tag byte
 	if n > 127 {
 		n -= 2 // 2-byte length varint (payloads here are < 16384 B)

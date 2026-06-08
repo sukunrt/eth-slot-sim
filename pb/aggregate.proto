@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package block;
+
+option go_package = "github.com/ethp2p/slot-sim/pb";
+
+// Aggregate is the SignedAggregateAndProof wire message (~505 B), published on the global
+// beacon_aggregate_and_proof topic at the aggregate deadline. A committee has m distinct
+// aggregates (agg_idx 0..m-1); every aggregator of the committee publishes the same m,
+// byte-for-byte. There is deliberately NO aggregator/origin field: identical bytes ⇒
+// identical content-hash message-id ⇒ gossipsub dedups the copies (the multi-source model).
+message Aggregate {
+  uint32 slot    = 1;
+  uint32 subnet  = 2; // committee → subnet
+  uint32 agg_idx = 3; // which of the committee's m aggregates (0..m-1)
+  bytes  payload = 4; // random filler so the marshaled message hits ~505 B
+}
