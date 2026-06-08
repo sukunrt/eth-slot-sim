@@ -63,13 +63,21 @@ type Node struct {
 	AttestPerItem     time.Duration
 	AttestBatchWindow time.Duration
 
+	// Column verify-hook (width-P semaphore): models the t=0 column burst as a P-server
+	// per-core queue. ColVerifyService is the per-column cost; ColVerifyParallelism is P (16
+	// for a full-custody node, 4 otherwise). Both unset ⇒ a 1-server, zero-cost verifier
+	// (harmless when the column phase is off).
+	ColVerifyService     func() time.Duration
+	ColVerifyParallelism int
+
 	// RPCLogger, when non-nil, enables gossipsub's built-in debug RPC logger (every
 	// RPC sent/received, with topics + data length) — a diagnostic for how many block
 	// copies a node sources via mesh push vs gossip IWANT pull. Off by default.
 	RPCLogger *slog.Logger
 
-	ps       *pubsub.PubSub
-	verifier *batchVerifier
+	ps          *pubsub.PubSub
+	verifier    *batchVerifier
+	colVerifier *columnVerifier
 
 	mu        sync.Mutex
 	topics    map[string]*pubsub.Topic
@@ -146,6 +154,12 @@ func (n *Node) JoinTopics(ctx context.Context) error {
 	n.verifier = newBatchVerifier(base, n.AttestPerItem, window, slog.Default())
 	go n.verifier.run()
 
+	colService := n.ColVerifyService
+	if colService == nil {
+		colService = func() time.Duration { return 0 }
+	}
+	n.colVerifier = newColumnVerifier(n.ColVerifyParallelism, colService)
+
 	// The block topic: Join + Subscribe with the fixed verify hook, as Phase 1.
 	return n.Subscribe(validator.BlockTopic)
 }
@@ -208,20 +222,33 @@ func batchedTopic(topic string) bool {
 	return strings.HasPrefix(topic, validator.AttestationTopicPrefix) || topic == validator.AggregateTopic
 }
 
-// registerVerifyHook registers topic's validation-as-sleep hook once: the attestation and
-// aggregate floods share the batched verifier (the M/D/1 flood queue); everything else (the
-// block) gets the fixed per-hop delay. Caller holds n.mu.
+// columnTopic reports whether topic is a data-column subnet — its verification routes through
+// the per-node width-P column verifier (the bursty t=0 wave), not the batched flood queue.
+func columnTopic(topic string) bool {
+	return strings.HasPrefix(topic, validator.ColumnTopicPrefix)
+}
+
+// registerVerifyHook registers topic's validation-as-sleep hook once, three-way: the column
+// burst goes through the per-node P-server column verifier; the attestation and aggregate
+// floods share the batched verifier (the M/D/1 flood queue); everything else (the block) gets
+// the fixed per-hop delay. Caller holds n.mu.
 func (n *Node) registerVerifyHook(topic string) error {
 	if n.validated[topic] {
 		return nil
 	}
 	var hook pubsub.ValidatorEx
-	if batchedTopic(topic) {
+	switch {
+	case columnTopic(topic):
+		hook = func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
+			n.colVerifier.verify()
+			return pubsub.ValidationAccept
+		}
+	case batchedTopic(topic):
 		hook = func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
 			n.verifier.submitAndWait(verificationItem{Attestations: []any{nil}})
 			return pubsub.ValidationAccept
 		}
-	} else {
+	default:
 		hook = func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
 			time.Sleep(n.VerifyDelay())
 			return pubsub.ValidationAccept

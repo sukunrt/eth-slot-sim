@@ -56,6 +56,13 @@ type Config struct {
 	// Aggregate phase (optional). 0 ⇒ no aggregates. Each committee's aggregators (from the
 	// committee assignment) publish one distinct aggregate each at this offset.
 	AggregateDue time.Duration // aggregate emit, offset into the slot (≈8s)
+
+	// Data-columns phase (optional; active when Committee.NumColumns > 0). The proposer bursts
+	// one DataColumnSidecar per column subnet at t=0; each node verifies columns through a
+	// width-P semaphore, P sized from its full-custody role.
+	ColVerifyService          func() time.Duration // per-column validation-as-sleep
+	ColVerifyParallelismSuper int                  // P for a full-custody node (16)
+	ColVerifyParallelismReg   int                  // P for an ordinary node (4)
 }
 
 // Driver builds and orchestrates the nodes on a Fabric.
@@ -96,6 +103,16 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 			AttestPerItem:     cfg.AttestPerItem,
 			AttestBatchWindow: cfg.AttestBatchWindow,
 			D:                 cfg.D, Dlo: cfg.Dlo, Dhi: cfg.Dhi,
+		}
+		// Size the column verifier from the node's full-custody role (custody is independent
+		// of whether attestations are emitted, so read it off cfg.Committee, not runnerComm).
+		if cfg.Committee != nil && cfg.Committee.NumColumns > 0 {
+			nd.ColVerifyService = cfg.ColVerifyService
+			if cfg.Committee.Node(i).IsFullCustody() {
+				nd.ColVerifyParallelism = cfg.ColVerifyParallelismSuper
+			} else {
+				nd.ColVerifyParallelism = cfg.ColVerifyParallelismReg
+			}
 		}
 		r := NewRunner(i, nd, val, runnerComm, tracer, cfg.SlotDuration, cfg.AttestationDue,
 			cfg.AggregateDue, cfg.Prep, cfg.Seed, nw.Peers(i))
