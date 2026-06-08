@@ -1,9 +1,9 @@
 """Configuration schema for slot-simulation runs.
 
 Covers block dissemination plus the optional attestation phase (the ``attestation:``
-block — committees, subnets, the batched verifier). Partial messages and aggregation
-are still out of scope. ``extra="forbid"`` rejects unknown keys, so a typo or a stale
-field fails loudly rather than being silently ignored.
+block — committees, subnets, the batched verifier, and the aggregate flood). Partial
+messages are still out of scope. ``extra="forbid"`` rejects unknown keys, so a typo or a
+stale field fails loudly rather than being silently ignored.
 """
 
 from pathlib import Path
@@ -51,6 +51,10 @@ class AttestationConfig(BaseModel):
     verify_delay_ms: int = 10  # batched verifier base delay
     per_item_ms: int = 0  # batched verifier per-attestation cost
     batch_window_ms: int = 50  # batched verifier window
+    # Aggregate phase (the t≈8 s SignedAggregateAndProof flood on the global topic).
+    target_aggregators: int = 16  # aggregators per committee (TARGET_AGGREGATORS_PER_COMMITTEE)
+    aggregates_per_committee: int = 1  # m: distinct aggregates each committee's aggregators publish
+    aggregate_due_ms: int = 8000  # AGGREGATE_DUE (6667 bp of a 12 s slot); 0 ⇒ aggregates off
 
 
 class SimConfig(BaseModel):

@@ -48,6 +48,8 @@ def _committee_assignment(config: SimConfig) -> committee.Assignment | None:
             subnet_count=a.subnet_count,
             subnets_per_node=a.subnets_per_node,
             subscribe_floor=a.subscribe_floor,
+            target_aggregators=a.target_aggregators,
+            m=a.aggregates_per_committee,
             seed=config.seed,
             num_slots=config.num_slots,
         ),
@@ -134,6 +136,7 @@ def _host_args(
         args += [
             f"-attestations={'true' if a.enabled else 'false'}",  # false ⇒ block-only, schedule kept
             f"-att-due={a.attestation_due_ms}ms",
+            f"-agg-due={a.aggregate_due_ms}ms",
             f"-prep={a.prep_ms}ms",
             f"-attest-verify-delay={a.verify_delay_ms}ms",
             f"-attest-per-item={a.per_item_ms}ms",
@@ -229,6 +232,7 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
         params.update(
             attest=a.enabled,
             att_due_ms=a.attestation_due_ms,
+            agg_due_ms=a.aggregate_due_ms,
             prep_ms=a.prep_ms,
             att_verify_ms=a.verify_delay_ms,
             att_per_item_ms=a.per_item_ms,
@@ -397,6 +401,14 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
             "shadow": _att_summary(shadow_att),
             "simnet": _att_summary(simnet_att),
         }
+        if committee_data["params"].get("m", 0) > 0 and committee_data["slots"][0].get("aggregators"):
+            shadow_agg = check_arrivals.analyze_aggregates(pubs, arrs, committee_data)
+            simnet_agg = check_arrivals.analyze_aggregates_csv(csv_path, committee_data)
+            comparison["aggregates"] = {
+                "expected": shadow_agg.expected,
+                "shadow": _agg_summary(shadow_agg),
+                "simnet": _agg_summary(simnet_agg),
+            }
 
     # Proposer guard: every scheduled proposer is a supernode, and every Shadow block was
     # published by its slot's proposer. Both backends read this one committee.json, so a
@@ -413,6 +425,19 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
 
     write_json_atomic(run_dir / "compare.json", comparison)
     return comparison
+
+
+def _agg_summary(res: check_arrivals.AggregateResult) -> dict[str, Any]:
+    """One backend's aggregate result as a compare.json sub-dict."""
+    return {
+        "arrivals": res.arrivals,
+        "expected": res.expected,
+        "published": res.published,
+        "missing": len(res.missing),
+        "leaked": len(res.leaked),
+        "duplicates": len(res.duplicates),
+        "cdf_ms": check_arrivals.cdf(res.delays_ms),
+    }
 
 
 def _att_summary(res: check_arrivals.AttestResult) -> dict[str, Any]:

@@ -100,6 +100,37 @@ def test_simnet_params_match_scenario():
     }
 
 
+def _attest_config(**att_over) -> config.SimConfig:
+    return config.SimConfig(
+        topology=config.TopologyConfig(num_nodes=3, degree=2),
+        attestation=config.AttestationConfig(**att_over),
+    )
+
+
+def test_committee_assignment_carries_aggregator_knobs():
+    cfg = _attest_config(validators=24, committees=1, committee_size=2,
+                         subscribe_floor=2, target_aggregators=4, aggregates_per_committee=3)
+    a = runner._committee_assignment(cfg)
+    assert a.params.target_aggregators == 4
+    assert a.params.m == 3
+    assert len(a.slots[0].aggregators) == cfg.attestation.committees  # one set per committee
+
+
+def test_attestation_run_args_include_aggregate_due():
+    cfg = _attest_config(aggregate_due_ms=8000)
+    topo = _toy_topology()
+    sh = runner.generate_shadow_yaml(cfg, topo, runner.compute_peer_lists(topo), "committee.json")
+    args = sh["hosts"]["node0"]["processes"][0]["args"]
+    assert "-att-due=4000ms" in args
+    assert "-agg-due=8000ms" in args
+
+
+def test_simnet_params_include_aggregate_due():
+    p = runner._simnet_params(_attest_config(aggregate_due_ms=8000))
+    assert p["att_due_ms"] == 4000
+    assert p["agg_due_ms"] == 8000
+
+
 def test_stop_time_covers_startup_slots_drain():
     # startup 120s + 10 slots * 12s + drain/margin > config's 1 min floor.
     cfg = config.SimConfig(num_slots=10, slot_duration_seconds=12,

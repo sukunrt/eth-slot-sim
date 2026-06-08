@@ -43,3 +43,24 @@ def test_unknown_key_is_rejected(tmp_path):
     p.write_text("num_attestors: 8\n")
     with pytest.raises(Exception):
         config.load_config(p)
+
+
+def test_attestation_aggregate_defaults():
+    a = config.AttestationConfig()
+    assert a.target_aggregators == 16  # TARGET_AGGREGATORS_PER_COMMITTEE
+    assert a.aggregates_per_committee == 1  # m
+    assert a.aggregate_due_ms == 8000  # AGGREGATE_DUE (6667 bp of a 12 s slot)
+
+
+def test_attestation_loads_aggregate_overrides(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "attestation:\n"
+        "  target_aggregators: 4\n"
+        "  aggregates_per_committee: 2\n"
+        "  aggregate_due_ms: 9000\n"
+    )
+    cfg = config.load_config(p)
+    assert cfg.attestation.target_aggregators == 4
+    assert cfg.attestation.aggregates_per_committee == 2
+    assert cfg.attestation.aggregate_due_ms == 9000

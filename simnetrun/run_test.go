@@ -44,6 +44,7 @@ type params struct {
 	Committee        string `json:"committee"`
 	Attest           bool   `json:"attest"`
 	AttDueMs         int    `json:"att_due_ms"`
+	AggDueMs         int    `json:"agg_due_ms"` // aggregate phase (0 ⇒ off)
 	PrepMs           int    `json:"prep_ms"`
 	AttVerifyMs      int    `json:"att_verify_ms"`
 	AttPerItemMs     int    `json:"att_per_item_ms"`
@@ -99,6 +100,7 @@ func TestRun(t *testing.T) {
 			cfg.Committee = a
 			cfg.Attest = p.Attest
 			cfg.AttestationDue = time.Duration(p.AttDueMs) * time.Millisecond
+			cfg.AggregateDue = time.Duration(p.AggDueMs) * time.Millisecond
 			cfg.Prep = time.Duration(p.PrepMs) * time.Millisecond
 			cfg.AttestVerifyDelay = func() time.Duration { return time.Duration(p.AttVerifyMs) * time.Millisecond }
 			cfg.AttestPerItem = time.Duration(p.AttPerItemMs) * time.Millisecond
