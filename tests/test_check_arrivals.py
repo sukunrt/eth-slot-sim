@@ -213,3 +213,127 @@ def test_analyze_attestations_csv_detects_missing_and_leak(tmp_path):
     assert res.missing == [(2, 0, 0, 5, 0)]
     assert res.leaked == [(9, 0, 0, 5, 0)]
     assert not res.ok
+
+
+# --- aggregates (kind=3, global topic, multi-source dedup) ---------------------
+#
+# A committee's m aggregates are published byte-identically by all its aggregators and
+# deduped on the wire. So each (slot, subnet, agg_idx) must reach every node EXCEPT that
+# committee's aggregators (they publish it; their loopback is skipped) exactly once.
+# Expected = Σ_c m·(N − |A_c|).
+
+
+def _gpub(slot, subnet, agg_idx, t_ms):
+    return (
+        f'{{"msg":"publish","kind":3,"slot":{slot},"subnet":{subnet},"attester":{agg_idx},'
+        f'"origin":-1,"voted_block":false,"t_ns":{t_ms * MS}}}'
+    )
+
+
+def _garr(node, slot, subnet, agg_idx, t_ms):
+    return (
+        f'{{"msg":"arrival","node":{node},"kind":3,"slot":{slot},"subnet":{subnet},'
+        f'"attester":{agg_idx},"origin":-1,"t_ns":{t_ms * MS}}}'
+    )
+
+
+def _committee_agg(n, m, aggregators, subnet_of=None):
+    c = len(aggregators)
+    return {
+        "params": {"n": n, "m": m},
+        "subnet_subscribers": [[] for _ in range(c)],
+        "slots": [{
+            "slot": 0,
+            "committees": [[] for _ in range(c)],
+            "subnet_of": subnet_of if subnet_of is not None else list(range(c)),
+            "aggregators": aggregators,
+        }],
+    }
+
+
+def test_aggregate_full_coverage_ok():
+    # committee 0 on subnet 0, aggregators {0,1}, m=1, N=4. Both aggregators publish the same
+    # aggregate (multi-source); it reaches {2,3} exactly once.
+    data = _committee_agg(4, 1, [[0, 1]])
+    lines = [_gpub(0, 0, 0, 800), _gpub(0, 0, 0, 800), _garr(2, 0, 0, 0, 900), _garr(3, 0, 0, 0, 950)]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_aggregates(pubs, arrs, data)
+    assert res.expected == 2 and res.arrivals == 2
+    assert res.missing == [] and res.leaked == [] and res.duplicates == []
+    assert res.published == 1  # one distinct logical aggregate (m·C = 1·1)
+    assert res.ok
+
+
+def test_aggregate_m_gt_1_and_two_committees():
+    # subnet 0 aggregators {0,1}, subnet 1 aggregators {0,3}, m=2, N=5.
+    # Expected = 2·(5−2) + 2·(5−2) = 12; published = m·C = 4.
+    data = _committee_agg(5, 2, [[0, 1], [0, 3]])
+    lines = []
+    for sub, aggs in ((0, {0, 1}), (1, {0, 3})):
+        for ai in range(2):
+            for node in set(range(5)) - aggs:
+                lines.append(_garr(node, 0, sub, ai, 900))
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_aggregates(pubs, arrs, data)
+    assert res.expected == 12 and res.arrivals == 12
+    assert res.published == 4
+    assert res.ok
+
+
+def test_aggregate_detects_missing():
+    data = _committee_agg(4, 1, [[0, 1]])
+    lines = [_gpub(0, 0, 0, 800), _garr(2, 0, 0, 0, 900)]  # node 3 missing
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_aggregates(pubs, arrs, data)
+    assert res.missing == [(3, 0, 0, 0)]
+    assert not res.ok
+
+
+def test_aggregate_detects_duplicate():
+    # node 2 receives the same aggregate twice — gossipsub failed to dedup.
+    data = _committee_agg(4, 1, [[0, 1]])
+    lines = [_gpub(0, 0, 0, 800), _garr(2, 0, 0, 0, 900), _garr(2, 0, 0, 0, 910), _garr(3, 0, 0, 0, 950)]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_aggregates(pubs, arrs, data)
+    assert res.duplicates == [(2, 0, 0, 0)]
+    assert not res.ok
+
+
+def test_aggregate_detects_leak_at_own_aggregator():
+    # node 0 is an aggregator of subnet 0 — it published the aggregate, so recording its own
+    # copy (loopback not skipped) is a failure.
+    data = _committee_agg(4, 1, [[0, 1]])
+    lines = [_gpub(0, 0, 0, 800), _garr(2, 0, 0, 0, 900), _garr(3, 0, 0, 0, 950), _garr(0, 0, 0, 0, 860)]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_aggregates(pubs, arrs, data)
+    assert res.leaked == [(0, 0, 0, 0)]
+    assert not res.ok
+
+
+def test_analyze_aggregates_csv_coverage_ok(tmp_path):
+    # simnet CSV path (kind=3, attester column carries agg_idx, no origin column).
+    data = _committee_agg(4, 1, [[0, 1]])
+    csv_path = tmp_path / "simnet_arrivals.csv"
+    csv_path.write_text(
+        "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
+        "2,0,3,0,0,90,false\n"
+        "3,0,3,0,0,95,false\n"
+    )
+    res = ca.analyze_aggregates_csv(csv_path, data)
+    assert res.expected == 2 and res.arrivals == 2
+    assert res.missing == [] and res.leaked == [] and res.duplicates == []
+    assert res.ok
+
+
+def test_analyze_aggregates_csv_detects_missing_and_leak(tmp_path):
+    data = _committee_agg(4, 1, [[0, 1]])
+    csv_path = tmp_path / "a.csv"
+    csv_path.write_text(
+        "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
+        "2,0,3,0,0,90,false\n"  # node 3 (a non-aggregator) never receives -> missing
+        "0,0,3,0,0,90,false\n"  # node 0 is an aggregator -> leak (loopback not skipped)
+    )
+    res = ca.analyze_aggregates_csv(csv_path, data)
+    assert res.missing == [(3, 0, 0, 0)]
+    assert res.leaked == [(0, 0, 0, 0)]
+    assert not res.ok
