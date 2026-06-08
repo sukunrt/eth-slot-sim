@@ -49,6 +49,12 @@ type params struct {
 	AttVerifyMs      int    `json:"att_verify_ms"`
 	AttPerItemMs     int    `json:"att_per_item_ms"`
 	AttBatchWindowMs int    `json:"att_batch_window_ms"`
+
+	// Data-columns phase (active when committee.json has num_columns > 0). The verifier P is
+	// sized per node from its full-custody role in committee.json.
+	ColVerifyServiceMs int `json:"col_verify_service_ms"`
+	ColVerifySuper     int `json:"col_verify_super"`
+	ColVerifyReg       int `json:"col_verify_regular"`
 }
 
 // TestRun is the simnet backend: it runs the block-dissemination scenario over a
@@ -105,6 +111,11 @@ func TestRun(t *testing.T) {
 			cfg.AttestVerifyDelay = func() time.Duration { return time.Duration(p.AttVerifyMs) * time.Millisecond }
 			cfg.AttestPerItem = time.Duration(p.AttPerItemMs) * time.Millisecond
 			cfg.AttestBatchWindow = time.Duration(p.AttBatchWindowMs) * time.Millisecond
+			if a.NumColumns > 0 { // size the per-node column verifier (P from full-custody role)
+				cfg.ColVerifyService = func() time.Duration { return time.Duration(p.ColVerifyServiceMs) * time.Millisecond }
+				cfg.ColVerifyParallelismSuper = p.ColVerifySuper
+				cfg.ColVerifyParallelismReg = p.ColVerifyReg
+			}
 		}
 		d := driver.New(nw, cfg, rec)
 

@@ -38,7 +38,7 @@ func TestNodeRunnerRecordsColumn(t *testing.T) {
 				VerifyDelay: func() time.Duration { return 0 },
 				D:           8, Dlo: 6, Dhi: 12,
 			}
-			driver.NewRunner(i, nd, val, nil, rec, 12*time.Second, 0, 0, 0, 1, nw.Peers(i)).Attach()
+			driver.NewRunner(i, nd, val, nil, false, rec, 12*time.Second, 0, 0, 0, 1, nw.Peers(i)).Attach()
 			nodes[i] = nd
 		}
 

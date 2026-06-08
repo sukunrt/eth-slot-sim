@@ -86,6 +86,12 @@ func main() {
 		attestPerItem = flag.Duration("attest-per-item", 0, "attestation per-item verify cost")
 		attestWindow  = flag.Duration("attest-batch-window", 50*time.Millisecond, "attestation batch window")
 		rpcLogNode    = flag.Int("rpc-log-node", -1, "node-num to enable gossipsub debug RPC logging on (-1 = off)")
+
+		// Data columns are driven by committee.json (num_columns/column_subscribers/full_custody);
+		// these size the per-node width-P column verifier.
+		colVerify      = flag.Duration("col-verify-service", 3*time.Millisecond, "per-column verify delay")
+		colVerifySuper = flag.Int("col-verify-super", 16, "column verify parallelism P for a full-custody node")
+		colVerifyReg   = flag.Int("col-verify-regular", 4, "column verify parallelism P for an ordinary node")
 	)
 	flag.Parse()
 	if settleWindow(*startup, meshJoinStagger) <= 0 {
@@ -101,8 +107,8 @@ func main() {
 			log.Fatalf("load committee %s: %v", *committeePath, err)
 		}
 		proposers = c.ProposerSchedule() // supernode block schedule (used even when block-only)
-		if *attestations {
-			comm = c // nil ⇒ the runner is block-only
+		if *attestations || c.NumColumns > 0 {
+			comm = c // drives attestations and/or columns; -attestations gates the votes
 		}
 	}
 	val := validator.New(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
@@ -114,11 +120,18 @@ func main() {
 		AttestPerItem:     *attestPerItem, AttestBatchWindow: *attestWindow,
 		D: *d, Dlo: *dlo, Dhi: *dhi,
 	}
+	if comm != nil && comm.NumColumns > 0 { // size the column verifier from this node's role
+		nd.ColVerifyService = func() time.Duration { return *colVerify }
+		nd.ColVerifyParallelism = *colVerifyReg
+		if comm.Node(*nodeNum).IsFullCustody() {
+			nd.ColVerifyParallelism = *colVerifySuper
+		}
+	}
 	if *rpcLogNode == *nodeNum {
 		nd.RPCLogger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	peers := parseIntList(*peerNumsStr)
-	runner := driver.NewRunner(*nodeNum, nd, val, comm, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers)
+	runner := driver.NewRunner(*nodeNum, nd, val, comm, *attestations, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers)
 	runner.Attach() // sets nd.OnReceive before JoinTopics
 
 	ctx := context.Background()

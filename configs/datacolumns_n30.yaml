@@ -1,0 +1,47 @@
+# Local verify: 30 nodes, 64 validators (V >= N so every node validates), 32 column subnets.
+# The proposer (a full-custody node) bursts one DataColumnSidecar per column at t=0; a node
+# votes block only once it has the block AND all its custody columns by attestation_due. Verify
+# with `simctl compare` (both backends) or analysis/check_arrivals.py on a `run`.
+topology:
+  num_nodes: 30
+  degree: 12               # K: target peers per node
+  type: random
+  seed: 42
+  super_node_fraction: 0.3 # ~9 supernodes ⇒ F = round(0.5*9) full-custody, >= column_backbone_floor
+  latency_multiple: 1.0
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+attestation:
+  validators: 64           # V >= N = 30 (required by the data-columns phase)
+  committees: 2            # C active attestation subnets/slot
+  committee_size: 10       # s_c (C*s_c = 20 <= V)
+  subnet_count: 64
+  subnets_per_node: 1
+  subscribe_floor: 10
+  attestation_due_ms: 4000 # also the column gate deadline (no separate deadline)
+
+data_columns:
+  enabled: true
+  num_columns: 32          # all active each slot (mainnet 128)
+  blobs: 6                 # column ~12.9 KiB
+  custody_floor: 8         # columns an ordinary node holds (uniform)
+  full_custody_fraction: 0.5
+  column_backbone_floor: 3
+  verify_service_ms: 3
+  verify_parallelism_super: 16
+  verify_parallelism_regular: 4
+
+num_slots: 3
+slot_duration_seconds: 12
+block_size: 131072         # 128 KiB
+verify_delay_ms: 10
+offset_ms: 0
+jitter_ms: 2000
+startup_seconds: 60        # must exceed the 30 s mesh-join stagger
+stop_time_minutes: 4
+log_level: info
+seed: 1

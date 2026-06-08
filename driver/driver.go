@@ -86,13 +86,12 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		slotDur: cfg.SlotDuration,
 	}
 	var proposers []int // supernode proposer schedule; nil ⇒ cyclic (block-only)
-	runnerComm := cfg.Committee
 	if cfg.Committee != nil {
 		proposers = cfg.Committee.ProposerSchedule()
 	}
-	if !cfg.Attest {
-		runnerComm = nil // block-only: keep the proposer schedule, drop attestation duties
-	}
+	// The committee drives attestations (when cfg.Attest) and/or columns (NumColumns > 0); the
+	// runner's attest flag gates attestation emission, so a committee can disseminate columns
+	// without emitting attestations. Block-only runs pass a nil Committee.
 	for i := range n {
 		val := validator.New(i, n, cfg.BlockSize, cfg.Offset, cfg.Jitter,
 			rand.New(rand.NewPCG(cfg.Seed, uint64(i))), proposers)
@@ -104,8 +103,8 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 			AttestBatchWindow: cfg.AttestBatchWindow,
 			D:                 cfg.D, Dlo: cfg.Dlo, Dhi: cfg.Dhi,
 		}
-		// Size the column verifier from the node's full-custody role (custody is independent
-		// of whether attestations are emitted, so read it off cfg.Committee, not runnerComm).
+		// Size the column verifier from the node's full-custody role (custody applies even when
+		// attestations are off, so it's gated on the committee's columns, not cfg.Attest).
 		if cfg.Committee != nil && cfg.Committee.NumColumns > 0 {
 			nd.ColVerifyService = cfg.ColVerifyService
 			if cfg.Committee.Node(i).IsFullCustody() {
@@ -114,7 +113,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 				nd.ColVerifyParallelism = cfg.ColVerifyParallelismReg
 			}
 		}
-		r := NewRunner(i, nd, val, runnerComm, tracer, cfg.SlotDuration, cfg.AttestationDue,
+		r := NewRunner(i, nd, val, cfg.Committee, cfg.Attest, tracer, cfg.SlotDuration, cfg.AttestationDue,
 			cfg.AggregateDue, cfg.Prep, cfg.Seed, nw.Peers(i))
 		r.Attach()
 		d.nodes[i] = nd

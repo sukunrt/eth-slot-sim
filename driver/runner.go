@@ -23,6 +23,7 @@ type NodeRunner struct {
 	nd      *node.Node
 	val     *validator.Validator
 	comm    *committee.Assignment // nil ⇒ block-only (Phase 1)
+	attest  bool                  // emit attestations (with comm set but false ⇒ columns-only)
 	tracer  metrics.Tracer
 	slotDur time.Duration
 	due     time.Duration // attestation deadline, offset into the slot
@@ -60,17 +61,18 @@ type slotState struct {
 	aggEmitOnce sync.Once
 }
 
-// NewRunner builds a runner for one node. comm may be nil (block-only). aggDue 0 disables
-// the aggregate phase. basePeers is the node's long-lived peer set (so per-slot subnet dials
-// it adds on top can be dropped).
-func NewRunner(num int, nd *node.Node, val *validator.Validator, comm *committee.Assignment,
+// NewRunner builds a runner for one node. comm may be nil (block-only). attest gates
+// attestation emission: comm set with attest false is a columns-only run (disseminate +
+// measure columns, no vote). aggDue 0 disables the aggregate phase. basePeers is the node's
+// long-lived peer set (so per-slot subnet dials it adds on top can be dropped).
+func NewRunner(num int, nd *node.Node, val *validator.Validator, comm *committee.Assignment, attest bool,
 	tracer metrics.Tracer, slotDur, due, aggDue, prep time.Duration, seed uint64, basePeers []int) *NodeRunner {
 	base := make(map[int]bool, len(basePeers))
 	for _, p := range basePeers {
 		base[p] = true
 	}
 	return &NodeRunner{
-		num: num, nd: nd, val: val, comm: comm, tracer: tracer,
+		num: num, nd: nd, val: val, comm: comm, attest: attest, tracer: tracer,
 		slotDur: slotDur, due: due, aggDue: aggDue, prep: prep, seed: seed, base: base,
 		slots: make(map[int]*slotState),
 	}
@@ -85,14 +87,16 @@ func (r *NodeRunner) Prepare() {
 	if r.comm == nil {
 		return
 	}
-	if r.aggDue > 0 { // every node joins the global aggregate mesh (it downloads all aggregates)
-		if err := r.nd.Subscribe(validator.AggregateTopic); err != nil {
-			slog.Error("subscribe aggregate topic failed", "node", r.num, "err", err)
+	if r.attest {
+		if r.aggDue > 0 { // every node joins the global aggregate mesh (it downloads all aggregates)
+			if err := r.nd.Subscribe(validator.AggregateTopic); err != nil {
+				slog.Error("subscribe aggregate topic failed", "node", r.num, "err", err)
+			}
 		}
-	}
-	for _, s := range r.comm.Node(r.num).SubscribedSubnets() {
-		if err := r.nd.Subscribe(validator.AttestationTopic(s)); err != nil {
-			slog.Error("subscribe subnet failed", "node", r.num, "subnet", s, "err", err)
+		for _, s := range r.comm.Node(r.num).SubscribedSubnets() {
+			if err := r.nd.Subscribe(validator.AttestationTopic(s)); err != nil {
+				slog.Error("subscribe subnet failed", "node", r.num, "subnet", s, "err", err)
+			}
 		}
 	}
 	if r.comm.NumColumns > 0 { // the node's custody column meshes (the DA dissemination phase)
@@ -121,7 +125,7 @@ func (r *NodeRunner) Run(ctx context.Context, runStart time.Time, numSlots int) 
 // the block — all before the block publish, so a proposer that also attests can self-vote.
 func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 	var ss *slotState
-	if r.comm != nil {
+	if r.comm != nil && r.attest {
 		view := r.comm.Node(r.num)
 		ss = &slotState{deadline: slotStart.Add(r.due), duties: view.AttestDuties(slot)}
 		if r.comm.NumColumns > 0 {

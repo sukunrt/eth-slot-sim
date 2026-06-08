@@ -39,6 +39,16 @@ def _committee_assignment(config: SimConfig) -> committee.Assignment | None:
         return None
     tc = config.topology
     supers = sorted(supernode_ids(tc.num_nodes, tc.super_node_fraction, tc.seed))
+    col_kwargs: dict[str, Any] = {}
+    dc = config.data_columns
+    if dc is not None and dc.enabled:  # the data-columns phase adds custody to committee.json
+        col_kwargs = dict(
+            num_columns=dc.num_columns,
+            custody_floor=dc.custody_floor,
+            full_custody_fraction=dc.full_custody_fraction,
+            column_backbone_floor=dc.column_backbone_floor,
+            per_subnet_floor=dc.per_subnet_floor,
+        )
     return committee.generate(
         committee.Params(
             n=tc.num_nodes,
@@ -51,6 +61,7 @@ def _committee_assignment(config: SimConfig) -> committee.Assignment | None:
             target_aggregators=a.target_aggregators,
             seed=config.seed,
             num_slots=config.num_slots,
+            **col_kwargs,
         ),
         supers=supers,
     )
@@ -237,6 +248,13 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
             att_per_item_ms=a.per_item_ms,
             att_batch_window_ms=a.batch_window_ms,
         )
+    dc = config.data_columns
+    if dc is not None and dc.enabled:  # custody lives in committee.json; these size the verifier
+        params.update(
+            col_verify_service_ms=dc.verify_service_ms,
+            col_verify_super=dc.verify_parallelism_super,
+            col_verify_regular=dc.verify_parallelism_regular,
+        )
     return params
 
 
@@ -409,6 +427,20 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
                 "simnet": _agg_summary(simnet_agg),
             }
 
+    # Data-columns phase: report both backends' column coverage/no-leak + CDF. Independent of
+    # the attestation gate above (a columns-only run still disseminates + measures columns).
+    columns_on = config.data_columns is not None and config.data_columns.enabled
+    if columns_on:
+        committee_data = json.loads((run_dir / "committee.json").read_text())
+        custodiers = {col: set(m) for col, m in enumerate(committee_data["column_subscribers"])}
+        shadow_col = check_arrivals.analyze_columns(pubs, arrs, custodiers)
+        simnet_col = check_arrivals.analyze_columns_csv(csv_path, committee_data)
+        comparison["columns"] = {
+            "expected": shadow_col.expected,
+            "shadow": _col_summary(shadow_col),
+            "simnet": _col_summary(simnet_col),
+        }
+
     # Proposer guard: every scheduled proposer is a supernode, and every Shadow block was
     # published by its slot's proposer. Both backends read this one committee.json, so a
     # failure means the schedule or the two generated files disagree.
@@ -428,6 +460,19 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
 
 def _agg_summary(res: check_arrivals.AggregateResult) -> dict[str, Any]:
     """One backend's aggregate result as a compare.json sub-dict."""
+    return {
+        "arrivals": res.arrivals,
+        "expected": res.expected,
+        "published": res.published,
+        "missing": len(res.missing),
+        "leaked": len(res.leaked),
+        "duplicates": len(res.duplicates),
+        "cdf_ms": check_arrivals.cdf(res.delays_ms),
+    }
+
+
+def _col_summary(res: check_arrivals.ColumnResult) -> dict[str, Any]:
+    """One backend's column result as a compare.json sub-dict."""
     return {
         "arrivals": res.arrivals,
         "expected": res.expected,
