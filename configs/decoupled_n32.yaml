@@ -1,0 +1,47 @@
+# Decoupled consensus, small local Shadow run: 32 nodes, 320 validators (10 per node),
+# 2 finality subnets. Same shape as decoupled_n16.yaml, scaled up one notch.
+topology:
+  num_nodes: 32
+  degree: 6                # K: target peers per node
+  type: random
+  seed: 42
+  super_node_fraction: 0.5 # the full-custody backbone is drawn from the supernodes
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+attestation:
+  enabled: false           # OFF: this block only supplies V + the AC-vote deadline (attestation_due_ms)
+  validators: 320          # V (>= N): every node validates ⇒ uniform custody
+  committees: 1            # ignored under decoupled (no attestation committees)
+  committee_size: 8        # ignored under decoupled
+  attestation_due_ms: 4000 # the AC-vote deadline (reused; no new knob)
+
+data_columns:
+  enabled: true            # columns gate the AC vote (the "availability" chain)
+  num_columns: 8
+  blobs: 6
+  custody_floor: 8
+  full_custody_fraction: 0.5
+  column_backbone_floor: 3
+  verify_service_ms: 3
+  verify_parallelism_super: 16
+  verify_parallelism_regular: 4
+
+decoupled_consensus:
+  enabled: true
+  ac_vote_size: 8                        # VRF-selected validators voting on the AC each slot (global topic)
+  ac_slots_per_finality_slot: 2          # k
+  fs_subnets: 2                          # finality subnets, node-partitioned (every node on one)
+  fs_aggregators: 2                      # aggregators per finality subnet per finality slot
+  finality_slot_aggregation_fraction: 50 # % of the finality slot when aggregates publish
+  fc_vote_offset_ms: 1000                # offset into the finality slot for the vote burst
+
+num_slots: 5
+slot_duration_seconds: 12
+block_size: 131072
+verify_delay_ms: 10
+offset_ms: 0
+jitter_ms: 2000
