@@ -32,10 +32,12 @@ const defaultBatchWindow = 50 * time.Millisecond
 type Kind int
 
 const (
-	KindBlock       Kind = 1
-	KindAttestation Kind = 2
-	KindAggregate   Kind = 3
-	KindColumn      Kind = 4
+	KindBlock            Kind = 1
+	KindAttestation      Kind = 2
+	KindAggregate        Kind = 3
+	KindColumn           Kind = 4
+	KindSyncMessage      Kind = 5
+	KindSyncContribution Kind = 6
 )
 
 // Received is the node's outward hand-off for one decoded message: the node
@@ -216,10 +218,13 @@ func (n *Node) Subscribe(topic string) error {
 }
 
 // batchedTopic reports whether topic's verification routes through the per-node batched
-// verifier (the t≈4s attestation flood and the t≈8s aggregate flood) rather than the
-// block's fixed per-hop delay (one block per slot).
+// verifier (the t≈4s attestation/sync-message floods and the t≈8s aggregate/contribution
+// floods) rather than the block's fixed per-hop delay (one block per slot). The sync floods
+// join the same single-server queue as attestations (one CPU). SyncMessageTopicPrefix also
+// covers SyncContributionTopic, which shares the prefix.
 func batchedTopic(topic string) bool {
-	return strings.HasPrefix(topic, validator.AttestationTopicPrefix) || topic == validator.AggregateTopic
+	return strings.HasPrefix(topic, validator.AttestationTopicPrefix) || topic == validator.AggregateTopic ||
+		strings.HasPrefix(topic, validator.SyncMessageTopicPrefix)
 }
 
 // columnTopic reports whether topic is a data-column subnet — its verification routes through
@@ -387,6 +392,18 @@ func decode(topic string, data []byte, at time.Time) (Received, error) {
 			return Received{}, err
 		}
 		return Received{Kind: KindColumn, Obj: col, At: at}, nil
+	case topic == validator.SyncContributionTopic: // before the message prefix (shared stem)
+		sc := new(pb.SyncContribution)
+		if err := proto.Unmarshal(data, sc); err != nil {
+			return Received{}, err
+		}
+		return Received{Kind: KindSyncContribution, Obj: sc, At: at}, nil
+	case strings.HasPrefix(topic, validator.SyncMessageTopicPrefix):
+		sm := new(pb.SyncMessage)
+		if err := proto.Unmarshal(data, sm); err != nil {
+			return Received{}, err
+		}
+		return Received{Kind: KindSyncMessage, Obj: sm, At: at}, nil
 	default:
 		return Received{}, fmt.Errorf("unknown topic %q", topic)
 	}

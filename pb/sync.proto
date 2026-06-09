@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package block;
+
+option go_package = "github.com/ethp2p/slot-sim/pb";
+
+// SyncMessage is the SyncCommitteeMessage wire message (~144 B), one per committee member per
+// slot, published on its subcommittee's subnet. It votes the head block at
+// min(block_seen, deadline) — un-gated by data availability (unlike attestations) — so
+// voted_origin records the voted block's origin (proposer node) or a sentinel (max uint32)
+// for the prior head, the measurable output of the block→sync causal edge.
+message SyncMessage {
+  uint32 slot         = 1;
+  uint32 subnet       = 2; // subcommittee → subnet, 0 .. sync_subnets-1
+  uint32 origin       = 3; // publishing member node (gossip origin; for the loopback skip)
+  uint32 voted_origin = 4; // voted block's origin, or a sentinel (max uint32) for prior head
+  bytes  payload      = 5; // random filler so the marshaled message ≈ 144 B
+}
+
+// SyncContribution is the SignedContributionAndProof wire message (~360 B), published on the
+// single global sync_committee_contribution_and_proof topic at the contribution deadline. Each
+// subnet has ~target_aggregators aggregators; every aggregator publishes one distinct
+// contribution. origin carries the aggregator node, which both makes the contribution distinct
+// (so gossipsub does not dedup them) and is the gossip origin for the loopback skip.
+message SyncContribution {
+  uint32 slot    = 1;
+  uint32 subnet  = 2; // subcommittee (for distinctness; the topic is global)
+  uint32 origin  = 3; // aggregator node (its key makes the contribution distinct; gossip origin)
+  bytes  payload = 4; // random filler so the marshaled message ≈ 360 B
+}

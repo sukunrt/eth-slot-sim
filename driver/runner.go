@@ -273,6 +273,18 @@ func (r *NodeRunner) onReceive(rec node.Received) {
 		}
 		r.tracer.OnReceive(r.num, metrics.ColumnID(int(col.Slot), int(col.Column), int(col.Origin)), rec.At)
 		r.onColumnProcessed(int(col.Slot), int(col.Column), rec.At)
+	case node.KindSyncMessage:
+		sm := rec.Obj.(*pb.SyncMessage)
+		if int(sm.Origin) == r.num { // skip our own published sync message (loopback)
+			return
+		}
+		r.tracer.OnReceive(r.num, metrics.SyncMessageID(int(sm.Slot), int(sm.Subnet), int(sm.Origin)), rec.At)
+	case node.KindSyncContribution:
+		sc := rec.Obj.(*pb.SyncContribution)
+		if int(sc.Origin) == r.num { // skip our own published contribution (loopback)
+			return
+		}
+		r.tracer.OnReceive(r.num, metrics.SyncContributionID(int(sc.Slot), int(sc.Subnet), int(sc.Origin)), rec.At)
 	}
 }
 

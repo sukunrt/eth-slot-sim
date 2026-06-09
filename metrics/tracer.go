@@ -53,6 +53,23 @@ func ColumnID(slot, column, origin int) MsgID {
 	return MsgID{Kind: node.KindColumn, Slot: slot, Subnet: column, Attester: -1, Origin: origin}
 }
 
+// SyncMessageID is the MsgID for the sync-committee message published by member (a node) on
+// subnet in slot. One message per member, so the member is the distinct identity — carried in
+// the Attester field so it survives the CSV (which has no origin column), exactly as an
+// aggregate's aggregator is (and unlike a column, which is one-per-subnet). It carries the
+// head-vote bool via OnPublish, the sync analogue of an attestation's block vote.
+func SyncMessageID(slot, subnet, member int) MsgID {
+	return MsgID{Kind: node.KindSyncMessage, Slot: slot, Subnet: subnet, Attester: member, Origin: -1}
+}
+
+// SyncContributionID is the MsgID for the contribution published by aggregator (a node) for
+// subnet's subcommittee in slot, on the global contribution topic. Each aggregator publishes one
+// distinct contribution, identified by the aggregator carried in the Attester field (so it
+// survives the CSV), exactly as an aggregate is.
+func SyncContributionID(slot, subnet, aggregator int) MsgID {
+	return MsgID{Kind: node.KindSyncContribution, Slot: slot, Subnet: subnet, Attester: aggregator, Origin: -1}
+}
+
 // Tracer receives app-level publish/receive events. votedBlock is meaningful only for
 // attestations (false for blocks); the receive side recovers it by joining to the
 // publish record, so OnReceive needs only the identity.
