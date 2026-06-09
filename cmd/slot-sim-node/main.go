@@ -79,6 +79,7 @@ func main() {
 
 		schedulePath  = flag.String("schedule", "", "path to schedule.json (empty → block-only)")
 		attestations  = flag.Bool("attestations", true, "emit attestations (false → block-only; committee still sets the proposer schedule)")
+		syncOn        = flag.Bool("sync", false, "emit sync-committee messages + contributions (members only; needs schedule.json; reuses -att-due/-agg-due)")
 		attDue        = flag.Duration("att-due", 4*time.Second, "attestation deadline offset into the slot")
 		aggDue        = flag.Duration("agg-due", 0, "aggregate emit offset into the slot (0 ⇒ aggregates off)")
 		prep          = flag.Duration("prep", 0, "extra processing before emitting on block receipt")
@@ -107,8 +108,8 @@ func main() {
 			log.Fatalf("load schedule %s: %v", *schedulePath, err)
 		}
 		proposers = c.ProposerSchedule() // supernode block schedule (used even when block-only)
-		if *attestations || c.NumColumns > 0 {
-			sched = c // drives attestations and/or columns; -attestations gates the votes
+		if *attestations || *syncOn || c.NumColumns > 0 {
+			sched = c // drives attestations, sync, and/or columns; the flags gate emission
 		}
 	}
 	val := validator.New(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
@@ -131,7 +132,7 @@ func main() {
 		nd.RPCLogger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	peers := parseIntList(*peerNumsStr)
-	runner := driver.NewRunner(*nodeNum, nd, val, sched, *attestations, false, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers)
+	runner := driver.NewRunner(*nodeNum, nd, val, sched, *attestations, *syncOn, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers)
 	runner.Attach() // sets nd.OnReceive before JoinTopics
 
 	ctx := context.Background()

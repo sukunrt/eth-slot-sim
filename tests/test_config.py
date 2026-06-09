@@ -123,3 +123,67 @@ def test_data_columns_disabled_skips_validation(tmp_path):
     p.write_text("topology:\n  num_nodes: 20\ndata_columns:\n  enabled: false\n")
     cfg = config.load_config(p)
     assert cfg.data_columns.enabled is False
+
+
+# --- sync committee -----------------------------------------------------------
+
+
+def test_sync_defaults():
+    sc = config.SyncConfig()
+    assert sc.enabled is True
+    assert sc.size == 512 and sc.subnets == 4 and sc.target_aggregators == 16
+
+
+def _sync_yaml(num_nodes, validators, body="  size: 8\n  subnets: 2\n", attest="  enabled: true\n"):
+    return (
+        "topology:\n"
+        f"  num_nodes: {num_nodes}\n"
+        "attestation:\n"
+        f"  validators: {validators}\n" + attest
+        + "sync:\n" + body
+    )
+
+
+def test_sync_loads(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(_sync_yaml(16, 16))
+    cfg = config.load_config(p)
+    assert cfg.sync.size == 8 and cfg.sync.subnets == 2 and cfg.sync.enabled is True
+
+
+def test_sync_requires_attestation(tmp_path):
+    # sync reuses the attestation deadlines, so the attestation block must be present.
+    p = tmp_path / "c.yaml"
+    p.write_text("topology:\n  num_nodes: 16\nsync:\n  size: 8\n  subnets: 2\n")
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_sync_allows_attestation_disabled(tmp_path):
+    # A sync run with attestations off is allowed (disseminate+measure sync, no attestations).
+    p = tmp_path / "c.yaml"
+    p.write_text(_sync_yaml(16, 16, attest="  enabled: false\n"))
+    cfg = config.load_config(p)
+    assert cfg.sync.enabled is True and cfg.attestation.enabled is False
+
+
+def test_sync_size_exceeds_n_raises(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(_sync_yaml(16, 16, "  size: 20\n  subnets: 2\n"))
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_sync_subnets_exceed_size_raises(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(_sync_yaml(16, 16, "  size: 4\n  subnets: 8\n"))
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_sync_disabled_skips_validation(tmp_path):
+    # enabled=False ⇒ sync requirements (attestation present, size≤N) don't apply.
+    p = tmp_path / "c.yaml"
+    p.write_text("topology:\n  num_nodes: 16\nsync:\n  enabled: false\n  size: 99\n  subnets: 2\n")
+    cfg = config.load_config(p)
+    assert cfg.sync.enabled is False

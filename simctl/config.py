@@ -78,6 +78,22 @@ class DataColumnsConfig(BaseModel):
     verify_parallelism_regular: int = 4  # P for everyone else
 
 
+class SyncConfig(BaseModel):
+    """Sync-committee phase knobs (node-based membership + per-slot aggregators). Present+enabled ⇒
+    each slot a seeded subset of `size` member nodes (each on one of `subnets` subnets) emits a
+    SyncCommitteeMessage voting the head at min(block_seen, attestation_due) — un-gated by data
+    availability — and `target_aggregators` per subnet emit a SignedContributionAndProof on a
+    global topic at aggregate_due. Reuses the attestation deadlines (so it needs the attestation
+    block present, even with attestations disabled). See sync-committee-spec.md."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    size: int = 512  # member nodes (SYNC_COMMITTEE_SIZE-scale); a seeded subset of N, asserted ≤ N
+    subnets: int = 4  # subcommittees / subnets (SYNC_COMMITTEE_SUBNET_COUNT); asserted ≤ size
+    target_aggregators: int = 16  # per subnet → contributions (clamped to a subnet's members)
+
+
 class SimConfig(BaseModel):
     """Root configuration for a single block-dissemination run."""
 
@@ -87,6 +103,7 @@ class SimConfig(BaseModel):
     gossipsub: GossipsubParams = Field(default_factory=GossipsubParams)
     attestation: AttestationConfig | None = None  # present ⇒ run the attestation phase
     data_columns: DataColumnsConfig | None = None  # present+enabled ⇒ run the data-columns phase
+    sync: SyncConfig | None = None  # present+enabled ⇒ run the sync-committee phase
     num_slots: int = 5
     slot_duration_seconds: int = 12
     block_size: int = 128 * 1024
@@ -116,6 +133,22 @@ class SimConfig(BaseModel):
                 f"data_columns need V ({self.attestation.validators}) >= N "
                 f"({self.topology.num_nodes}): every node must validate (uniform custody)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_sync(self) -> "SimConfig":
+        sc = self.sync
+        if sc is None or not sc.enabled:
+            return self
+        # Sync reuses attestation.attestation_due_ms / aggregate_due_ms as its deadlines, so the
+        # attestation block must be present (attestations themselves may be disabled).
+        if self.attestation is None:
+            raise ValueError("sync needs an attestation block (it reuses the attestation deadlines)")
+        n = self.topology.num_nodes
+        if sc.size > n:
+            raise ValueError(f"sync.size ({sc.size}) > N ({n}): members are a subset of the nodes")
+        if sc.subnets > sc.size:
+            raise ValueError(f"sync.subnets ({sc.subnets}) > sync.size ({sc.size})")
         return self
 
 

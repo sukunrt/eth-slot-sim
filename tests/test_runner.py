@@ -130,6 +130,46 @@ def test_simnet_params_include_aggregate_due():
     assert p["agg_due_ms"] == 8000
 
 
+def test_host_args_include_sync_flag():
+    on = config.SimConfig(
+        attestation=config.AttestationConfig(), sync=config.SyncConfig(size=8, subnets=2)
+    )
+    assert "-sync=true" in runner._host_args(on, 0, 8, [1], "/s.json")
+    off = config.SimConfig(
+        attestation=config.AttestationConfig(), sync=config.SyncConfig(enabled=False)
+    )
+    assert "-sync=false" in runner._host_args(off, 0, 8, [1], "/s.json")
+    # No sync block ⇒ no -sync flag (the Go binary defaults it off).
+    none = config.SimConfig(attestation=config.AttestationConfig())
+    assert "-sync" not in runner._host_args(none, 0, 8, [1], "/s.json")
+
+
+def test_simnet_params_carry_sync_flag():
+    on = config.SimConfig(
+        attestation=config.AttestationConfig(), sync=config.SyncConfig(size=8, subnets=2)
+    )
+    assert runner._simnet_params(on)["sync"] is True
+    # Off or absent ⇒ no sync key (the simnet backend defaults Sync false).
+    off = config.SimConfig(
+        attestation=config.AttestationConfig(), sync=config.SyncConfig(enabled=False)
+    )
+    assert "sync" not in runner._simnet_params(off)
+
+
+def test_schedule_assignment_carries_sync_knobs():
+    cfg = config.SimConfig(
+        topology=config.TopologyConfig(num_nodes=16, degree=4),
+        attestation=config.AttestationConfig(
+            validators=16, committees=1, committee_size=2, subscribe_floor=2
+        ),
+        sync=config.SyncConfig(size=8, subnets=2, target_aggregators=2),
+    )
+    a = runner._schedule_assignment(cfg)
+    assert a.sync_subscribers is not None and len(a.sync_subscribers) == 2
+    assert sum(len(s) for s in a.sync_subscribers) == 8  # size member nodes
+    assert a.slots[0].sync_aggregators is not None and len(a.slots[0].sync_aggregators) == 2
+
+
 def test_stop_time_covers_startup_slots_drain():
     # startup 120s + 10 slots * 12s + drain/margin > config's 1 min floor.
     cfg = config.SimConfig(num_slots=10, slot_duration_seconds=12,

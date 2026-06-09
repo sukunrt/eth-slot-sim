@@ -49,6 +49,14 @@ def _schedule_assignment(config: SimConfig) -> schedule.Assignment | None:
             column_backbone_floor=dc.column_backbone_floor,
             per_subnet_floor=dc.per_subnet_floor,
         )
+    sync_kwargs: dict[str, Any] = {}
+    sc = config.sync
+    if sc is not None and sc.enabled:  # the sync phase adds node-based membership to schedule.json
+        sync_kwargs = dict(
+            sync_size=sc.size,
+            sync_subnets=sc.subnets,
+            sync_target_aggregators=sc.target_aggregators,
+        )
     return schedule.generate(
         schedule.Params(
             n=tc.num_nodes,
@@ -62,6 +70,7 @@ def _schedule_assignment(config: SimConfig) -> schedule.Assignment | None:
             seed=config.seed,
             num_slots=config.num_slots,
             **col_kwargs,
+            **sync_kwargs,
         ),
         supers=supers,
     )
@@ -152,6 +161,9 @@ def _host_args(
             f"-attest-per-item={a.per_item_ms}ms",
             f"-attest-batch-window={a.batch_window_ms}ms",
         ]
+    if config.sync is not None:
+        # size/subnets/aggregators ride schedule.json; the deadlines reuse -att-due/-agg-due.
+        args.append(f"-sync={'true' if config.sync.enabled else 'false'}")
     if peers:
         args.append(f"-peer-nums={','.join(str(p) for p in peers)}")
     return " ".join(args)
@@ -255,6 +267,9 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
             col_verify_super=dc.verify_parallelism_super,
             col_verify_regular=dc.verify_parallelism_regular,
         )
+    sc = config.sync
+    if sc is not None and sc.enabled:  # membership lives in schedule.json; this just flips it on
+        params.update(sync=True)
     return params
 
 

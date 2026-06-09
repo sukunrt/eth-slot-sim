@@ -43,6 +43,7 @@ type params struct {
 	// keeps the proposer schedule but emits no attestations (block-only on the same network).
 	Schedule         string `json:"schedule"`
 	Attest           bool   `json:"attest"`
+	Sync             bool   `json:"sync"` // sync-committee phase (size/subnets/aggregators in schedule.json)
 	AttDueMs         int    `json:"att_due_ms"`
 	AggDueMs         int    `json:"agg_due_ms"` // aggregate phase (0 ⇒ off)
 	PrepMs           int    `json:"prep_ms"`
@@ -105,6 +106,7 @@ func TestRun(t *testing.T) {
 			}
 			cfg.Schedule = a
 			cfg.Attest = p.Attest
+			cfg.Sync = p.Sync
 			cfg.AttestationDue = time.Duration(p.AttDueMs) * time.Millisecond
 			cfg.AggregateDue = time.Duration(p.AggDueMs) * time.Millisecond
 			cfg.Prep = time.Duration(p.PrepMs) * time.Millisecond
