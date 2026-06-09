@@ -1,15 +1,16 @@
-// Package node is the message-agnostic, passive half of the simulator: it owns
-// the libp2p host, gossipsub, topic membership, peer connections, and
-// send/receive. It responds to requests (Connect, JoinTopics, Join, Subscribe,
-// Publish) and reports what it receives outward via OnReceive; it knows nothing
-// about slots, duties, or metrics. A Driver supplies the timing and orchestration.
+// Package node is the passive half of the simulator: it owns the libp2p host,
+// gossipsub, topic membership, peer connections, and send/receive. It responds
+// to requests (Connect, JoinTopics, Join, Subscribe, Publish) and reports what
+// it receives outward via OnReceive; it knows nothing about slots, duties, or
+// timing — a Driver supplies the orchestration. It does own the per-kind message
+// registry (registry.go): topic→kind dispatch, verify-queue routing, and the
+// wire-identity policy whose publish-side twins are the metrics.*ID constructors.
 package node
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,9 +18,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
-	"google.golang.org/protobuf/proto"
 
-	"github.com/ethp2p/slot-sim/pb"
 	"github.com/ethp2p/slot-sim/validator"
 )
 
@@ -45,10 +44,16 @@ const (
 
 // Received is the node's outward hand-off for one decoded message: the node
 // infers the type from the gossipsub topic, unmarshals, and tags Obj with Kind.
+// ID and Origin come from the registry's per-kind extractors, so a consumer can
+// trace and loopback-skip without type-asserting Obj. Origin is the publishing
+// node — distinct from ID.Origin, which is -1 for the aggregate-like kinds whose
+// publisher rides ID.Attester instead (see Identity).
 type Received struct {
-	Kind Kind
-	Obj  any
-	At   time.Time
+	Kind   Kind
+	Obj    any
+	ID     Identity
+	Origin int
+	At     time.Time
 }
 
 // Node is one simulated beacon node. Exported fields are set by the caller
@@ -210,29 +215,6 @@ func (n *Node) Subscribe(topic string) error {
 	return nil
 }
 
-// batchClass reports which batched-verifier queue topic's verification routes through, or "" for
-// none (the block's fixed per-hop delay; columns have their own width-P verifier). Each class is an
-// independent single-server queue (one CPU per flood): "consensus" carries the t≈4s
-// attestation/sync-message and t≈8s aggregate/contribution floods (they share one CPU, as today;
-// SyncMessageTopicPrefix also covers SyncContributionTopic); the decoupled floods each get their
-// own — "ac" (availability votes), "fcvote" (finality votes), "fcagg" (finality aggregates) — so
-// they do NOT contend with each other. finality_vote_ and finality_aggregate_ don't share a prefix.
-func batchClass(topic string) string {
-	switch {
-	case topic == validator.AvailabilityVoteTopic:
-		return "ac"
-	case strings.HasPrefix(topic, validator.FinalityVoteTopicPrefix):
-		return "fcvote"
-	case topic == validator.FinalityAggregateTopic:
-		return "fcagg"
-	case strings.HasPrefix(topic, validator.AttestationTopicPrefix), topic == validator.AggregateTopic,
-		strings.HasPrefix(topic, validator.SyncMessageTopicPrefix):
-		return "consensus"
-	default:
-		return ""
-	}
-}
-
 // batchVerifierFor returns the batched verifier for a flood class, creating it (and starting its
 // run loop) on first use, so a node spins up only the queues it actually joins. All classes use the
 // same validation-as-sleep knobs. Caller holds n.mu.
@@ -254,36 +236,30 @@ func (n *Node) batchVerifierFor(class string) *batchVerifier {
 	return v
 }
 
-// columnTopic reports whether topic is a data-column subnet — its verification routes through
-// the per-node width-P column verifier (the bursty t=0 wave), not the batched flood queue.
-func columnTopic(topic string) bool {
-	return strings.HasPrefix(topic, validator.ColumnTopicPrefix)
-}
-
-// registerVerifyHook registers topic's validation-as-sleep hook once, three-way: the column
-// burst goes through the per-node P-server column verifier; a batched flood goes through its
-// class's single-server queue (batchClass); everything else (the block) gets the fixed per-hop
-// delay. Caller holds n.mu.
+// registerVerifyHook registers topic's validation-as-sleep hook once, three-way by the
+// topic's registry class: the column burst goes through the per-node P-server column
+// verifier; a batched flood goes through its class's single-server queue; the block (and
+// any unregistered topic) gets the fixed per-hop delay. Caller holds n.mu.
 func (n *Node) registerVerifyHook(topic string) error {
 	if n.validated[topic] {
 		return nil
 	}
 	var hook pubsub.ValidatorEx
-	switch class := batchClass(topic); {
-	case columnTopic(topic):
+	switch class := verifyClassFor(topic); class {
+	case vcColumn:
 		hook = func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
 			n.colVerifier.verify()
 			return pubsub.ValidationAccept
 		}
-	case class != "":
-		v := n.batchVerifierFor(class)
+	case vcFixed:
 		hook = func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
-			v.submitAndWait(verificationItem{Attestations: []any{nil}})
+			time.Sleep(n.VerifyDelay())
 			return pubsub.ValidationAccept
 		}
 	default:
+		v := n.batchVerifierFor(string(class))
 		hook = func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
-			time.Sleep(n.VerifyDelay())
+			v.submitAndWait(verificationItem{Attestations: []any{nil}})
 			return pubsub.ValidationAccept
 		}
 	}
@@ -385,7 +361,7 @@ func (n *Node) receive(ctx context.Context, sub *pubsub.Subscription) {
 		if err != nil {
 			return
 		}
-		rec, err := decode(msg.GetTopic(), msg.Data, time.Now())
+		rec, err := Decode(msg.GetTopic(), msg.Data, time.Now())
 		if err != nil {
 			slog.Error("decode failed", "node", n.Num, "err", err)
 			continue
@@ -396,65 +372,16 @@ func (n *Node) receive(ctx context.Context, sub *pubsub.Subscription) {
 	}
 }
 
-// decode infers the message type from the gossipsub topic, unmarshals it, and
-// tags it with its Kind.
-func decode(topic string, data []byte, at time.Time) (Received, error) {
-	switch {
-	case topic == validator.BlockTopic:
-		blk := new(pb.Block)
-		if err := proto.Unmarshal(data, blk); err != nil {
-			return Received{}, err
-		}
-		return Received{Kind: KindBlock, Obj: blk, At: at}, nil
-	case strings.HasPrefix(topic, validator.AttestationTopicPrefix):
-		att := new(pb.Attestation)
-		if err := proto.Unmarshal(data, att); err != nil {
-			return Received{}, err
-		}
-		return Received{Kind: KindAttestation, Obj: att, At: at}, nil
-	case topic == validator.AggregateTopic:
-		agg := new(pb.Aggregate)
-		if err := proto.Unmarshal(data, agg); err != nil {
-			return Received{}, err
-		}
-		return Received{Kind: KindAggregate, Obj: agg, At: at}, nil
-	case strings.HasPrefix(topic, validator.ColumnTopicPrefix):
-		col := new(pb.Column)
-		if err := proto.Unmarshal(data, col); err != nil {
-			return Received{}, err
-		}
-		return Received{Kind: KindColumn, Obj: col, At: at}, nil
-	case topic == validator.SyncContributionTopic: // before the message prefix (shared stem)
-		sc := new(pb.SyncContribution)
-		if err := proto.Unmarshal(data, sc); err != nil {
-			return Received{}, err
-		}
-		return Received{Kind: KindSyncContribution, Obj: sc, At: at}, nil
-	case strings.HasPrefix(topic, validator.SyncMessageTopicPrefix):
-		sm := new(pb.SyncMessage)
-		if err := proto.Unmarshal(data, sm); err != nil {
-			return Received{}, err
-		}
-		return Received{Kind: KindSyncMessage, Obj: sm, At: at}, nil
-	case topic == validator.AvailabilityVoteTopic:
-		v := new(pb.ACVote)
-		if err := proto.Unmarshal(data, v); err != nil {
-			return Received{}, err
-		}
-		return Received{Kind: KindACVote, Obj: v, At: at}, nil
-	case topic == validator.FinalityAggregateTopic: // before the vote prefix (distinct stems, but explicit)
-		fa := new(pb.FinalityAggregate)
-		if err := proto.Unmarshal(data, fa); err != nil {
-			return Received{}, err
-		}
-		return Received{Kind: KindFinalityAggregate, Obj: fa, At: at}, nil
-	case strings.HasPrefix(topic, validator.FinalityVoteTopicPrefix):
-		fv := new(pb.FinalityVote)
-		if err := proto.Unmarshal(data, fv); err != nil {
-			return Received{}, err
-		}
-		return Received{Kind: KindFinalityVote, Obj: fv, At: at}, nil
-	default:
+// Decode resolves topic to its registry entry, unmarshals the payload, and hands back a
+// Received tagged with the kind, identity, and publishing node.
+func Decode(topic string, data []byte, at time.Time) (Received, error) {
+	d := descriptorFor(topic)
+	if d == nil {
 		return Received{}, fmt.Errorf("unknown topic %q", topic)
 	}
+	obj, id, origin, err := d.decode(data)
+	if err != nil {
+		return Received{}, err
+	}
+	return Received{Kind: d.kind, Obj: obj, ID: id, Origin: origin, At: at}, nil
 }
