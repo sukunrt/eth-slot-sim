@@ -441,3 +441,192 @@ def test_load_column_subscribers(tmp_path):
 def test_load_column_subscribers_none_without_columns(tmp_path):
     (tmp_path / "schedule.json").write_text('{"subnet_subscribers": [], "slots": []}')
     assert ca.load_column_subscribers(tmp_path) is None
+
+
+# --- sync messages (kind=5, per-subnet, the member in the attester field) -------
+#
+# Each member publishes ONE message on its subnet (member in the attester field, origin -1, like
+# an aggregate). It must reach exactly subscribers(subnet) \ {member} — missing/leaked/duplicate
+# all fail. The publish carries the head vote (fraction_voted_head, the sync analogue of
+# fraction_voted_block).
+
+
+def _spub(slot, subnet, member, t_ms, voted):
+    return (
+        f'{{"msg":"publish","kind":5,"slot":{slot},"subnet":{subnet},"attester":{member},'
+        f'"origin":-1,"voted_block":{"true" if voted else "false"},"t_ns":{t_ms * MS}}}'
+    )
+
+
+def _sarr(node, slot, subnet, member, t_ms):
+    return (
+        f'{{"msg":"arrival","node":{node},"kind":5,"slot":{slot},"subnet":{subnet},'
+        f'"attester":{member},"origin":-1,"t_ns":{t_ms * MS}}}'
+    )
+
+
+def test_sync_message_full_coverage_ok():
+    # subnet 0 members {1,2,3}; member 1 publishes, reaches {2,3}.
+    subs = {0: {1, 2, 3}}
+    lines = [_spub(0, 0, 1, 0, True), _sarr(2, 0, 0, 1, 200), _sarr(3, 0, 0, 1, 250)]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_sync_messages(pubs, arrs, subs)
+    assert res.expected == 2 and res.arrivals == 2
+    assert res.missing == [] and res.leaked == [] and res.duplicates == []
+    assert res.ok and res.fraction_voted_head == 1.0
+
+
+def test_sync_message_detects_missing():
+    subs = {0: {1, 2, 3}}
+    lines = [_spub(0, 0, 1, 0, True), _sarr(2, 0, 0, 1, 200)]  # member 3 missing
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_sync_messages(pubs, arrs, subs)
+    assert res.missing == [(3, 0, 0, 1)]
+    assert not res.ok
+
+
+def test_sync_message_detects_leak():
+    # node 9 is not a member of subnet 0 — receiving the message is a leak.
+    subs = {0: {1, 2, 3}}
+    lines = [_spub(0, 0, 1, 0, True), _sarr(2, 0, 0, 1, 200), _sarr(3, 0, 0, 1, 200), _sarr(9, 0, 0, 1, 200)]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_sync_messages(pubs, arrs, subs)
+    assert res.leaked == [(9, 0, 0, 1)]
+    assert not res.ok
+
+
+def test_sync_message_fraction_voted_head():
+    subs = {0: set()}  # publish-side fraction only
+    lines = [_spub(0, 0, 1, 0, True), _spub(0, 0, 2, 0, True), _spub(0, 0, 3, 0, False)]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_sync_messages(pubs, arrs, subs)
+    assert res.published == 3
+    assert abs(res.fraction_voted_head - 2 / 3) < 1e-9
+
+
+def _sync_committee(sync_subscribers, slots=1):
+    return {
+        "params": {"n": 4},
+        "subnet_subscribers": [],
+        "sync_subscribers": sync_subscribers,
+        "slots": [{"slot": s, "committees": [], "subnet_of": []} for s in range(slots)],
+    }
+
+
+def test_analyze_sync_messages_csv_coverage_ok(tmp_path):
+    data = _sync_committee([[1, 2, 3]])  # subnet 0 members {1,2,3}
+    csv_path = tmp_path / "simnet_arrivals.csv"
+    rows = ["node,slot,kind,subnet,attester,delay_ms,voted_block"]
+    for member in (1, 2, 3):  # each member's message reaches the other two
+        for node in sorted({1, 2, 3} - {member}):
+            rows.append(f"{node},0,5,0,{member},40,true")
+    csv_path.write_text("\n".join(rows) + "\n")
+    res = ca.analyze_sync_messages_csv(csv_path, data)
+    assert res.expected == 6 and res.arrivals == 6  # 3 members × 2
+    assert res.missing == [] and res.leaked == [] and res.duplicates == []
+    assert res.ok and res.fraction_voted_head == 1.0
+
+
+def test_analyze_sync_messages_csv_detects_missing_and_leak(tmp_path):
+    data = _sync_committee([[1, 2, 3]])
+    csv_path = tmp_path / "a.csv"
+    csv_path.write_text(
+        "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
+        "2,0,5,0,1,40,true\n"  # member 1's message reaches only 2 (member 3 missing)
+        "9,0,5,0,1,40,true\n"  # node 9 not a member -> leak
+    )
+    res = ca.analyze_sync_messages_csv(csv_path, data)
+    assert (3, 0, 0, 1) in res.missing  # member 1 -> 3 missing
+    assert res.leaked == [(9, 0, 0, 1)]
+    assert not res.ok
+
+
+# --- sync contributions (kind=6, global topic, distinct per aggregator) ---------
+#
+# Each aggregator publishes ONE distinct contribution (the aggregator in the attester field). It
+# must reach every node EXCEPT that aggregator, exactly once. sync_aggregators is indexed by
+# subnet directly. Expected = Σ_subnet |A|·(N − 1) — the same shape as aggregates.
+
+
+def _scarr(node, slot, subnet, aggregator, t_ms):
+    return (
+        f'{{"msg":"arrival","node":{node},"kind":6,"slot":{slot},"subnet":{subnet},'
+        f'"attester":{aggregator},"origin":-1,"t_ns":{t_ms * MS}}}'
+    )
+
+
+def _scpub(slot, subnet, aggregator, t_ms):
+    return (
+        f'{{"msg":"publish","kind":6,"slot":{slot},"subnet":{subnet},"attester":{aggregator},'
+        f'"origin":-1,"voted_block":false,"t_ns":{t_ms * MS}}}'
+    )
+
+
+def _sync_committee_agg(n, sync_aggregators):
+    return {
+        "params": {"n": n},
+        "subnet_subscribers": [],
+        "sync_subscribers": [[] for _ in sync_aggregators],
+        "slots": [{"slot": 0, "committees": [], "subnet_of": [], "sync_aggregators": sync_aggregators}],
+    }
+
+
+def test_sync_contribution_full_coverage_ok():
+    # subnet 0 aggregators {0,1}, N=4. Each contribution reaches every node but its aggregator.
+    data = _sync_committee_agg(4, [[0, 1]])
+    lines = [_scpub(0, 0, 0, 800), _scpub(0, 0, 1, 800)] + [
+        _scarr(node, 0, 0, agg, 900) for agg in (0, 1) for node in set(range(4)) - {agg}
+    ]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_sync_contributions(pubs, arrs, data)
+    assert res.expected == 6 and res.arrivals == 6 and res.published == 2
+    assert res.ok
+
+
+def test_sync_contribution_two_subnets():
+    # subnet 0 aggregators {0,1}, subnet 1 aggregators {3,4}, N=6 ⇒ 4·(6−1)=20, published 4.
+    data = _sync_committee_agg(6, [[0, 1], [3, 4]])
+    lines = [
+        _scarr(node, 0, sub, agg, 900)
+        for sub, aggs in enumerate([[0, 1], [3, 4]])
+        for agg in aggs
+        for node in set(range(6)) - {agg}
+    ]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_sync_contributions(pubs, arrs, data)
+    assert res.expected == 20 and res.arrivals == 20 and res.published == 4
+    assert res.ok
+
+
+def test_sync_contribution_detects_leak_at_own_aggregator():
+    data = _sync_committee_agg(4, [[0]])  # aggregator 0; reaches {1,2,3}
+    lines = [_scarr(1, 0, 0, 0, 900), _scarr(2, 0, 0, 0, 900), _scarr(3, 0, 0, 0, 950), _scarr(0, 0, 0, 0, 860)]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_sync_contributions(pubs, arrs, data)
+    assert res.leaked == [(0, 0, 0, 0)]  # node 0 recorded its own contribution (loopback not skipped)
+    assert not res.ok
+
+
+def test_analyze_sync_contributions_csv_coverage_ok(tmp_path):
+    data = _sync_committee_agg(4, [[0, 1]])
+    csv_path = tmp_path / "simnet_arrivals.csv"
+    rows = ["node,slot,kind,subnet,attester,delay_ms,voted_block"]
+    for agg in (0, 1):
+        for node in sorted(set(range(4)) - {agg}):
+            rows.append(f"{node},0,6,0,{agg},90,false")
+    csv_path.write_text("\n".join(rows) + "\n")
+    res = ca.analyze_sync_contributions_csv(csv_path, data)
+    assert res.expected == 6 and res.arrivals == 6 and res.ok
+
+
+def test_load_sync_subscribers(tmp_path):
+    (tmp_path / "schedule.json").write_text(
+        '{"subnet_subscribers": [], "sync_subscribers": [[0,2],[1,3]], '
+        '"slots": [{"slot":0,"committees":[],"subnet_of":[]}]}'
+    )
+    assert ca.load_sync_subscribers(tmp_path) == {0: {0, 2}, 1: {1, 3}}
+
+
+def test_load_sync_subscribers_none_without_sync(tmp_path):
+    (tmp_path / "schedule.json").write_text('{"subnet_subscribers": [], "slots": []}')
+    assert ca.load_sync_subscribers(tmp_path) is None

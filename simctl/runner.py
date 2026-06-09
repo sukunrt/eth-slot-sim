@@ -456,6 +456,28 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
             "simnet": _col_summary(simnet_col),
         }
 
+    # Sync-committee phase: per-subnet message coverage/no-leak + fraction-voted-head, and the
+    # global contribution coverage. Independent of the attestation/column phases above.
+    sync_on = config.sync is not None and config.sync.enabled
+    if sync_on:
+        schedule_data = json.loads((run_dir / "schedule.json").read_text())
+        sync_subs = {i: set(m) for i, m in enumerate(schedule_data["sync_subscribers"])}
+        shadow_sm = check_arrivals.analyze_sync_messages(pubs, arrs, sync_subs)
+        simnet_sm = check_arrivals.analyze_sync_messages_csv(csv_path, schedule_data)
+        comparison["sync_messages"] = {
+            "expected": shadow_sm.expected,
+            "shadow": _sync_msg_summary(shadow_sm),
+            "simnet": _sync_msg_summary(simnet_sm),
+        }
+        if schedule_data["slots"] and schedule_data["slots"][0].get("sync_aggregators"):
+            shadow_sc = check_arrivals.analyze_sync_contributions(pubs, arrs, schedule_data)
+            simnet_sc = check_arrivals.analyze_sync_contributions_csv(csv_path, schedule_data)
+            comparison["sync_contributions"] = {  # AggregateResult shape; reuse _agg_summary
+                "expected": shadow_sc.expected,
+                "shadow": _agg_summary(shadow_sc),
+                "simnet": _agg_summary(simnet_sc),
+            }
+
     # Proposer guard: every scheduled proposer is a supernode, and every Shadow block was
     # published by its slot's proposer. Both backends read this one schedule.json, so a
     # failure means the schedule or the two generated files disagree.
@@ -508,5 +530,19 @@ def _att_summary(res: check_arrivals.AttestResult) -> dict[str, Any]:
         "leaked": len(res.leaked),
         "duplicates": len(res.duplicates),
         "fraction_voted_block": res.fraction_voted_block,
+        "cdf_ms": check_arrivals.cdf(res.delays_ms),
+    }
+
+
+def _sync_msg_summary(res: check_arrivals.SyncMessageResult) -> dict[str, Any]:
+    """One backend's sync-message result as a compare.json sub-dict (with fraction_voted_head,
+    the un-gated head vote that sits next to the attestation's column-gated fraction_voted_block)."""
+    return {
+        "arrivals": res.arrivals,
+        "expected": res.expected,
+        "missing": len(res.missing),
+        "leaked": len(res.leaked),
+        "duplicates": len(res.duplicates),
+        "fraction_voted_head": res.fraction_voted_head,
         "cdf_ms": check_arrivals.cdf(res.delays_ms),
     }
