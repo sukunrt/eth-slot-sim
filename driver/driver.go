@@ -47,6 +47,7 @@ type Config struct {
 	// applies (so block dissemination is measured on the same network, sans attestations).
 	Schedule         *schedule.Assignment
 	Attest            bool          // emit attestations (requires Schedule)
+	Sync              bool          // emit sync-committee messages + contributions (requires Schedule)
 	AttestationDue    time.Duration // emit deadline as an offset into the slot
 	Prep              time.Duration // Δ_prep before emitting on block receipt
 	AttestVerifyDelay func() time.Duration
@@ -113,7 +114,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 				nd.ColVerifyParallelism = cfg.ColVerifyParallelismReg
 			}
 		}
-		r := NewRunner(i, nd, val, cfg.Schedule, cfg.Attest, tracer, cfg.SlotDuration, cfg.AttestationDue,
+		r := NewRunner(i, nd, val, cfg.Schedule, cfg.Attest, cfg.Sync, tracer, cfg.SlotDuration, cfg.AttestationDue,
 			cfg.AggregateDue, cfg.Prep, cfg.Seed, nw.Peers(i))
 		r.Attach()
 		d.nodes[i] = nd

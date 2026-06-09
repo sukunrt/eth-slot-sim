@@ -154,25 +154,38 @@ func (r *Recorder) Orphans() int {
 	return r.orphans
 }
 
-// FractionVotedBlock is the headline metric: over a slot's published attestations, the
+// FractionVotedBlock is the headline attestation metric: over a slot's published attestations, the
 // fraction that voted for the block (vs. the prior head). 0 if none were published.
 func (r *Recorder) FractionVotedBlock(slot int) float64 {
+	return r.fractionVoted(slot, node.KindAttestation)
+}
+
+// FractionVotedHead is the sync analogue: over a slot's published sync messages, the fraction that
+// voted the head block. Reported next to FractionVotedBlock — sync is un-gated by data
+// availability, so their difference isolates the column gate's effect on the head vote.
+func (r *Recorder) FractionVotedHead(slot int) float64 {
+	return r.fractionVoted(slot, node.KindSyncMessage)
+}
+
+// fractionVoted is the shared core of FractionVotedBlock/FractionVotedHead: over a slot's published
+// messages of the given kind, the fraction whose publish recorded a (block/head) vote. 0 if none.
+func (r *Recorder) fractionVoted(slot int, kind node.Kind) float64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var total, block int
+	var total, voted int
 	for id, p := range r.pub {
-		if id.Kind != node.KindAttestation || id.Slot != slot {
+		if id.Kind != kind || id.Slot != slot {
 			continue
 		}
 		total++
 		if p.votedBlock {
-			block++
+			voted++
 		}
 	}
 	if total == 0 {
 		return 0
 	}
-	return float64(block) / float64(total)
+	return float64(voted) / float64(total)
 }
 
 // CustodyCompleteRate is the gate's companion to FractionVotedBlock: over a slot's custodiers,

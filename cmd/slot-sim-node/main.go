@@ -131,7 +131,7 @@ func main() {
 		nd.RPCLogger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	peers := parseIntList(*peerNumsStr)
-	runner := driver.NewRunner(*nodeNum, nd, val, sched, *attestations, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers)
+	runner := driver.NewRunner(*nodeNum, nd, val, sched, *attestations, false, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers)
 	runner.Attach() // sets nd.OnReceive before JoinTopics
 
 	ctx := context.Background()

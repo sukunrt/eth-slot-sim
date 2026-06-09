@@ -24,6 +24,7 @@ type NodeRunner struct {
 	val     *validator.Validator
 	sched    *schedule.Assignment // nil ⇒ block-only (Phase 1)
 	attest  bool                  // emit attestations (with sched set but false ⇒ columns-only)
+	sync    bool                  // emit sync-committee messages + contributions (members only)
 	tracer  metrics.Tracer
 	slotDur time.Duration
 	due     time.Duration // attestation deadline, offset into the slot
@@ -49,6 +50,12 @@ type slotState struct {
 	seenAt     time.Time
 	seenOrigin int
 
+	// Sync-committee membership this slot (set at beginSlot from view.SyncSubnet). A member
+	// emits one message on syncSubnet at min(block_seen, deadline); a non-member emits none.
+	syncSubnet   int
+	syncMember   bool
+	syncEmitOnce sync.Once
+
 	// Column custody gate (active when custody is non-empty). columnsComplete starts true
 	// when there's nothing to wait for (columns off ⇒ empty custody), so the gate is a no-op.
 	custody           []int        // this node's custody columns this slot
@@ -63,16 +70,18 @@ type slotState struct {
 
 // NewRunner builds a runner for one node. sched may be nil (block-only). attest gates
 // attestation emission: sched set with attest false is a columns-only run (disseminate +
-// measure columns, no vote). aggDue 0 disables the aggregate phase. basePeers is the node's
-// long-lived peer set (so per-slot subnet dials it adds on top can be dropped).
-func NewRunner(num int, nd *node.Node, val *validator.Validator, sched *schedule.Assignment, attest bool,
+// measure columns, no vote). sync gates sync-committee emission (messages + contributions), for
+// member nodes only; it arms the shared deadline timer alongside attest. aggDue 0 disables the
+// aggregate phase. basePeers is the node's long-lived peer set (so per-slot subnet dials it adds
+// on top can be dropped).
+func NewRunner(num int, nd *node.Node, val *validator.Validator, sched *schedule.Assignment, attest, sync bool,
 	tracer metrics.Tracer, slotDur, due, aggDue, prep time.Duration, seed uint64, basePeers []int) *NodeRunner {
 	base := make(map[int]bool, len(basePeers))
 	for _, p := range basePeers {
 		base[p] = true
 	}
 	return &NodeRunner{
-		num: num, nd: nd, val: val, sched: sched, attest: attest, tracer: tracer,
+		num: num, nd: nd, val: val, sched: sched, attest: attest, sync: sync, tracer: tracer,
 		slotDur: slotDur, due: due, aggDue: aggDue, prep: prep, seed: seed, base: base,
 		slots: make(map[int]*slotState),
 	}
@@ -106,6 +115,18 @@ func (r *NodeRunner) Prepare() {
 			}
 		}
 	}
+	if r.sync {
+		// Every node downloads all contributions (the global topic, like aggregates); a member
+		// also meshes its one sync subnet (no backbone, no per-slot dial — see sync-committee-spec).
+		if err := r.nd.Subscribe(validator.SyncContributionTopic); err != nil {
+			slog.Error("subscribe sync contribution topic failed", "node", r.num, "err", err)
+		}
+		if subnet, member := r.sched.Node(r.num).SyncSubnet(); member {
+			if err := r.nd.Subscribe(validator.SyncMessageTopic(subnet)); err != nil {
+				slog.Error("subscribe sync subnet failed", "node", r.num, "subnet", subnet, "err", err)
+			}
+		}
+	}
 }
 
 // Run executes numSlots slots from runStart: per slot publish block duties, dial this
@@ -120,51 +141,60 @@ func (r *NodeRunner) Run(ctx context.Context, runStart time.Time, numSlots int) 
 	}
 }
 
-// beginSlot dials 2 subscribers of each subnet this node attests but doesn't subscribe
-// (so a fan-out publish has somewhere to land), arms the deadline timer, then publishes
-// the block — all before the block publish, so a proposer that also attests can self-vote.
+// beginSlot sets up this slot's coupling state when the node attests and/or syncs: it dials 2
+// subscribers of each attest-duty subnet it doesn't subscribe (so a fan-out publish has somewhere
+// to land), records sync membership, and arms the shared deadline timer — all before the block
+// publish, so a proposer that also votes can self-vote. The block publish itself runs unconditionally.
 func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 	var ss *slotState
-	if r.sched != nil && r.attest {
+	if r.sched != nil && (r.attest || r.sync) {
 		view := r.sched.Node(r.num)
-		ss = &slotState{deadline: slotStart.Add(r.due), duties: view.AttestDuties(slot)}
-		if r.sched.NumColumns > 0 {
-			ss.custody = view.CustodyColumns()
+		ss = &slotState{deadline: slotStart.Add(r.due)}
+		if r.attest {
+			ss.duties = view.AttestDuties(slot)
+			if r.sched.NumColumns > 0 {
+				ss.custody = view.CustodyColumns()
+			}
+
+			subscribed := map[int]bool{}
+			for _, s := range view.SubscribedSubnets() {
+				subscribed[s] = true
+			}
+			needDial := map[int]bool{}
+			for _, d := range ss.duties {
+				if !subscribed[d.Subnet] {
+					needDial[d.Subnet] = true
+				}
+			}
+			picked := map[int]bool{}
+			for subnet := range needDial {
+				if err := r.nd.Join(validator.AttestationTopic(subnet)); err != nil {
+					slog.Error("join duty subnet failed", "node", r.num, "subnet", subnet, "err", err)
+				}
+				n := 0
+				for _, peer := range r.shuffledSubscribers(slot, subnet) {
+					if n >= 2 {
+						break
+					}
+					if peer == r.num || r.base[peer] || picked[peer] {
+						continue
+					}
+					picked[peer] = true
+					ss.dialed = append(ss.dialed, peer)
+					n++
+				}
+			}
+			r.nd.Dial(ss.dialed) // synchronous: connections are up before the slot proceeds
 		}
-		ss.columnsComplete = len(ss.custody) == 0 // nothing to gate on ⇒ trivially complete
+		// The column gate only blocks the attestation vote; with no custody (columns off, or a
+		// sync-only run that doesn't attest) it's trivially complete.
+		ss.columnsComplete = len(ss.custody) == 0
 		if !ss.columnsComplete {
 			ss.haveColumn = make(map[int]bool, len(ss.custody))
 		}
-
-		subscribed := map[int]bool{}
-		for _, s := range view.SubscribedSubnets() {
-			subscribed[s] = true
+		if r.sync { // this node's stable sync membership (a member emits one message on its subnet)
+			ss.syncSubnet, ss.syncMember = view.SyncSubnet()
 		}
-		needDial := map[int]bool{}
-		for _, d := range ss.duties {
-			if !subscribed[d.Subnet] {
-				needDial[d.Subnet] = true
-			}
-		}
-		picked := map[int]bool{}
-		for subnet := range needDial {
-			if err := r.nd.Join(validator.AttestationTopic(subnet)); err != nil {
-				slog.Error("join duty subnet failed", "node", r.num, "subnet", subnet, "err", err)
-			}
-			n := 0
-			for _, peer := range r.shuffledSubscribers(slot, subnet) {
-				if n >= 2 {
-					break
-				}
-				if peer == r.num || r.base[peer] || picked[peer] {
-					continue
-				}
-				picked[peer] = true
-				ss.dialed = append(ss.dialed, peer)
-				n++
-			}
-		}
-		r.nd.Dial(ss.dialed) // synchronous: connections are up before the slot proceeds
 
 		r.mu.Lock()
 		r.slots[slot] = ss
@@ -173,7 +203,7 @@ func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 
 		// Aggregate phase: if this node aggregates any committee this slot, arm a timer to
 		// publish its M aggregates at the aggregate deadline (fixed offset, no coupling).
-		if r.aggDue > 0 {
+		if r.attest && r.aggDue > 0 {
 			ss.aggSubnets = view.AggregateSubnets(slot)
 			if len(ss.aggSubnets) > 0 {
 				ss.aggTimer = time.AfterFunc(time.Until(slotStart.Add(r.aggDue)), func() {
@@ -304,6 +334,7 @@ func (r *NodeRunner) onBlockProcessed(slot, origin int, at time.Time) {
 	}
 	r.mu.Unlock()
 	r.tryEarlyEmit(slot, ss)
+	r.trySyncEmit(slot, ss) // sync votes head on block-seen alone (no column gate)
 }
 
 // onColumnProcessed records a custody column's arrival (post-verify, so consistent with
@@ -347,6 +378,9 @@ func (r *NodeRunner) markColumnsComplete(slot int, at time.Time) {
 // readiness and the later of the two times; emitOnce collapses the racing block/column/
 // deadline attempts into one emission.
 func (r *NodeRunner) tryEarlyEmit(slot int, ss *slotState) {
+	if !r.attest { // a sync-only run has a slotState but no attestation vote
+		return
+	}
 	r.mu.Lock()
 	ready := ss.seen && ss.columnsComplete
 	processed := laterOf(ss.seenAt, ss.columnsCompleteAt)
@@ -364,6 +398,31 @@ func (r *NodeRunner) tryEarlyEmit(slot int, ss *slotState) {
 	}
 }
 
+// trySyncEmit attempts this member's sync-committee message — the head vote, emitted at
+// min(block_processed+Δ_prep, deadline) and only if that lands by the deadline (else the deadline
+// timer votes prior head). Unlike the attestation vote it is UN-GATED by data availability: it
+// feeds emitDecision the raw block-seen state, not the column-gated readiness — so a node with the
+// block but a missing custody column votes head on sync yet prior on its attestation, isolating the
+// DA gate's effect. A no-op for a non-member or when sync is off; syncEmitOnce collapses the racing
+// block/deadline attempts into one emission.
+func (r *NodeRunner) trySyncEmit(slot int, ss *slotState) {
+	if !r.sync || !ss.syncMember {
+		return
+	}
+	r.mu.Lock()
+	seen, seenAt, origin, deadline := ss.seen, ss.seenAt, ss.seenOrigin, ss.deadline
+	r.mu.Unlock()
+	emitAt, voteHead := emitDecision(seen, seenAt, deadline, r.prep)
+	if !voteHead {
+		return
+	}
+	if d := time.Until(emitAt); d > 0 { // honor Δ_prep before emitting
+		time.AfterFunc(d, func() { r.emitSyncMessage(slot, ss, origin) })
+	} else {
+		r.emitSyncMessage(slot, ss, origin)
+	}
+}
+
 // onDeadline emits this slot's attestations if not already emitted, re-deriving the vote from
 // block-seen + custody-complete state (so a block/column recorded exactly at the deadline
 // still votes block); otherwise it votes prior head — a node with the block but a missing
@@ -372,14 +431,24 @@ func (r *NodeRunner) onDeadline(slot int, ss *slotState) {
 	r.mu.Lock()
 	ready := ss.seen && ss.columnsComplete
 	processed := laterOf(ss.seenAt, ss.columnsCompleteAt)
-	origin := ss.seenOrigin
+	origin, seen, seenAt := ss.seenOrigin, ss.seen, ss.seenAt
 	r.mu.Unlock()
-	_, voteBlock := emitDecision(ready, processed, ss.deadline, r.prep)
-	votedOrigin := -1
-	if voteBlock {
-		votedOrigin = origin
+	if r.attest {
+		_, voteBlock := emitDecision(ready, processed, ss.deadline, r.prep)
+		votedOrigin := -1
+		if voteBlock {
+			votedOrigin = origin
+		}
+		r.emit(slot, ss, votedOrigin)
 	}
-	r.emit(slot, ss, votedOrigin)
+	if r.sync && ss.syncMember { // sync votes head on block-seen alone (un-gated by columns)
+		_, voteHead := emitDecision(seen, seenAt, ss.deadline, r.prep)
+		votedOrigin := -1
+		if voteHead {
+			votedOrigin = origin
+		}
+		r.emitSyncMessage(slot, ss, votedOrigin)
+	}
 }
 
 // laterOf returns the later of two times (the gate emits at max(block, columns_complete)).
@@ -407,6 +476,29 @@ func (r *NodeRunner) emit(slot int, ss *slotState, votedOrigin int) {
 			if err := r.nd.Publish(r.runCtx, topic, msg.Payload); err != nil {
 				slog.Error("publish attestation failed", "node", r.num, "slot", slot, "subnet", d.Subnet, "err", err)
 			}
+		}
+	})
+}
+
+// emitSyncMessage publishes this member's one sync-committee message on its subnet, at most once
+// per slot (the sync-emit-once guard collapses the racing block-receipt and deadline attempts).
+// votedOrigin is the voted block's origin (>=0) or -1 for the prior head. A no-op for a non-member.
+func (r *NodeRunner) emitSyncMessage(slot int, ss *slotState, votedOrigin int) {
+	if !ss.syncMember {
+		return
+	}
+	ss.syncEmitOnce.Do(func() {
+		at := time.Now()
+		voteHead := votedOrigin >= 0
+		topic := validator.SyncMessageTopic(ss.syncSubnet)
+		if err := r.nd.Join(topic); err != nil { // already subscribed at bring-up; idempotent
+			slog.Error("join sync subnet failed", "node", r.num, "subnet", ss.syncSubnet, "err", err)
+			return
+		}
+		msg := validator.MakeSyncMessage(slot, ss.syncSubnet, r.num, votedOrigin)
+		r.tracer.OnPublish(metrics.SyncMessageID(slot, ss.syncSubnet, r.num), voteHead, at)
+		if err := r.nd.Publish(r.runCtx, topic, msg.Payload); err != nil {
+			slog.Error("publish sync message failed", "node", r.num, "slot", slot, "subnet", ss.syncSubnet, "err", err)
 		}
 	})
 }

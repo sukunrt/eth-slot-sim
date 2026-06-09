@@ -60,7 +60,7 @@ func buildScenario(t *testing.T, a *schedule.Assignment, due time.Duration, supp
 				nd.ColVerifyParallelism = 16
 			}
 		}
-		r := driver.NewRunner(i, nd, val, a, true, tracer, slotDur, due, 0, 0, 1, nw.Peers(i))
+		r := driver.NewRunner(i, nd, val, a, true, a.SyncSubscribers != nil, tracer, slotDur, due, 0, 0, 1, nw.Peers(i))
 		r.Attach()
 		if suppressBlock[i] {
 			orig := nd.OnReceive
