@@ -53,6 +53,18 @@ type NodeRunner struct {
 	runCtx context.Context // set at Run; used by emit/publish
 	mu     sync.Mutex
 	slots  map[int]*slotState
+	finals map[int]*finalityState // finality-slot-keyed state (decoupled; spans k AC slots)
+}
+
+// finalityState is the per-(node, finality-slot) state. Unlike slotState (per AC slot), it spans k
+// AC slots — armed at a finality boundary, drained by its one-shot vote timer (and, M5, its
+// aggregate timer), and reaped at the finality slot's last AC slot. It is keyed in r.finals by the
+// finality slot index, so the per-AC-slot endSlot pruning of r.slots leaves it untouched.
+type finalityState struct {
+	subnet    int         // this node's stable finality subnet
+	duties    []int       // validators this node hosts (one FinalityVote each)
+	voteTimer *time.Timer // fires at finalitySlotStart(n) + fcVoteOffset
+	voteOnce  sync.Once   // one FC vote burst per finality slot
 }
 
 // slotState is the per-(node, slot) coupling holder.
@@ -113,6 +125,7 @@ func NewRunner(num int, nd *node.Node, val *validator.Validator, sched *schedule
 	if dc != nil {
 		r.decoupled = true
 		r.k, r.fcVoteOffset, r.fcAggFraction = dc.K, dc.FCVoteOffset, dc.FCAggFraction
+		r.finals = make(map[int]*finalityState)
 	}
 	return r
 }
@@ -273,6 +286,12 @@ func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 				})
 			}
 		}
+		// Finality chain: at a finality boundary, arm this node's fixed-time per-validator vote burst
+		// (its aggregate timer + pre-join, if an aggregator, land in M5). FC state lives in r.finals,
+		// not ss, so it survives the intervening per-AC-slot endSlot pruning.
+		if r.decoupled {
+			r.armFinalityVote(slot, slotStart, view)
+		}
 	}
 	for _, duty := range r.val.Duties(slot) {
 		go r.publishBlock(slotStart.Add(duty.At), duty.Msg)
@@ -307,6 +326,71 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 	r.nd.Disconnect(ss.dialed)
 	r.mu.Lock()
 	delete(r.slots, slot)
+	r.mu.Unlock()
+	if r.decoupled {
+		r.reapFinality(slot)
+	}
+}
+
+// armFinalityVote, at a finality boundary (slot % k == 0), arms this node's fixed-time per-validator
+// finality-vote burst for finality slot n = slot/k. The boundary slot's slotStart IS
+// finalitySlotStart(n), so the vote fires at slotStart + fcVoteOffset. The state is created
+// get-or-create (M5's aggregator pre-join may have created it a slot earlier) and stored in r.finals.
+func (r *NodeRunner) armFinalityVote(slot int, slotStart time.Time, view schedule.View) {
+	if slot%r.k != 0 {
+		return
+	}
+	n := slot / r.k
+	subnet, member := view.FinalitySubnet()
+	if !member { // every node is a member, but guard a phase-off / partial assignment
+		return
+	}
+	r.mu.Lock()
+	fs := r.finals[n]
+	if fs == nil {
+		fs = &finalityState{subnet: subnet}
+		r.finals[n] = fs
+	}
+	fs.duties = view.FinalityVoteDuties()
+	r.mu.Unlock()
+	fs.voteTimer = time.AfterFunc(time.Until(slotStart.Add(r.fcVoteOffset)), func() {
+		r.emitFinalityVotes(n, fs)
+	})
+}
+
+// emitFinalityVotes publishes one finality vote per validator this node hosts, on its subnet, at
+// most once per finality slot. The vote is fixed-time and dissemination-only this cut (un-gated, no
+// fork-choice outcome), so OnPublish records no vote. The subnet is already subscribed in Prepare.
+func (r *NodeRunner) emitFinalityVotes(n int, fs *finalityState) {
+	fs.voteOnce.Do(func() {
+		at := time.Now()
+		topic := validator.FinalityVoteTopic(fs.subnet)
+		for _, val := range fs.duties {
+			msg := validator.MakeFinalityVote(n, fs.subnet, val, r.num)
+			r.tracer.OnPublish(metrics.FinalityVoteID(n, fs.subnet, val, r.num), false, at)
+			if err := r.nd.Publish(r.runCtx, topic, msg.Payload); err != nil {
+				slog.Error("publish finality vote failed", "node", r.num, "finality_slot", n, "val", val, "err", err)
+			}
+		}
+	})
+}
+
+// reapFinality prunes finality state at the finality slot's last AC slot ((n+1)*k − 1, i.e. slot
+// where (slot+1)%k == 0). By then the vote timer has long fired (fcVoteOffset ≪ k slots), so the
+// stop is defensive. This is the only place r.finals is pruned — it deliberately outlives the
+// per-AC-slot endSlot pruning of r.slots that runs every intervening slot.
+func (r *NodeRunner) reapFinality(slot int) {
+	if (slot+1)%r.k != 0 {
+		return
+	}
+	n := slot / r.k
+	r.mu.Lock()
+	if fs := r.finals[n]; fs != nil {
+		if fs.voteTimer != nil {
+			fs.voteTimer.Stop()
+		}
+		delete(r.finals, n)
+	}
 	r.mu.Unlock()
 }
 
@@ -386,6 +470,13 @@ func (r *NodeRunner) onReceive(rec node.Received) {
 			return
 		}
 		r.tracer.OnReceive(r.num, metrics.ACVoteID(int(v.Slot), int(v.Val), int(v.Origin)), rec.At)
+	case node.KindFinalityVote:
+		fv := rec.Obj.(*pb.FinalityVote)
+		if int(fv.Origin) == r.num { // skip our own published finality vote (loopback)
+			return
+		}
+		r.tracer.OnReceive(r.num,
+			metrics.FinalityVoteID(int(fv.FinalitySlot), int(fv.Subnet), int(fv.Val), int(fv.Origin)), rec.At)
 	}
 }
 
