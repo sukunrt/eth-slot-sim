@@ -66,6 +66,12 @@ type slotState struct {
 	aggSubnets  []int // subnets this node aggregates this slot (publishes M aggregates on each)
 	aggTimer    *time.Timer
 	aggEmitOnce sync.Once
+
+	// Sync contribution phase (fixed deadline, no coupling). syncAggSubnets = the sync subnets
+	// this node aggregates this slot; it publishes one contribution on each (global topic).
+	syncAggSubnets  []int
+	syncAggTimer    *time.Timer
+	syncAggEmitOnce sync.Once
 }
 
 // NewRunner builds a runner for one node. sched may be nil (block-only). attest gates
@@ -211,6 +217,16 @@ func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 				})
 			}
 		}
+		// Sync contribution phase: if this node aggregates any sync subnet this slot, arm a timer
+		// to publish its contributions at the contribution deadline (reuses aggDue; fixed offset).
+		if r.sync && r.aggDue > 0 {
+			ss.syncAggSubnets = view.SyncAggregateSubnets(slot)
+			if len(ss.syncAggSubnets) > 0 {
+				ss.syncAggTimer = time.AfterFunc(time.Until(slotStart.Add(r.aggDue)), func() {
+					r.emitSyncContribution(slot, ss)
+				})
+			}
+		}
 	}
 	for _, duty := range r.val.Duties(slot) {
 		go r.publishBlock(slotStart.Add(duty.At), duty.Msg)
@@ -238,6 +254,9 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 	ss.timer.Stop()
 	if ss.aggTimer != nil {
 		ss.aggTimer.Stop()
+	}
+	if ss.syncAggTimer != nil {
+		ss.syncAggTimer.Stop()
 	}
 	r.nd.Disconnect(ss.dialed)
 	r.mu.Lock()
@@ -515,6 +534,23 @@ func (r *NodeRunner) emitAggregate(slot int, ss *slotState) {
 			r.tracer.OnPublish(metrics.AggregateID(slot, subnet, r.num), false, at)
 			if err := r.nd.Publish(r.runCtx, msg.Topic, msg.Payload); err != nil {
 				slog.Error("publish aggregate failed", "node", r.num, "slot", slot, "subnet", subnet, "err", err)
+			}
+		}
+	})
+}
+
+// emitSyncContribution publishes one contribution for each sync subnet this node aggregates this
+// slot, on the global contribution topic, at most once per slot — the sync twin of emitAggregate.
+// The contribution carries this node as its origin (the aggregator's signature stand-in), so each
+// aggregator's contribution is distinct and gossipsub does not dedup them.
+func (r *NodeRunner) emitSyncContribution(slot int, ss *slotState) {
+	ss.syncAggEmitOnce.Do(func() {
+		at := time.Now()
+		for _, subnet := range ss.syncAggSubnets {
+			msg := validator.MakeSyncContribution(slot, subnet, r.num)
+			r.tracer.OnPublish(metrics.SyncContributionID(slot, subnet, r.num), false, at)
+			if err := r.nd.Publish(r.runCtx, msg.Topic, msg.Payload); err != nil {
+				slog.Error("publish sync contribution failed", "node", r.num, "slot", slot, "subnet", subnet, "err", err)
 			}
 		}
 	})
