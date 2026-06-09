@@ -1,6 +1,8 @@
 # Improvements
 
-> Status: item 1 (message-type registry) is DONE — `node/registry.go` holds the per-kind
+> Status: item 4 (AGENTS.md) is DONE — architecture map + contracts + conventions;
+> CLAUDE.md symlinks to it.
+> Item 1 (message-type registry) is DONE — `node/registry.go` holds the per-kind
 > table (topic match → decode → identity/origin → verify class); lookup is exact-topic
 > first, then prefix (order-free, init-validated). `metrics/roundtrip_test.go` pins the
 > publish/receive identity join; Kind values 1..9 are pinned for the Python CSV contract.
