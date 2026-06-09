@@ -1,0 +1,44 @@
+# Local verify: 16 nodes, a sync committee of 8 member nodes across 2 subnets, 2 aggregators per
+# subnet. Each member emits one SyncCommitteeMessage on its subnet at min(block_seen,
+# attestation_due); each subnet's aggregators emit one SignedContributionAndProof on the global
+# topic at aggregate_due. Sync rides alongside attestations here (it reuses their deadlines).
+# Verify with `simctl compare` (both backends) or analysis/check_arrivals.py on a `run`.
+topology:
+  num_nodes: 16
+  degree: 8                # K: target peers per node
+  type: random
+  seed: 42
+  super_node_fraction: 0.25
+  latency_multiple: 1.0
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+attestation:
+  validators: 32           # V
+  committees: 1            # C active subnets/slot
+  committee_size: 8        # s_c (C*s_c = 8 <= V)
+  subnet_count: 64
+  subnets_per_node: 1
+  subscribe_floor: 8
+  attestation_due_ms: 4000 # also the sync-message deadline
+  aggregate_due_ms: 8000   # also the sync-contribution deadline
+
+sync:
+  enabled: true
+  size: 8                  # member nodes (8 of 16); a seeded subset
+  subnets: 2               # subcommittees ⇒ 4 members per subnet
+  target_aggregators: 2    # per subnet → contributions
+
+num_slots: 3
+slot_duration_seconds: 12
+block_size: 131072         # 128 KiB
+verify_delay_ms: 10
+offset_ms: 0
+jitter_ms: 2000
+startup_seconds: 60        # must exceed the 30 s mesh-join stagger
+stop_time_minutes: 4
+log_level: info
+seed: 1
