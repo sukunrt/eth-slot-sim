@@ -8,9 +8,9 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
+	"github.com/ethp2p/slot-sim/schedule"
 )
 
 // genColumnAssignment builds a data-column assignment by hand (the way simctl/schedule.py

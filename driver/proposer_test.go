@@ -6,8 +6,8 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/node"
+	"github.com/ethp2p/slot-sim/schedule"
 )
 
 // The block proposer follows schedule.json's per-slot schedule (supernodes in a real run),

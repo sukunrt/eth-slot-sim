@@ -7,10 +7,10 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/netsim"
 	"github.com/ethp2p/slot-sim/node"
 	"github.com/ethp2p/slot-sim/pb"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/validator"
 )
 

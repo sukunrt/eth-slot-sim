@@ -7,9 +7,9 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
+	"github.com/ethp2p/slot-sim/schedule"
 )
 
 // M6: a sized full run with a SPARSE base graph (peersP well below a subnet's subscriber

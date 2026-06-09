@@ -6,11 +6,11 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/driver"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/netsim"
 	"github.com/ethp2p/slot-sim/node"
+	"github.com/ethp2p/slot-sim/schedule"
 )
 
 // aggAssignment builds a one-slot assignment focused on the aggregate phase: C committees

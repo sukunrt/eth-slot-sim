@@ -15,10 +15,10 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/driver"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/netsim"
+	"github.com/ethp2p/slot-sim/schedule"
 )
 
 // params mirrors the scenario knobs simctl passes a Shadow run (so the two
@@ -41,7 +41,7 @@ type params struct {
 
 	// Attestation phase (empty Schedule ⇒ block-only). Attest false with a Schedule set
 	// keeps the proposer schedule but emits no attestations (block-only on the same network).
-	Schedule        string `json:"schedule"`
+	Schedule         string `json:"schedule"`
 	Attest           bool   `json:"attest"`
 	AttDueMs         int    `json:"att_due_ms"`
 	AggDueMs         int    `json:"agg_due_ms"` // aggregate phase (0 ⇒ off)

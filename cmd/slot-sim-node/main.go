@@ -32,10 +32,10 @@ import (
 	"github.com/quic-go/quic-go"
 	"go.uber.org/fx"
 
-	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/driver"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/validator"
 )
 
@@ -77,7 +77,7 @@ func main() {
 		seed        = flag.Uint64("seed", 1, "validator rng seed (combined with node-num)")
 		startup     = flag.Duration("startup", 60*time.Second, "bring-up window before slot 0")
 
-		schedulePath = flag.String("schedule", "", "path to schedule.json (empty → block-only)")
+		schedulePath  = flag.String("schedule", "", "path to schedule.json (empty → block-only)")
 		attestations  = flag.Bool("attestations", true, "emit attestations (false → block-only; committee still sets the proposer schedule)")
 		attDue        = flag.Duration("att-due", 4*time.Second, "attestation deadline offset into the slot")
 		aggDue        = flag.Duration("agg-due", 0, "aggregate emit offset into the slot (0 ⇒ aggregates off)")

@@ -15,9 +15,9 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/host"
 
-	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/validator"
 )
 
@@ -45,7 +45,7 @@ type Config struct {
 	// Attestation knobs (optional). Schedule nil ⇒ block-only (Phase 1). Attest false
 	// with a Schedule set ⇒ block-only too, but the Schedule's proposer schedule still
 	// applies (so block dissemination is measured on the same network, sans attestations).
-	Schedule         *schedule.Assignment
+	Schedule          *schedule.Assignment
 	Attest            bool          // emit attestations (requires Schedule)
 	Sync              bool          // emit sync-committee messages + contributions (requires Schedule)
 	AttestationDue    time.Duration // emit deadline as an offset into the slot

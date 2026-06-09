@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
 	"github.com/ethp2p/slot-sim/pb"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/validator"
 )
 
@@ -22,9 +22,9 @@ type NodeRunner struct {
 	num     int
 	nd      *node.Node
 	val     *validator.Validator
-	sched    *schedule.Assignment // nil ⇒ block-only (Phase 1)
-	attest  bool                  // emit attestations (with sched set but false ⇒ columns-only)
-	sync    bool                  // emit sync-committee messages + contributions (members only)
+	sched   *schedule.Assignment // nil ⇒ block-only (Phase 1)
+	attest  bool                 // emit attestations (with sched set but false ⇒ columns-only)
+	sync    bool                 // emit sync-committee messages + contributions (members only)
 	tracer  metrics.Tracer
 	slotDur time.Duration
 	due     time.Duration // attestation deadline, offset into the slot
