@@ -137,6 +137,25 @@ def test_subnet_topology_connects_every_column_within_k():
         assert _connected(adj, subs), f"column {col} custodiers not connected: {subs}"
 
 
+def test_subnet_topology_connects_every_sync_subnet_within_k():
+    # The sync-committee members form one connected piece per sync subnet, on top of the
+    # per-subnet + global trees, so each sync subnet's message floods.
+    a = schedule.generate(
+        schedule.Params(
+            n=30, v=60, c=2, sc=4, subnets_per_node=2, subscribe_floor=10,
+            sync_size=20, sync_subnets=4, seed=1, num_slots=1,
+        )
+    )
+    topo = topology.generate_subnet_topology(num_nodes=30, k=12, seed=42, assignment=a)
+
+    adj = _adjacency(topo)
+    assert _connected(adj, range(30)), "block topic would partition"
+    for subnet, subs in enumerate(a.subnet_subscribers):
+        assert _connected(adj, subs), f"subnet {subnet} subscribers not connected"
+    for i, subs in enumerate(a.sync_subscribers):
+        assert _connected(adj, subs), f"sync subnet {i} members not connected: {subs}"
+
+
 def test_subnet_topology_degrades_gracefully_for_small_n():
     # K far larger than N-1, plus a singleton and an empty subnet: no crash/spin, degree
     # capped at N-1, still connected.

@@ -98,6 +98,26 @@ func TestDiscv5GraphConnectivityAndDegree(t *testing.T) {
 	}
 }
 
+// Each sync subnet's members form one connected piece (their mesh), on top of the global tree —
+// the same connectivity-by-construction the attestation subnets and column custodiers get.
+func TestDiscv5GraphConnectsSyncSubnets(t *testing.T) {
+	a := &schedule.Assignment{
+		Params:          schedule.Params{N: 20, SubnetCount: 64, NumSlots: 1},
+		SyncSubscribers: [][]int{{0, 3, 6, 9, 12}, {1, 4, 7, 10, 13}, {2, 5, 8, 11, 14}},
+	}
+	const n, k = 20, 8
+	adj := discv5Graph(a, k, 1)
+	assertSimple(t, adj)
+	if !componentConnected(adj, seq(n)) {
+		t.Fatal("whole graph not connected (block topic would partition)")
+	}
+	for s, members := range a.SyncSubscribers {
+		if !componentConnected(adj, members) {
+			t.Fatalf("sync subnet %d subscribers not connected: %v", s, members)
+		}
+	}
+}
+
 func TestDiscv5GraphGracefulSmallN(t *testing.T) {
 	// K far larger than n-1, plus a singleton and an empty subnet: must not crash or spin,
 	// degree is capped at n-1, and everything stays connected.
