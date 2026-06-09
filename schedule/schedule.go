@@ -1,11 +1,12 @@
-// Package committee is the Go consumer of the committee assignment that
-// simctl/committee.py generates. It unmarshals committee.json into typed values and
-// exposes per-node accessors; it holds no generation logic. The assignment is produced
-// once, in Python (the topology seam: validators→nodes→committees→subnets), and passed
-// in. The exported structs are exactly the committee.json schema, so the unmarshal
-// output and a hand-built value are the same type — tests build arbitrary committees as
+// Package schedule is the Go consumer of the per-run schedule that
+// simctl/schedule.py generates: the proposer schedule, the attestation committees +
+// subnet subscribers, and the data-column custody. It unmarshals schedule.json into typed
+// values and exposes per-node accessors; it holds no generation logic. The schedule is
+// produced once, in Python (the topology seam: validators→nodes→committees→subnets), and
+// passed in. The exported structs are exactly the schedule.json schema, so the unmarshal
+// output and a hand-built value are the same type — tests build arbitrary schedules as
 // in-memory literals, independent of the Python generator.
-package committee
+package schedule
 
 import (
 	"encoding/json"
@@ -15,7 +16,7 @@ import (
 )
 
 // Params are the assignment knobs (V, C, s_c independent; only C·s_c ≤ V is enforced,
-// in the generator). Fields mirror committee.json.
+// in the generator). Fields mirror schedule.json.
 type Params struct {
 	N              int `json:"n"`
 	V              int `json:"v"`
@@ -32,7 +33,7 @@ type Params struct {
 }
 
 // AttesterRef is one committee seat: which node publishes, which validator, on which
-// subnet, at which position within the committee.
+// subnet, at which position within the schedule.
 type AttesterRef struct {
 	Node     int `json:"node"`
 	Val      int `json:"val"`
@@ -68,7 +69,7 @@ type Assignment struct {
 	Slots             []SlotPlan `json:"slots"`
 }
 
-// Load reads a committee.json produced by simctl/committee.py.
+// Load reads a schedule.json produced by simctl/schedule.py.
 func Load(path string) (*Assignment, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -101,7 +102,7 @@ func (a *Assignment) ColumnSubscribersOf(col int) []int {
 
 // ProposerSchedule returns the per-slot block proposer (a supernode), one entry per slot in
 // slot order — the schedule the Validator obeys instead of the cyclic slot%N rule. Both
-// backends read it from the same committee.json, so they propose identically.
+// backends read it from the same schedule.json, so they propose identically.
 func (a *Assignment) ProposerSchedule() []int {
 	out := make([]int, len(a.Slots))
 	for i, sp := range a.Slots {

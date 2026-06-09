@@ -4,14 +4,14 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/ethp2p/slot-sim/committee"
+	"github.com/ethp2p/slot-sim/schedule"
 )
 
 // committeeWith builds a minimal assignment carrying just what discv5Graph reads: N and
 // the per-subnet subscriber sets.
-func committeeWith(n int, subnets [][]int) *committee.Assignment {
-	return &committee.Assignment{
-		Params:            committee.Params{N: n, C: len(subnets), SubnetCount: 64, NumSlots: 1},
+func committeeWith(n int, subnets [][]int) *schedule.Assignment {
+	return &schedule.Assignment{
+		Params:            schedule.Params{N: n, C: len(subnets), SubnetCount: 64, NumSlots: 1},
 		SubnetSubscribers: subnets,
 	}
 }

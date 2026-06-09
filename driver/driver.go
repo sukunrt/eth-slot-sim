@@ -15,7 +15,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/host"
 
-	"github.com/ethp2p/slot-sim/committee"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
 	"github.com/ethp2p/slot-sim/validator"
@@ -42,11 +42,11 @@ type Config struct {
 	D, Dlo, Dhi  int
 	Seed         uint64 // per-node validator rng seed
 
-	// Attestation knobs (optional). Committee nil ⇒ block-only (Phase 1). Attest false
-	// with a Committee set ⇒ block-only too, but the Committee's proposer schedule still
+	// Attestation knobs (optional). Schedule nil ⇒ block-only (Phase 1). Attest false
+	// with a Schedule set ⇒ block-only too, but the Schedule's proposer schedule still
 	// applies (so block dissemination is measured on the same network, sans attestations).
-	Committee         *committee.Assignment
-	Attest            bool          // emit attestations (requires Committee)
+	Schedule         *schedule.Assignment
+	Attest            bool          // emit attestations (requires Schedule)
 	AttestationDue    time.Duration // emit deadline as an offset into the slot
 	Prep              time.Duration // Δ_prep before emitting on block receipt
 	AttestVerifyDelay func() time.Duration
@@ -57,7 +57,7 @@ type Config struct {
 	// committee assignment) publish one distinct aggregate each at this offset.
 	AggregateDue time.Duration // aggregate emit, offset into the slot (≈8s)
 
-	// Data-columns phase (optional; active when Committee.NumColumns > 0). The proposer bursts
+	// Data-columns phase (optional; active when Schedule.NumColumns > 0). The proposer bursts
 	// one DataColumnSidecar per column subnet at t=0; each node verifies columns through a
 	// width-P semaphore, P sized from its full-custody role.
 	ColVerifyService          func() time.Duration // per-column validation-as-sleep
@@ -86,12 +86,12 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		slotDur: cfg.SlotDuration,
 	}
 	var proposers []int // supernode proposer schedule; nil ⇒ cyclic (block-only)
-	if cfg.Committee != nil {
-		proposers = cfg.Committee.ProposerSchedule()
+	if cfg.Schedule != nil {
+		proposers = cfg.Schedule.ProposerSchedule()
 	}
 	// The committee drives attestations (when cfg.Attest) and/or columns (NumColumns > 0); the
 	// runner's attest flag gates attestation emission, so a committee can disseminate columns
-	// without emitting attestations. Block-only runs pass a nil Committee.
+	// without emitting attestations. Block-only runs pass a nil Schedule.
 	for i := range n {
 		val := validator.New(i, n, cfg.BlockSize, cfg.Offset, cfg.Jitter,
 			rand.New(rand.NewPCG(cfg.Seed, uint64(i))), proposers)
@@ -105,15 +105,15 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		}
 		// Size the column verifier from the node's full-custody role (custody applies even when
 		// attestations are off, so it's gated on the committee's columns, not cfg.Attest).
-		if cfg.Committee != nil && cfg.Committee.NumColumns > 0 {
+		if cfg.Schedule != nil && cfg.Schedule.NumColumns > 0 {
 			nd.ColVerifyService = cfg.ColVerifyService
-			if cfg.Committee.Node(i).IsFullCustody() {
+			if cfg.Schedule.Node(i).IsFullCustody() {
 				nd.ColVerifyParallelism = cfg.ColVerifyParallelismSuper
 			} else {
 				nd.ColVerifyParallelism = cfg.ColVerifyParallelismReg
 			}
 		}
-		r := NewRunner(i, nd, val, cfg.Committee, cfg.Attest, tracer, cfg.SlotDuration, cfg.AttestationDue,
+		r := NewRunner(i, nd, val, cfg.Schedule, cfg.Attest, tracer, cfg.SlotDuration, cfg.AttestationDue,
 			cfg.AggregateDue, cfg.Prep, cfg.Seed, nw.Peers(i))
 		r.Attach()
 		d.nodes[i] = nd

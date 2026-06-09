@@ -141,7 +141,7 @@ def test_delays_from_csv_filters_by_kind(tmp_path):
     assert ca.delays_from_csv(csv_path, kind=ca.ATTEST_KIND) == [40.0]
 
 
-# committee.json shape the simnet CSV check joins against: subscribers per subnet + the draw.
+# schedule.json shape the simnet CSV check joins against: subscribers per subnet + the draw.
 def _committee(subnet_subscribers, committees):
     return {
         "subnet_subscribers": subnet_subscribers,
@@ -179,7 +179,7 @@ def test_check_proposers_flags_origin_off_schedule():
 
 
 def test_load_proposers_and_supernodes(tmp_path):
-    (tmp_path / "committee.json").write_text(
+    (tmp_path / "schedule.json").write_text(
         '{"subnet_subscribers": [], "slots": ['
         '{"slot":0,"committees":[],"subnet_of":[],"proposer":2},'
         '{"slot":1,"committees":[],"subnet_of":[],"proposer":3}]}'
@@ -197,7 +197,7 @@ def test_load_proposers_and_supernodes(tmp_path):
 
 
 def test_load_proposers_none_for_block_only(tmp_path):
-    assert ca.load_proposers(tmp_path) is None  # no committee.json
+    assert ca.load_proposers(tmp_path) is None  # no schedule.json
     assert ca.load_supernodes(tmp_path) is None  # no topology.json
 
 
@@ -430,7 +430,7 @@ def test_analyze_columns_csv_detects_missing_and_leak(tmp_path):
 
 
 def test_load_column_subscribers(tmp_path):
-    (tmp_path / "committee.json").write_text(
+    (tmp_path / "schedule.json").write_text(
         '{"subnet_subscribers": [], "num_columns": 2, '
         '"column_subscribers": [[0,1,2],[0,3]], '
         '"slots": [{"slot":0,"committees":[],"subnet_of":[],"proposer":0}]}'
@@ -439,5 +439,5 @@ def test_load_column_subscribers(tmp_path):
 
 
 def test_load_column_subscribers_none_without_columns(tmp_path):
-    (tmp_path / "committee.json").write_text('{"subnet_subscribers": [], "slots": []}')
+    (tmp_path / "schedule.json").write_text('{"subnet_subscribers": [], "slots": []}')
     assert ca.load_column_subscribers(tmp_path) is None

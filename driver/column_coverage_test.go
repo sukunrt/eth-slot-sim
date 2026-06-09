@@ -8,16 +8,16 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/committee"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
 )
 
-// genColumnAssignment builds a data-column assignment by hand (the way simctl/committee.py
+// genColumnAssignment builds a data-column assignment by hand (the way simctl/schedule.py
 // does): the full-custody nodes hold every column (the relay backbone; the proposer is drawn
 // from them), and each ordinary node draws custodyFloor random columns. No attestation
 // committees — a focused column-coverage fixture. V=N so every node validates.
-func genColumnAssignment(n, numColumns, custodyFloor int, fullCustody []int, seed uint64) *committee.Assignment {
+func genColumnAssignment(n, numColumns, custodyFloor int, fullCustody []int, seed uint64) *schedule.Assignment {
 	full := map[int]bool{}
 	for _, f := range fullCustody {
 		full[f] = true
@@ -43,18 +43,18 @@ func genColumnAssignment(n, numColumns, custodyFloor int, fullCustody []int, see
 	for i := range colSubs {
 		colSubs[i] = sortedKeys(colSets[i])
 	}
-	return &committee.Assignment{
-		Params:            committee.Params{N: n, V: n, SubnetCount: 64, NumSlots: 1},
+	return &schedule.Assignment{
+		Params:            schedule.Params{N: n, V: n, SubnetCount: 64, NumSlots: 1},
 		NumColumns:        numColumns,
 		ColumnSubscribers: colSubs,
 		FullCustody:       slices.Sorted(slices.Values(fullCustody)),
-		Slots:             []committee.SlotPlan{{Slot: 0, Proposer: fullCustody[0]}},
+		Slots:             []schedule.SlotPlan{{Slot: 0, Proposer: fullCustody[0]}},
 	}
 }
 
 // assertColumnCoverageNoLeakage checks the column invariant: each column reaches exactly its
 // custodiers \ {proposer} — no missing, no duplicate, no leak to a non-custodier.
-func assertColumnCoverageNoLeakage(t *testing.T, a *committee.Assignment, rec *metrics.Recorder, slot int) {
+func assertColumnCoverageNoLeakage(t *testing.T, a *schedule.Assignment, rec *metrics.Recorder, slot int) {
 	t.Helper()
 	proposer := a.Slots[slot].Proposer
 	got := map[int]map[int]bool{}

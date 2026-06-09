@@ -1,4 +1,4 @@
-package committee
+package schedule
 
 import (
 	"path/filepath"
@@ -6,12 +6,12 @@ import (
 	"testing"
 )
 
-// The contract test: a committee.json that simctl/committee.py actually produced
+// The contract test: a schedule.json that simctl/schedule.py actually produced
 // unmarshals into the Go structs and the accessors agree with the raw data. This
 // guards the Python→Go schema handoff — a renamed/missing field would leave a struct
 // field zero and the self-consistency checks would fail.
 func TestLoadFixtureContract(t *testing.T) {
-	a, err := Load(filepath.Join("testdata", "committee.json"))
+	a, err := Load(filepath.Join("testdata", "schedule.json"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestLiteralAssignmentAccessors(t *testing.T) {
 }
 
 // CustodyColumns / IsFullCustody / ColumnSubscribersOf expose the data-column custody set
-// carried in committee.json: a full-custody node holds every column (the relay backbone); an
+// carried in schedule.json: a full-custody node holds every column (the relay backbone); an
 // ordinary node holds its seeded-random membership in column_subscribers.
 func TestCustodyColumns(t *testing.T) {
 	a := &Assignment{

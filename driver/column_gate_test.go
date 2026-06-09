@@ -7,7 +7,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/committee"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
 	"github.com/ethp2p/slot-sim/pb"
@@ -17,7 +17,7 @@ import (
 // committee) that originates every column, and makes the committee's attesters custody all
 // numColumns columns — so the gate (vote block iff block AND all custody columns) can be
 // exercised against the attestation vote.
-func oneCommitteeColumns(n int, attesters []int, numColumns int) *committee.Assignment {
+func oneCommitteeColumns(n int, attesters []int, numColumns int) *schedule.Assignment {
 	a := oneCommittee(n, attesters)
 	a.NumColumns = numColumns
 	a.FullCustody = []int{0} // node 0: the full-custody proposer / relay backbone

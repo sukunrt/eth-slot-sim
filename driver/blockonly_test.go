@@ -19,7 +19,7 @@ func TestBlockOnlyKeepsScheduleDropsAttestations(t *testing.T) {
 		a := oneCommittee(4, []int{1, 2, 3}) // subnet-0 committee {1,2,3}
 		a.Slots[0].Proposer = 1              // proposer is also an attester — must still stay silent
 
-		nw, err := netsim.NewWithCommittee(a, netsim.Config{
+		nw, err := netsim.NewWithSchedule(a, netsim.Config{
 			N: 4, P: 3, Seed: 1, MinLatency: 5 * time.Millisecond, MaxLatency: 5 * time.Millisecond,
 		})
 		if err != nil {
@@ -32,7 +32,7 @@ func TestBlockOnlyKeepsScheduleDropsAttestations(t *testing.T) {
 			BlockSize: 1024, SlotDuration: 12 * time.Second, Jitter: 0,
 			VerifyDelay: func() time.Duration { return 0 },
 			D:           8, Dlo: 6, Dhi: 12, Seed: 1,
-			Committee: a, Attest: false, AttestationDue: 4 * time.Second,
+			Schedule: a, Attest: false, AttestationDue: 4 * time.Second,
 		}, tr)
 
 		ctx, cancel := context.WithCancel(context.Background())

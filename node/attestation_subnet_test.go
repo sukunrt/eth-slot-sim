@@ -7,7 +7,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/committee"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/netsim"
 	"github.com/ethp2p/slot-sim/node"
 	"github.com/ethp2p/slot-sim/pb"
@@ -53,16 +53,16 @@ func TestSubnetFanOutReachesSubscribersOnly(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		// subnet 0's subscribers = {1,2}; node 0 attests subnet 0 (publisher, not a
 		// subscriber); node 3 is uninvolved in subnet 0.
-		a := &committee.Assignment{
-			Params:            committee.Params{N: 4, V: 4, C: 1, Sc: 1, SubnetCount: 64, SubnetsPerNode: 1, SubscribeFloor: 2, NumSlots: 1},
+		a := &schedule.Assignment{
+			Params:            schedule.Params{N: 4, V: 4, C: 1, Sc: 1, SubnetCount: 64, SubnetsPerNode: 1, SubscribeFloor: 2, NumSlots: 1},
 			SubnetSubscribers: [][]int{{1, 2}},
-			Slots: []committee.SlotPlan{{
+			Slots: []schedule.SlotPlan{{
 				Slot:       0,
-				Committees: [][]committee.AttesterRef{{{Node: 0, Val: 0, Subnet: 0, Position: 0}}},
+				Committees: [][]schedule.AttesterRef{{{Node: 0, Val: 0, Subnet: 0, Position: 0}}},
 				SubnetOf:   []int{0},
 			}},
 		}
-		nw, err := netsim.NewWithCommittee(a, netsim.Config{
+		nw, err := netsim.NewWithSchedule(a, netsim.Config{
 			N: 4, P: 2, Seed: 1, MinLatency: 5 * time.Millisecond, MaxLatency: 5 * time.Millisecond,
 		})
 		if err != nil {

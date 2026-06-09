@@ -7,7 +7,7 @@ across hosts — Shadow shares one clock) and the identity fields
 attestations are kind=2; aggregates are kind=3 (attester carries the aggregator, origin = -1).
 
 Blocks must reach every other node. Attestations must reach exactly their subnet's
-subscribers (from committee.json) and nobody else. Aggregates (global topic): each
+subscribers (from schedule.json) and nobody else. Aggregates (global topic): each
 aggregator publishes one distinct aggregate that must reach every node except that
 aggregator, exactly once — missing/leaked/duplicate are all failures. The headline
 attestation metric is the fraction that voted for the block. Stdlib only.
@@ -220,13 +220,13 @@ def analyze_columns(
     return ColumnResult(len(col_arrs), expected, missing, leaked, duplicates, delays_ms, len(col_pubs))
 
 
-def analyze_columns_csv(path: Path, committee_data: dict) -> ColumnResult:
+def analyze_columns_csv(path: Path, schedule_data: dict) -> ColumnResult:
     """Column coverage for the simnet backend. The CSV is keyed by (slot, subnet=column) with
     no origin column, so each column's origin is its slot's proposer (which originates every
-    column). Custodiers come from committee.json's column_subscribers; all columns are active
+    column). Custodiers come from schedule.json's column_subscribers; all columns are active
     each slot."""
-    custodiers = {col: set(m) for col, m in enumerate(committee_data["column_subscribers"])}
-    proposer_of = {sp["slot"]: sp["proposer"] for sp in committee_data["slots"]}
+    custodiers = {col: set(m) for col, m in enumerate(schedule_data["column_subscribers"])}
+    proposer_of = {sp["slot"]: sp["proposer"] for sp in schedule_data["slots"]}
 
     received: dict[tuple[int, int], set[int]] = {}
     counts: Counter = Counter()
@@ -287,11 +287,11 @@ class AggregateResult:
         )
 
 
-def _aggregate_published(committee_data: dict) -> tuple[set[tuple[int, int, int]], int]:
+def _aggregate_published(schedule_data: dict) -> tuple[set[tuple[int, int, int]], int]:
     """The published aggregates (slot, subnet, aggregator) — one per aggregator — and N."""
-    n = committee_data["params"]["n"]
+    n = schedule_data["params"]["n"]
     published: set[tuple[int, int, int]] = set()
-    for sp in committee_data["slots"]:
+    for sp in schedule_data["slots"]:
         for ci, aggs in enumerate(sp["aggregators"]):
             subnet = sp["subnet_of"][ci]
             for aggregator in aggs:
@@ -331,11 +331,11 @@ def _aggregate_result(
 
 
 def analyze_aggregates(
-    pubs: dict[PubKey, tuple[int, bool]], arrs: list[Arrival], committee_data: dict
+    pubs: dict[PubKey, tuple[int, bool]], arrs: list[Arrival], schedule_data: dict
 ) -> AggregateResult:
     """Cross-check aggregate arrivals (Shadow slog) against the aggregator sets. The aggregator
     is the attester field; origin is unused (-1)."""
-    published, n = _aggregate_published(committee_data)
+    published, n = _aggregate_published(schedule_data)
     agg_pubs = {(s, sub, a): t for (k, s, sub, a, _o), (t, _v) in pubs.items() if k == AGGREGATE_KIND}
     counts: Counter = Counter()
     received: dict[tuple[int, int, int], set[int]] = {}
@@ -350,10 +350,10 @@ def analyze_aggregates(
     return _aggregate_result(published, n, counts, received, delays_ms)
 
 
-def analyze_aggregates_csv(path: Path, committee_data: dict) -> AggregateResult:
+def analyze_aggregates_csv(path: Path, schedule_data: dict) -> AggregateResult:
     """Aggregate coverage for the simnet backend. The CSV is keyed by
     (slot, subnet, attester=aggregator); there is no origin column."""
-    published, n = _aggregate_published(committee_data)
+    published, n = _aggregate_published(schedule_data)
     counts: Counter = Counter()
     received: dict[tuple[int, int, int], set[int]] = {}
     delays_ms: list[float] = []
@@ -370,9 +370,9 @@ def analyze_aggregates_csv(path: Path, committee_data: dict) -> AggregateResult:
 
 
 def load_committee(run_dir: Path) -> dict[int, set[int]] | None:
-    """Subscriber sets keyed by subnet (stable for the run) from committee.json, or None
+    """Subscriber sets keyed by subnet (stable for the run) from schedule.json, or None
     if absent (a block-only run)."""
-    path = run_dir / "committee.json"
+    path = run_dir / "schedule.json"
     if not path.exists():
         return None
     data = json.loads(path.read_text())
@@ -380,9 +380,9 @@ def load_committee(run_dir: Path) -> dict[int, set[int]] | None:
 
 
 def load_column_subscribers(run_dir: Path) -> dict[int, set[int]] | None:
-    """Custodier sets keyed by column (stable for the run) from committee.json's
+    """Custodier sets keyed by column (stable for the run) from schedule.json's
     column_subscribers, or None if absent (a run without the data-columns phase)."""
-    path = run_dir / "committee.json"
+    path = run_dir / "schedule.json"
     if not path.exists():
         return None
     cols = json.loads(path.read_text()).get("column_subscribers")
@@ -392,8 +392,8 @@ def load_column_subscribers(run_dir: Path) -> dict[int, set[int]] | None:
 
 
 def load_proposers(run_dir: Path) -> list[int] | None:
-    """Per-slot block proposer (a supernode) from committee.json, or None (block-only run)."""
-    path = run_dir / "committee.json"
+    """Per-slot block proposer (a supernode) from schedule.json, or None (block-only run)."""
+    path = run_dir / "schedule.json"
     if not path.exists():
         return None
     return [sp["proposer"] for sp in json.loads(path.read_text())["slots"]]
@@ -421,7 +421,7 @@ def check_proposers(
     """Cross-backend proposer guard: every scheduled proposer must be a supernode, and — when
     per-slot block origins are available (the Shadow event path) — each block must be published
     by its slot's scheduled proposer. Returns human-readable violations ([] means OK), so both
-    backends fail loudly if they, or committee.json and topology.json, ever disagree."""
+    backends fail loudly if they, or schedule.json and topology.json, ever disagree."""
     problems = []
     for slot, p in enumerate(proposers):
         if p not in supernodes:
@@ -464,14 +464,14 @@ def delays_from_csv(path: Path, kind: int = BLOCK_KIND) -> list[float]:
     return [float(r["delay_ms"]) for r in rows if int(r.get("kind", BLOCK_KIND)) == kind]
 
 
-def analyze_attestations_csv(path: Path, committee_data: dict) -> AttestResult:
+def analyze_attestations_csv(path: Path, schedule_data: dict) -> AttestResult:
     """Coverage/no-leak for the simnet backend (the real cross-backend graph). The arrival
     CSV is keyed by (slot, subnet, attester) with no origin column, so each attestation's
-    origin comes from committee.json's draw. Each published attestation must reach exactly
+    origin comes from schedule.json's draw. Each published attestation must reach exactly
     subscribers(subnet) \\ {origin} — missing/leaked/duplicate all fail."""
-    subscribers = {subnet: set(m) for subnet, m in enumerate(committee_data["subnet_subscribers"])}
+    subscribers = {subnet: set(m) for subnet, m in enumerate(schedule_data["subnet_subscribers"])}
     origin_of: dict[tuple[int, int, int], int] = {}  # (slot,subnet,attester) -> publishing node
-    for sp in committee_data["slots"]:
+    for sp in schedule_data["slots"]:
         for com in sp["committees"]:
             for ref in com:
                 origin_of[(sp["slot"], ref["subnet"], ref["val"])] = ref["node"]
@@ -546,10 +546,10 @@ def main(argv: list[str]) -> int:
         print(f"  block CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
 
     ok = res.ok
-    committee_path = run_dir / "committee.json"
-    if committee_path.exists():
-        committee_data = json.loads(committee_path.read_text())
-        subscribers = {sub: set(mem) for sub, mem in enumerate(committee_data["subnet_subscribers"])}
+    schedule_path = run_dir / "schedule.json"
+    if schedule_path.exists():
+        schedule_data = json.loads(schedule_path.read_text())
+        subscribers = {sub: set(mem) for sub, mem in enumerate(schedule_data["subnet_subscribers"])}
         ares = analyze_attestations(pubs, arrs, subscribers)
         ok = ok and ares.ok
         print(f"attestations published: {ares.published}")
@@ -562,8 +562,8 @@ def main(argv: list[str]) -> int:
             print(f"  attestation CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
         print(f"  fraction voted block: {ares.fraction_voted_block:.3f}")
 
-        if committee_data["slots"] and committee_data["slots"][0].get("aggregators"):
-            gres = analyze_aggregates(pubs, arrs, committee_data)
+        if schedule_data["slots"] and schedule_data["slots"][0].get("aggregators"):
+            gres = analyze_aggregates(pubs, arrs, schedule_data)
             ok = ok and gres.ok
             print(f"aggregates published (distinct): {gres.published}")
             print(f"aggregate arrivals: {gres.arrivals} (expected {gres.expected})")
@@ -572,8 +572,8 @@ def main(argv: list[str]) -> int:
                 c = cdf(gres.delays_ms)
                 print(f"  aggregate CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
 
-        if committee_data.get("column_subscribers"):
-            custodiers = {col: set(m) for col, m in enumerate(committee_data["column_subscribers"])}
+        if schedule_data.get("column_subscribers"):
+            custodiers = {col: set(m) for col, m in enumerate(schedule_data["column_subscribers"])}
             cres = analyze_columns(pubs, arrs, custodiers)
             ok = ok and cres.ok
             print(f"columns published (distinct): {cres.published}")

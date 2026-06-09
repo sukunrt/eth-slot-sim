@@ -32,7 +32,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"go.uber.org/fx"
 
-	"github.com/ethp2p/slot-sim/committee"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/driver"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
@@ -77,7 +77,7 @@ func main() {
 		seed        = flag.Uint64("seed", 1, "validator rng seed (combined with node-num)")
 		startup     = flag.Duration("startup", 60*time.Second, "bring-up window before slot 0")
 
-		committeePath = flag.String("committee", "", "path to committee.json (empty → block-only)")
+		schedulePath = flag.String("schedule", "", "path to schedule.json (empty → block-only)")
 		attestations  = flag.Bool("attestations", true, "emit attestations (false → block-only; committee still sets the proposer schedule)")
 		attDue        = flag.Duration("att-due", 4*time.Second, "attestation deadline offset into the slot")
 		aggDue        = flag.Duration("agg-due", 0, "aggregate emit offset into the slot (0 ⇒ aggregates off)")
@@ -87,7 +87,7 @@ func main() {
 		attestWindow  = flag.Duration("attest-batch-window", 50*time.Millisecond, "attestation batch window")
 		rpcLogNode    = flag.Int("rpc-log-node", -1, "node-num to enable gossipsub debug RPC logging on (-1 = off)")
 
-		// Data columns are driven by committee.json (num_columns/column_subscribers/full_custody);
+		// Data columns are driven by schedule.json (num_columns/column_subscribers/full_custody);
 		// these size the per-node width-P column verifier.
 		colVerify      = flag.Duration("col-verify-service", 3*time.Millisecond, "per-column verify delay")
 		colVerifySuper = flag.Int("col-verify-super", 16, "column verify parallelism P for a full-custody node")
@@ -99,16 +99,16 @@ func main() {
 	}
 
 	tracer := metrics.NewSlogTracer(slog.NewJSONHandler(os.Stdout, nil))
-	var comm *committee.Assignment
+	var sched *schedule.Assignment
 	var proposers []int // supernode proposer schedule; nil ⇒ cyclic (block-only)
-	if *committeePath != "" {
-		c, err := committee.Load(*committeePath)
+	if *schedulePath != "" {
+		c, err := schedule.Load(*schedulePath)
 		if err != nil {
-			log.Fatalf("load committee %s: %v", *committeePath, err)
+			log.Fatalf("load schedule %s: %v", *schedulePath, err)
 		}
 		proposers = c.ProposerSchedule() // supernode block schedule (used even when block-only)
 		if *attestations || c.NumColumns > 0 {
-			comm = c // drives attestations and/or columns; -attestations gates the votes
+			sched = c // drives attestations and/or columns; -attestations gates the votes
 		}
 	}
 	val := validator.New(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
@@ -120,10 +120,10 @@ func main() {
 		AttestPerItem:     *attestPerItem, AttestBatchWindow: *attestWindow,
 		D: *d, Dlo: *dlo, Dhi: *dhi,
 	}
-	if comm != nil && comm.NumColumns > 0 { // size the column verifier from this node's role
+	if sched != nil && sched.NumColumns > 0 { // size the column verifier from this node's role
 		nd.ColVerifyService = func() time.Duration { return *colVerify }
 		nd.ColVerifyParallelism = *colVerifyReg
-		if comm.Node(*nodeNum).IsFullCustody() {
+		if sched.Node(*nodeNum).IsFullCustody() {
 			nd.ColVerifyParallelism = *colVerifySuper
 		}
 	}
@@ -131,7 +131,7 @@ func main() {
 		nd.RPCLogger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	peers := parseIntList(*peerNumsStr)
-	runner := driver.NewRunner(*nodeNum, nd, val, comm, *attestations, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers)
+	runner := driver.NewRunner(*nodeNum, nd, val, sched, *attestations, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers)
 	runner.Attach() // sets nd.OnReceive before JoinTopics
 
 	ctx := context.Background()

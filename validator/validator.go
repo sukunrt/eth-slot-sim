@@ -44,7 +44,7 @@ type Validator struct {
 
 // New returns a Validator that proposes blockSize-byte blocks on its turn, publishing at
 // offset + rand(0, jitter) into the slot. proposers is the per-slot proposer schedule (from
-// committee.json, all supernodes); nil falls back to the cyclic slot%n rule (block-only
+// schedule.json, all supernodes); nil falls back to the cyclic slot%n rule (block-only
 // runs). rng should be seeded by the caller for reproducibility.
 func New(self, n, blockSize int, offset, jitter time.Duration, rng *rand.Rand, proposers []int) *Validator {
 	return &Validator{

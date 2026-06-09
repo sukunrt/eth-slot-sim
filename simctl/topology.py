@@ -285,7 +285,7 @@ def generate_subnet_topology(
     random fill up to K (subnet/column edges counted toward K). K is clamped to N-1 and the
     fill is best-effort, so a small or dense graph degrades gracefully.
 
-    `assignment` is a simctl.committee.Assignment; its subnet_subscribers (and, for the column
+    `assignment` is a simctl.schedule.Assignment; its subnet_subscribers (and, for the column
     phase, column_subscribers) drive the bias.
     """
     rng = random.Random(seed)

@@ -6,29 +6,29 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/committee"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/node"
 )
 
-// The block proposer follows committee.json's per-slot schedule (supernodes in a real run),
+// The block proposer follows schedule.json's per-slot schedule (supernodes in a real run),
 // not slot%n: over a multi-slot run every block is published by exactly that slot's scheduled
 // proposer and by no other node. This drives the same validator/driver code the Shadow binary
 // runs, so the two backends propose identically.
 func TestBlockProposerFollowsSchedule(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		com := [][]committee.AttesterRef{{
+		com := [][]schedule.AttesterRef{{
 			{Node: 0, Val: 0, Subnet: 0, Position: 0},
 			{Node: 1, Val: 1, Subnet: 0, Position: 1},
 		}}
 		// proposers 2 and 3 are neither attesters nor subscribers of subnet 0 — they only
 		// publish the global block, so a pure cyclic rule (slot0->0, slot1->1) would differ.
-		a := &committee.Assignment{
-			Params: committee.Params{
+		a := &schedule.Assignment{
+			Params: schedule.Params{
 				N: 4, V: 4, C: 1, Sc: 2, SubnetCount: 64,
 				SubnetsPerNode: 1, SubscribeFloor: 2, NumSlots: 2,
 			},
 			SubnetSubscribers: [][]int{{0, 1}},
-			Slots: []committee.SlotPlan{
+			Slots: []schedule.SlotPlan{
 				{Slot: 0, Committees: com, SubnetOf: []int{0}, Proposer: 2},
 				{Slot: 1, Committees: com, SubnetOf: []int{0}, Proposer: 3},
 			},

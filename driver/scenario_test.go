@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethp2p/slot-sim/committee"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/driver"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/netsim"
@@ -22,18 +22,18 @@ import (
 // base-graph degree; set it below a subnet's subscriber count to force the per-slot dial +
 // relay path (with P=n-1 a publisher reaches everyone directly and the dial is bypassed).
 type scenario struct {
-	a       *committee.Assignment
+	a       *schedule.Assignment
 	nw      *netsim.Netsim
 	nodes   []*node.Node
 	runners []*driver.NodeRunner
 	slotDur time.Duration
 }
 
-func buildScenario(t *testing.T, a *committee.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int) *scenario {
+func buildScenario(t *testing.T, a *schedule.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int) *scenario {
 	t.Helper()
 	n := a.Params.N
 	const slotDur = 12 * time.Second
-	nw, err := netsim.NewWithCommittee(a, netsim.Config{
+	nw, err := netsim.NewWithSchedule(a, netsim.Config{
 		N: n, P: peersP, Seed: 1, MinLatency: 5 * time.Millisecond, MaxLatency: 5 * time.Millisecond,
 	})
 	if err != nil {
@@ -113,11 +113,11 @@ func (s *scenario) run(t *testing.T, ctx context.Context, numSlots int) time.Tim
 	return runStart
 }
 
-// genAssignment builds a sized assignment the way simctl/committee.py does: each node
+// genAssignment builds a sized assignment the way simctl/schedule.py does: each node
 // subscribes `spn` random subnets, any subnet under `floor` is topped up, and each slot
 // independently draws C committees of s_c. A test fixture builder — it need not match
 // Python's RNG, since the test asserts against this assignment's own subscriber sets.
-func genAssignment(n, v, c, sc, spn, floor int, seed uint64) *committee.Assignment {
+func genAssignment(n, v, c, sc, spn, floor int, seed uint64) *schedule.Assignment {
 	subsSets := make([]map[int]bool, c)
 	for i := range subsSets {
 		subsSets[i] = map[int]bool{}
@@ -143,24 +143,24 @@ func genAssignment(n, v, c, sc, spn, floor int, seed uint64) *committee.Assignme
 	for s := range c {
 		subnetSubscribers[s] = sortedKeys(subsSets[s])
 	}
-	sp := committee.SlotPlan{Slot: 0}
+	sp := schedule.SlotPlan{Slot: 0}
 	vals := rand.New(rand.NewPCG(seed, 2)).Perm(v)[:c*sc]
 	for ci := range c {
-		com := make([]committee.AttesterRef, sc)
+		com := make([]schedule.AttesterRef, sc)
 		for pos := range sc {
 			val := vals[ci*sc+pos]
-			com[pos] = committee.AttesterRef{Node: val % n, Val: val, Subnet: ci, Position: pos}
+			com[pos] = schedule.AttesterRef{Node: val % n, Val: val, Subnet: ci, Position: pos}
 		}
 		sp.Committees = append(sp.Committees, com)
 		sp.SubnetOf = append(sp.SubnetOf, ci)
 	}
-	return &committee.Assignment{
-		Params: committee.Params{
+	return &schedule.Assignment{
+		Params: schedule.Params{
 			N: n, V: v, C: c, Sc: sc, SubnetCount: 64,
 			SubnetsPerNode: spn, SubscribeFloor: floor, Seed: seed, NumSlots: 1,
 		},
 		SubnetSubscribers: subnetSubscribers,
-		Slots:             []committee.SlotPlan{sp},
+		Slots:             []schedule.SlotPlan{sp},
 	}
 }
 
@@ -179,7 +179,7 @@ type attestKey struct{ subnet, attester int }
 // assertCoverageNoLeakage checks the strongest invariant: every published attestation
 // reaches exactly Subscribers(subnet) \ {publisher} — no missing, leaked (arrival at a
 // non-subscriber), or duplicate.
-func assertCoverageNoLeakage(t *testing.T, a *committee.Assignment, rec *metrics.Recorder, slot int) {
+func assertCoverageNoLeakage(t *testing.T, a *schedule.Assignment, rec *metrics.Recorder, slot int) {
 	t.Helper()
 	got := map[attestKey]map[int]bool{}
 	refKeys := map[attestKey]bool{}
@@ -238,19 +238,19 @@ func keys(m map[int]bool) []int {
 // oneCommittee builds an N-node assignment with a single committee of the given attester
 // nodes on subnet 0, where those same nodes are subnet 0's subscribers (so they mesh and
 // receive each other's attestations). One slot.
-func oneCommittee(n int, attesters []int) *committee.Assignment {
-	com := make([]committee.AttesterRef, len(attesters))
+func oneCommittee(n int, attesters []int) *schedule.Assignment {
+	com := make([]schedule.AttesterRef, len(attesters))
 	for pos, node := range attesters {
-		com[pos] = committee.AttesterRef{Node: node, Val: node, Subnet: 0, Position: pos}
+		com[pos] = schedule.AttesterRef{Node: node, Val: node, Subnet: 0, Position: pos}
 	}
-	return &committee.Assignment{
-		Params: committee.Params{
+	return &schedule.Assignment{
+		Params: schedule.Params{
 			N: n, V: n, C: 1, Sc: len(attesters), SubnetCount: 64,
 			SubnetsPerNode: 1, SubscribeFloor: len(attesters), Seed: 1, NumSlots: 1,
 		},
 		SubnetSubscribers: [][]int{slices.Sorted(slices.Values(attesters))},
-		Slots: []committee.SlotPlan{{
-			Slot: 0, Committees: [][]committee.AttesterRef{com}, SubnetOf: []int{0},
+		Slots: []schedule.SlotPlan{{
+			Slot: 0, Committees: [][]schedule.AttesterRef{com}, SubnetOf: []int{0},
 		}},
 	}
 }

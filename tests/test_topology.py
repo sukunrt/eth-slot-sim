@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from simctl import committee, topology
+from simctl import schedule, topology
 
 
 def _adjacency(topo: topology.Topology) -> dict[int, set[int]]:
@@ -91,8 +91,8 @@ def test_supernode_ids_empty_when_fraction_off():
 
 
 def test_subnet_topology_connects_every_subnet_within_k():
-    a = committee.generate(
-        committee.Params(
+    a = schedule.generate(
+        schedule.Params(
             n=30, v=60, c=4, sc=4, subnets_per_node=2, subscribe_floor=10, seed=1, num_slots=1
         )
     )
@@ -119,8 +119,8 @@ def test_subnet_topology_connects_every_column_within_k():
     # The column custodiers (the DA backbone ∪ ordinary drawers) form one connected piece per
     # column, on top of the per-subnet + global trees, so each column's sidecar floods.
     supers = list(range(6))
-    a = committee.generate(
-        committee.Params(
+    a = schedule.generate(
+        schedule.Params(
             n=30, v=60, c=2, sc=4, subnets_per_node=2, subscribe_floor=10,
             num_columns=16, custody_floor=4, full_custody_fraction=0.5,
             column_backbone_floor=3, seed=1, num_slots=1,
@@ -140,8 +140,8 @@ def test_subnet_topology_connects_every_column_within_k():
 def test_subnet_topology_degrades_gracefully_for_small_n():
     # K far larger than N-1, plus a singleton and an empty subnet: no crash/spin, degree
     # capped at N-1, still connected.
-    a = committee.Assignment(
-        params=committee.Params(n=3, v=3, c=3, sc=1),
+    a = schedule.Assignment(
+        params=schedule.Params(n=3, v=3, c=3, sc=1),
         subnet_subscribers=[[0, 1, 2], [0], []],
         slots=[],
     )

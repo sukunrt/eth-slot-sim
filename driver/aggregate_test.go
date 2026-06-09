@@ -6,7 +6,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/committee"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/driver"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/netsim"
@@ -16,33 +16,33 @@ import (
 // aggAssignment builds a one-slot assignment focused on the aggregate phase: C committees
 // (one nominal attester each, so the attestation phase is well-formed but not the subject),
 // the given per-subnet subscribers, and the given per-committee aggregator node sets.
-func aggAssignment(n int, subscribers, aggregators [][]int) *committee.Assignment {
+func aggAssignment(n int, subscribers, aggregators [][]int) *schedule.Assignment {
 	c := len(subscribers)
-	sp := committee.SlotPlan{Slot: 0}
+	sp := schedule.SlotPlan{Slot: 0}
 	for ci := range c {
-		sp.Committees = append(sp.Committees, []committee.AttesterRef{
+		sp.Committees = append(sp.Committees, []schedule.AttesterRef{
 			{Node: subscribers[ci][0], Val: subscribers[ci][0], Subnet: ci, Position: 0},
 		})
 		sp.SubnetOf = append(sp.SubnetOf, ci)
 		sp.Aggregators = append(sp.Aggregators, aggregators[ci])
 	}
-	return &committee.Assignment{
-		Params: committee.Params{
+	return &schedule.Assignment{
+		Params: schedule.Params{
 			N: n, V: n, C: c, Sc: 1, SubnetCount: 64, SubnetsPerNode: 1,
 			SubscribeFloor: 1, TargetAggregators: 16, Seed: 1, NumSlots: 1,
 		},
 		SubnetSubscribers: subscribers,
-		Slots:             []committee.SlotPlan{sp},
+		Slots:             []schedule.SlotPlan{sp},
 	}
 }
 
 // aggDriver builds the real Driver over a committee-aware netsim with the aggregate phase
 // enabled (P=n-1 ⇒ the global aggregate topic is fully connected, so dissemination is
 // one-hop and the test isolates the coverage logic from the dial path).
-func aggDriver(t *testing.T, a *committee.Assignment, aggDue time.Duration, tr metrics.Tracer) *driver.Driver {
+func aggDriver(t *testing.T, a *schedule.Assignment, aggDue time.Duration, tr metrics.Tracer) *driver.Driver {
 	t.Helper()
 	n := a.Params.N
-	nw, err := netsim.NewWithCommittee(a, netsim.Config{
+	nw, err := netsim.NewWithSchedule(a, netsim.Config{
 		N: n, P: n - 1, Seed: 1, MinLatency: 5 * time.Millisecond, MaxLatency: 5 * time.Millisecond,
 	})
 	if err != nil {
@@ -55,7 +55,7 @@ func aggDriver(t *testing.T, a *committee.Assignment, aggDue time.Duration, tr m
 		AttestVerifyDelay: func() time.Duration { return 0 },
 		AttestBatchWindow: 10 * time.Millisecond,
 		D:                 8, Dlo: 6, Dhi: 12, Seed: 1,
-		Committee: a, Attest: true, AttestationDue: 4 * time.Second, AggregateDue: aggDue,
+		Schedule: a, Attest: true, AttestationDue: 4 * time.Second, AggregateDue: aggDue,
 	}, tr)
 }
 
@@ -66,7 +66,7 @@ type aggKey struct{ subnet, aggregator int }
 // every node EXCEPT that aggregator, exactly once. The aggregates are distinct per aggregator
 // (the signature), so a committee's other aggregators DO receive it — only the publisher's own
 // loopback is skipped.
-func assertAggregateCoverage(t *testing.T, a *committee.Assignment, rec *metrics.Recorder, slot int) {
+func assertAggregateCoverage(t *testing.T, a *schedule.Assignment, rec *metrics.Recorder, slot int) {
 	t.Helper()
 	sp := a.Slots[slot]
 	got := map[aggKey]map[int]int{}
@@ -107,7 +107,7 @@ func aggregateArrivalCount(rec *metrics.Recorder, slot int) int {
 	return n
 }
 
-// The headline test. Committee 0's aggregators {0,1} and committee 1's {0,3} (node 0
+// The headline test. Schedule 0's aggregators {0,1} and committee 1's {0,3} (node 0
 // aggregates both — a node in two committees). Each aggregator publishes one distinct
 // aggregate that reaches every node except itself.
 func TestAggregatesDistinctAndCover(t *testing.T) {

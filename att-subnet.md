@@ -16,8 +16,8 @@ is only about subnet **membership** (who receives/relays) and **connectivity**.
 - Centrally generated and seeded; the node doesn't pick — it reads the map. Stable for the
   whole run, identical on both backends.
 - Every node knows the full map: node *i* can look up "subnet 3 = {a,b,c,…}".
-- Carried in `committee.json` as `subnet_subscribers` (subnet → members); passed to Shadow
-  hosts via the `-committee=<path>` flag (simnet reads the same file via `SIMRUN_PARAMS`).
+- Carried in `schedule.json` as `subnet_subscribers` (subnet → members); passed to Shadow
+  hosts via the `-schedule=<path>` flag (simnet reads the same file via `SIMRUN_PARAMS`).
 
 ## 2. Topology — simulate discv5 (the K peers)
 - Every node targets `K` long-lived peers, **discv5-biased** so each subnet's subscribers
@@ -47,7 +47,7 @@ is only about subnet **membership** (who receives/relays) and **connectivity**.
 - **topology:** `augment_subnet_edges` (topology.py) is replaced by `generate_subnet_topology`
   and `subnetAwareGraph` (netsim) by `discv5Graph` — reach comes from the discv5-biased K
   peers + the per-slot dial; both build the global tree + per-subnet trees + fill to K.
-- **committee.py / committee (Go):** node-id backbone replaced by the subscribe set
+- **schedule.py / schedule (Go):** node-id backbone replaced by the subscribe set
   (≥`floor`/active subnet, `subnets_per_node`/node); aggregators dropped. `subscribers(subnet)`
   is stable (slot-independent). Committee draw unchanged.
 - **node:** add `Disconnect(peers)`; per-slot `Unsubscribe` removed (duty subnets are

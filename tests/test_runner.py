@@ -62,17 +62,17 @@ def test_generate_shadow_yaml_structure():
 
 
 def test_host_args_attestations_toggle():
-    # With attestations off, the host still gets -committee (for the proposer schedule) but
+    # With attestations off, the host still gets -schedule (for the proposer schedule) but
     # -attestations=false so the Go binary runs block-only on the same network.
     cfg_off = config.SimConfig(
         attestation=config.AttestationConfig(enabled=False),
     )
-    args_off = runner._host_args(cfg_off, 0, 3, [1, 2], "/run/committee.json")
-    assert "-committee=/run/committee.json" in args_off
+    args_off = runner._host_args(cfg_off, 0, 3, [1, 2], "/run/schedule.json")
+    assert "-schedule=/run/schedule.json" in args_off
     assert "-attestations=false" in args_off
 
     cfg_on = config.SimConfig(attestation=config.AttestationConfig())
-    args_on = runner._host_args(cfg_on, 0, 3, [1, 2], "/run/committee.json")
+    args_on = runner._host_args(cfg_on, 0, 3, [1, 2], "/run/schedule.json")
     assert "-attestations=true" in args_on
 
 
@@ -107,10 +107,10 @@ def _attest_config(**att_over) -> config.SimConfig:
     )
 
 
-def test_committee_assignment_carries_aggregator_knobs():
+def test_schedule_assignment_carries_aggregator_knobs():
     cfg = _attest_config(validators=24, committees=1, committee_size=2,
                          subscribe_floor=2, target_aggregators=4)
-    a = runner._committee_assignment(cfg)
+    a = runner._schedule_assignment(cfg)
     assert a.params.target_aggregators == 4
     assert len(a.slots[0].aggregators) == cfg.attestation.committees  # one set per committee
 
@@ -118,7 +118,7 @@ def test_committee_assignment_carries_aggregator_knobs():
 def test_attestation_run_args_include_aggregate_due():
     cfg = _attest_config(aggregate_due_ms=8000)
     topo = _toy_topology()
-    sh = runner.generate_shadow_yaml(cfg, topo, runner.compute_peer_lists(topo), "committee.json")
+    sh = runner.generate_shadow_yaml(cfg, topo, runner.compute_peer_lists(topo), "schedule.json")
     args = sh["hosts"]["node0"]["processes"][0]["args"]
     assert "-att-due=4000ms" in args
     assert "-agg-due=8000ms" in args

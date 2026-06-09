@@ -7,7 +7,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/committee"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
 )
@@ -43,12 +43,12 @@ func TestFullRunKGreaterThanOne(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		// vals 0 and 4 both live on node 0 (val % 4) ⇒ k=2; node 0 is not a subscriber of
 		// subnet 0, so it dials in.
-		a := &committee.Assignment{
-			Params:            committee.Params{N: 4, V: 8, C: 1, Sc: 2, SubnetCount: 64, SubnetsPerNode: 1, SubscribeFloor: 3, NumSlots: 1},
+		a := &schedule.Assignment{
+			Params:            schedule.Params{N: 4, V: 8, C: 1, Sc: 2, SubnetCount: 64, SubnetsPerNode: 1, SubscribeFloor: 3, NumSlots: 1},
 			SubnetSubscribers: [][]int{{1, 2, 3}},
-			Slots: []committee.SlotPlan{{
+			Slots: []schedule.SlotPlan{{
 				Slot: 0,
-				Committees: [][]committee.AttesterRef{{
+				Committees: [][]schedule.AttesterRef{{
 					{Node: 0, Val: 0, Subnet: 0, Position: 0},
 					{Node: 0, Val: 4, Subnet: 0, Position: 1},
 				}},

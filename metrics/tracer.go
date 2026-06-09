@@ -161,7 +161,7 @@ func (r *Recorder) FractionVotedBlock(slot int) float64 {
 // CustodyCompleteRate is the gate's companion to FractionVotedBlock: over a slot's custodiers,
 // the share that had ALL their custody columns by the deadline `due`. Together they attribute a
 // prior-head vote to a missing column (rate < 1) vs. a missing block. custody[node] is the
-// node's custody column set (from committee.View.CustodyColumns); the Recorder lacks the
+// node's custody column set (from schedule.View.CustodyColumns); the Recorder lacks the
 // custody sets and the deadline, so they're passed in. The proposer (the slot's block origin)
 // holds every column it made and counts complete without arrivals. 0 if no custodiers.
 func (r *Recorder) CustodyCompleteRate(slot int, custody map[int][]int, due time.Duration) float64 {

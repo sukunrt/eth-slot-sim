@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ethp2p/slot-sim/committee"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
 	"github.com/ethp2p/slot-sim/pb"
@@ -22,8 +22,8 @@ type NodeRunner struct {
 	num     int
 	nd      *node.Node
 	val     *validator.Validator
-	comm    *committee.Assignment // nil ⇒ block-only (Phase 1)
-	attest  bool                  // emit attestations (with comm set but false ⇒ columns-only)
+	sched    *schedule.Assignment // nil ⇒ block-only (Phase 1)
+	attest  bool                  // emit attestations (with sched set but false ⇒ columns-only)
 	tracer  metrics.Tracer
 	slotDur time.Duration
 	due     time.Duration // attestation deadline, offset into the slot
@@ -40,7 +40,7 @@ type NodeRunner struct {
 // slotState is the per-(node, slot) coupling holder.
 type slotState struct {
 	deadline time.Time
-	duties   []committee.AttestDuty
+	duties   []schedule.AttestDuty
 	dialed   []int // extra peers dialed this slot, dropped at slot end
 	timer    *time.Timer
 	emitOnce sync.Once
@@ -61,18 +61,18 @@ type slotState struct {
 	aggEmitOnce sync.Once
 }
 
-// NewRunner builds a runner for one node. comm may be nil (block-only). attest gates
-// attestation emission: comm set with attest false is a columns-only run (disseminate +
+// NewRunner builds a runner for one node. sched may be nil (block-only). attest gates
+// attestation emission: sched set with attest false is a columns-only run (disseminate +
 // measure columns, no vote). aggDue 0 disables the aggregate phase. basePeers is the node's
 // long-lived peer set (so per-slot subnet dials it adds on top can be dropped).
-func NewRunner(num int, nd *node.Node, val *validator.Validator, comm *committee.Assignment, attest bool,
+func NewRunner(num int, nd *node.Node, val *validator.Validator, sched *schedule.Assignment, attest bool,
 	tracer metrics.Tracer, slotDur, due, aggDue, prep time.Duration, seed uint64, basePeers []int) *NodeRunner {
 	base := make(map[int]bool, len(basePeers))
 	for _, p := range basePeers {
 		base[p] = true
 	}
 	return &NodeRunner{
-		num: num, nd: nd, val: val, comm: comm, attest: attest, tracer: tracer,
+		num: num, nd: nd, val: val, sched: sched, attest: attest, tracer: tracer,
 		slotDur: slotDur, due: due, aggDue: aggDue, prep: prep, seed: seed, base: base,
 		slots: make(map[int]*slotState),
 	}
@@ -84,7 +84,7 @@ func (r *NodeRunner) Attach() { r.nd.OnReceive = r.onReceive }
 // Prepare subscribes the node's own subnets (its long-lived meshes). Call during bring-up,
 // before the settle, so the meshes form before slot 0.
 func (r *NodeRunner) Prepare() {
-	if r.comm == nil {
+	if r.sched == nil {
 		return
 	}
 	if r.attest {
@@ -93,14 +93,14 @@ func (r *NodeRunner) Prepare() {
 				slog.Error("subscribe aggregate topic failed", "node", r.num, "err", err)
 			}
 		}
-		for _, s := range r.comm.Node(r.num).SubscribedSubnets() {
+		for _, s := range r.sched.Node(r.num).SubscribedSubnets() {
 			if err := r.nd.Subscribe(validator.AttestationTopic(s)); err != nil {
 				slog.Error("subscribe subnet failed", "node", r.num, "subnet", s, "err", err)
 			}
 		}
 	}
-	if r.comm.NumColumns > 0 { // the node's custody column meshes (the DA dissemination phase)
-		for _, c := range r.comm.Node(r.num).CustodyColumns() {
+	if r.sched.NumColumns > 0 { // the node's custody column meshes (the DA dissemination phase)
+		for _, c := range r.sched.Node(r.num).CustodyColumns() {
 			if err := r.nd.Subscribe(validator.ColumnTopic(c)); err != nil {
 				slog.Error("subscribe column failed", "node", r.num, "column", c, "err", err)
 			}
@@ -125,10 +125,10 @@ func (r *NodeRunner) Run(ctx context.Context, runStart time.Time, numSlots int) 
 // the block — all before the block publish, so a proposer that also attests can self-vote.
 func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 	var ss *slotState
-	if r.comm != nil && r.attest {
-		view := r.comm.Node(r.num)
+	if r.sched != nil && r.attest {
+		view := r.sched.Node(r.num)
 		ss = &slotState{deadline: slotStart.Add(r.due), duties: view.AttestDuties(slot)}
-		if r.comm.NumColumns > 0 {
+		if r.sched.NumColumns > 0 {
 			ss.custody = view.CustodyColumns()
 		}
 		ss.columnsComplete = len(ss.custody) == 0 // nothing to gate on ⇒ trivially complete
@@ -191,7 +191,7 @@ func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 // shuffledSubscribers returns subnet's subscribers in a seeded order (so the 2 dialed are
 // reproducible across runs/backends), keyed by (seed, slot, subnet).
 func (r *NodeRunner) shuffledSubscribers(slot, subnet int) []int {
-	subs := r.comm.Subscribers(subnet)
+	subs := r.sched.Subscribers(subnet)
 	order := make([]int, len(subs))
 	copy(order, subs)
 	rng := rand.New(rand.NewPCG(r.seed, uint64(slot)*1_000_003+uint64(subnet)))
@@ -228,8 +228,8 @@ func (r *NodeRunner) publishBlock(when time.Time, msg validator.Message) {
 	if err := r.nd.Publish(r.runCtx, msg.Topic, msg.Payload); err != nil {
 		slog.Error("publish block failed", "node", r.num, "slot", msg.Slot, "err", err)
 	}
-	if r.comm != nil && r.comm.NumColumns > 0 {
-		for col := range r.comm.NumColumns {
+	if r.sched != nil && r.sched.NumColumns > 0 {
+		for col := range r.sched.NumColumns {
 			cmsg := validator.MakeColumn(msg.Slot, col, r.num)
 			r.tracer.OnPublish(metrics.ColumnID(msg.Slot, col, r.num), false, now)
 			if err := r.nd.Publish(r.runCtx, cmsg.Topic, cmsg.Payload); err != nil {

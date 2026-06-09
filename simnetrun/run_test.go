@@ -15,7 +15,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/ethp2p/slot-sim/committee"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/driver"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/netsim"
@@ -39,9 +39,9 @@ type params struct {
 	Dhi             int     `json:"dhi"`
 	Seed            uint64  `json:"seed"`
 
-	// Attestation phase (empty Committee ⇒ block-only). Attest false with a Committee set
+	// Attestation phase (empty Schedule ⇒ block-only). Attest false with a Schedule set
 	// keeps the proposer schedule but emits no attestations (block-only on the same network).
-	Committee        string `json:"committee"`
+	Schedule        string `json:"schedule"`
 	Attest           bool   `json:"attest"`
 	AttDueMs         int    `json:"att_due_ms"`
 	AggDueMs         int    `json:"agg_due_ms"` // aggregate phase (0 ⇒ off)
@@ -50,8 +50,8 @@ type params struct {
 	AttPerItemMs     int    `json:"att_per_item_ms"`
 	AttBatchWindowMs int    `json:"att_batch_window_ms"`
 
-	// Data-columns phase (active when committee.json has num_columns > 0). The verifier P is
-	// sized per node from its full-custody role in committee.json.
+	// Data-columns phase (active when schedule.json has num_columns > 0). The verifier P is
+	// sized per node from its full-custody role in schedule.json.
 	ColVerifyServiceMs int `json:"col_verify_service_ms"`
 	ColVerifySuper     int `json:"col_verify_super"`
 	ColVerifyReg       int `json:"col_verify_regular"`
@@ -98,12 +98,12 @@ func TestRun(t *testing.T) {
 			D:            p.D, Dlo: p.Dlo, Dhi: p.Dhi,
 			Seed: p.Seed,
 		}
-		if p.Committee != "" {
-			a, err := committee.Load(p.Committee)
+		if p.Schedule != "" {
+			a, err := schedule.Load(p.Schedule)
 			if err != nil {
-				t.Fatalf("load committee %s: %v", p.Committee, err)
+				t.Fatalf("load schedule %s: %v", p.Schedule, err)
 			}
-			cfg.Committee = a
+			cfg.Schedule = a
 			cfg.Attest = p.Attest
 			cfg.AttestationDue = time.Duration(p.AttDueMs) * time.Millisecond
 			cfg.AggregateDue = time.Duration(p.AggDueMs) * time.Millisecond

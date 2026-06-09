@@ -9,7 +9,7 @@ Pure, seeded source of truth for the attestation phase. Two parts:
   into this set per slot; see att-subnet.md.
 
 `V`, `C`, `s_c` are independent knobs (only `C·s_c ≤ V`). The result serializes to
-``committee.json`` (consumed by both backends + the analysis), so the assignment is
+``schedule.json`` (consumed by both backends + the analysis), so the assignment is
 implemented once, here. Aggregation is out of scope for now.
 """
 
@@ -96,7 +96,7 @@ class Assignment:
             ],
         }
         # Column custody keys appear only when the phase is on (back-compat: a non-column
-        # committee.json is byte-identical to before).
+        # schedule.json is byte-identical to before).
         if self.params.num_columns > 0:
             d["num_columns"] = self.params.num_columns
             d["column_subscribers"] = self.column_subscribers

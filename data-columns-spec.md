@@ -9,12 +9,12 @@ and the gate outcome.
 
 This rides the machinery already built for the block (global proposer publish at t=0) and for
 attestations (`att-subnet.md` / `attestation-spec.md`: stable centrally-generated subscribe sets in
-`committee.json`, per-node verify queues, the block→attestation vote coupling in `driver/`). Columns
+`schedule.json`, per-node verify queues, the block→attestation vote coupling in `driver/`). Columns
 are "block-like origination on attestation-like subnets," with one new idea — **custody** — and one
 new coupling — columns **gate** the attestation.
 
 > All decisions are locked in §12. This spec assumes the attestation/aggregate phase is already
-> implemented (it is): `committee/`, `driver/coupling.go`+`runner.go`, `validator/attestation.go`,
+> implemented (it is): `schedule/`, `driver/coupling.go`+`runner.go`, `validator/attestation.go`,
 > the per-node batched verifier (`node/verifier.go`), the subnet-aware graph (`netsim/subnet.go`,
 > `simctl/topology.py`), and the receipt/CDF analysis (`analysis/check_arrivals.py`).
 
@@ -36,12 +36,12 @@ everywhere else.
 ## 1. Reuse vs. new
 
 **Reuse — as-is:**
-- The **proposer publish** path. The per-slot proposer is a supernode read from `committee.json`
-  (`committee.Assignment.ProposerSchedule`, `committee/committee.go:88`; the `Validator` obeys it,
+- The **proposer publish** path. The per-slot proposer is a supernode read from `schedule.json`
+  (`schedule.Assignment.ProposerSchedule`, `schedule/schedule.go:88`; the `Validator` obeys it,
   `validator/validator.go:58`). It publishes the block at `offset + rand(jitter)`
   (`driver/runner.go:160`, `publishBlock` at `:197`). Columns fire alongside, in the same burst.
 - The **subnet subscribe set + stable membership** pattern: a seeded, centrally-generated
-  `subnet → subscribers` map in `committee.json` (`simctl/committee.py:_subnet_subscribers`,
+  `subnet → subscribers` map in `schedule.json` (`simctl/schedule.py:_subnet_subscribers`,
   `:123`), read by both backends; `netsim.discv5Graph` (`netsim/subnet.go:35`) and
   `simctl.generate_subnet_topology` (`simctl/topology.py:272`) build a per-subnet-connected graph
   from it. Columns add a **second** such map, `column_subscribers`.
@@ -75,7 +75,7 @@ and therefore receives + relays. In PeerDAS it scales with the stake a node runs
 | **full-custody node** (a data-column supernode) | **all `num_columns`** | the full-custody set |
 
 - **Which 8** an ordinary node holds: a **seeded-random `custody_floor`-subset** of `num_columns`,
-  per node — exactly mirroring `_subnet_subscribers` (`simctl/committee.py:123`). Mainnet derives
+  per node — exactly mirroring `_subnet_subscribers` (`simctl/schedule.py:123`). Mainnet derives
   them from node-id; for dissemination timing only the subscribe-set *shape* matters, so
   seeded-random is equivalent, simpler, and reproducible across both backends from one seed.
 - **The full-custody set** is a **subset of the 1 Gbit bandwidth-supernodes** (full custody needs the
@@ -96,8 +96,8 @@ always erasure-codes into all of them — there is no "C active subset" for colu
 
 **`column_subscribers[i]` = the nodes custodying column `i`** = every full-custody node (all of them,
 since they custody all columns) ∪ the ordinary nodes that drew `i`. Generated once in
-`simctl/committee.py`, seeded, identical on both backends, carried in `committee.json` next to
-`subnet_subscribers`. The **full-custody set itself is also carried explicitly** in `committee.json`
+`simctl/schedule.py`, seeded, identical on both backends, carried in `schedule.json` next to
+`subnet_subscribers`. The **full-custody set itself is also carried explicitly** in `schedule.json`
 (see the cross-backend note below).
 
 **The thin-mesh problem and its fix.** Uniform custody-8 over `N` nodes gives only
@@ -115,7 +115,7 @@ The three backbone knobs, in plain English:
   run **errors at generation** (rather than silently producing a disconnected column network).
 - **`per_subnet_floor` (default 0 = off)** — an *optional* top-up that would sprinkle a few random
   custodiers into any thin subnet. Left off because the backbone already covers every subnet; a spare
-  safety valve, mirroring the attestation `subscribe_floor` top-up (`simctl/committee.py:133`).
+  safety valve, mirroring the attestation `subscribe_floor` top-up (`simctl/schedule.py:133`).
 
 **Graph construction.** Both builders add a second loop over `column_subscribers`, building a random
 spanning tree over each column's custodiers (so each column's custodiers are one connected piece),
@@ -131,12 +131,12 @@ on top of the existing global tree + per-attestation-subnet trees + fill-to-K:
 **Cross-backend note (important).** Go's `pickSupernodes` (`netsim/netsim.go:258`, a PCG shuffle) and
 Python's `supernode_ids` (`simctl/topology.py:121`, node-0-pinned Bernoulli draws) are **not
 bit-identical**. The supernode set and the full-custody subset are therefore **sourced from
-`committee.json`** (Python-generated) and **not re-derived in Go** — otherwise a full-custody node
+`schedule.json`** (Python-generated) and **not re-derived in Go** — otherwise a full-custody node
 could be handed a 25/50 Mbit pipe. (Cross-backend runs already share one `topology.json`, whose
 bandwidth classes encode the supernode set; `NewFromTopology` infers them from bandwidth,
 `netsim/netsim.go:101`.)
 
-**Proposer.** Must be a full-custody node (it originates all columns). `simctl/committee.py`'s
+**Proposer.** Must be a full-custody node (it originates all columns). `simctl/schedule.py`'s
 `generate` draws proposers from the **full-custody subset** instead of from all supernodes
 (today it draws from `supers`, `:118-119`). A proposer, being full-custody, is already subscribed to
 all column meshes at bring-up (`Prepare`), so it publishes on its own meshes — **no per-slot dialing**
@@ -265,7 +265,7 @@ Per `scaling.md §9`, the column subset:
 - `analysis/check_arrivals.py`: add `ColumnResult` + `analyze_columns` / `analyze_columns_csv`
   mirroring `analyze_attestations`: every custodier of column `i` received it (coverage); no
   non-custodier did (no-leak); per-column + aggregate CDFs. Load `column_subscribers` from
-  `committee.json` (mirroring `load_committee`).
+  `schedule.json` (mirroring `load_committee`).
 
 ---
 
@@ -304,11 +304,11 @@ Mirrors existing patterns: the `synctest.Test` skeleton + `buildScenario`/`run`/
 
 1. **`pb.Column` + topic + decode**: a proposer publishes one column on one subnet; a custodier
    receives + decodes it; arrival recorded. Smallest end-to-end (mirror `driver/blockonly_test.go`).
-2. **Custody map**: `simctl/committee.py` emits `column_subscribers` + the full-custody set (uniform-8
-   + full-custody backbone); the Go `committee.View` exposes a node's custody set (`CustodyColumns`);
+2. **Custody map**: `simctl/schedule.py` emits `column_subscribers` + the full-custody set (uniform-8
+   + full-custody backbone); the Go `schedule.View` exposes a node's custody set (`CustodyColumns`);
    assert per-node custody count, that every subnet has ≥ `column_backbone_floor` full-custody nodes,
-   and that proposers ∈ full-custody. Go in `committee/committee_test.go`; Python in
-   `tests/test_committee.py` (including the `F < floor` → raise case).
+   and that proposers ∈ full-custody. Go in `schedule/schedule_test.go`; Python in
+   `tests/test_schedule.py` (including the `F < floor` → raise case).
 3. **Full burst**: proposer publishes all `num_columns` at t=0; every custodier receives its custody
    columns exactly once; **no non-custodier receives** (no-leak); arrival spread is multi-hop
    (`assertColumnCoverageNoLeakage`, mirroring `assertCoverageNoLeakage`).
@@ -351,7 +351,7 @@ Mirrors existing patterns: the `synctest.Test` skeleton + `buildScenario`/`run`/
 - **Full-custody / backbone**: a **subset of the 1 Gbit supernodes**, `F = round(full_custody_fraction
   · n_super)`, default `full_custody_fraction = 0.5`, validated `≥ column_backbone_floor = 3` (else
   generation errors). `per_subnet_floor = 0` (off). The full-custody set is carried explicitly in
-  `committee.json` (Go must not re-derive it).
+  `schedule.json` (Go must not re-derive it).
 - **Proposer**: a full-custody node (drawn from the full-custody subset), **publishes all columns on
   its own meshes**, no per-slot dialing.
 - **Columns-only runs supported** (no gate, arrival CDF only) as well as gated runs; gate active only
@@ -375,10 +375,10 @@ Mirrors existing patterns: the `synctest.Test` skeleton + `buildScenario`/`run`/
 - **`node/node.go`**: `KindColumn Kind = 4` (`:34`); `decode` case (`:336`); three-way
   `registerVerifyHook` (`:213`) with a per-node column semaphore built in `JoinTopics` (`:131`); do
   **not** touch `batchedTopic` (`:206`).
-- **`committee/committee.go`**: `Assignment.ColumnSubscribers [][]int`
+- **`schedule/schedule.go`**: `Assignment.ColumnSubscribers [][]int`
   (`json:"column_subscribers"`) + `FullCustody []int` (`json:"full_custody"`) + column params
   (`:55`); `View.CustodyColumns()` and `View.ColumnSubscribers(col)` (after `:153`).
-- **`simctl/committee.py`**: generate `column_subscribers` + the full-custody subset (validate
+- **`simctl/schedule.py`**: generate `column_subscribers` + the full-custody subset (validate
   `F ≥ column_backbone_floor`); draw proposers from full-custody (change `generate`, `:108-120`);
   serialize (`to_dict`, `:59`).
 - **`simctl/topology.py`**: `generate_subnet_topology` (`:272`) second loop over `column_subscribers`.
@@ -389,7 +389,7 @@ Mirrors existing patterns: the `synctest.Test` skeleton + `buildScenario`/`run`/
   thread column knobs through `Config`/`New`, size each node's `P` from full-custody membership.
 - **`cmd/slot-sim-node/main.go`**: new `-data-columns` / `-num-columns` / `-col-blobs` /
   `-col-verify-service` / `-col-custody-floor` / P flags (mirror the `-attestations …` block, `:64-89`);
-  read custody + full-custody from `committee.json`. **`simnetrun/run_test.go`**: column params keys.
+  read custody + full-custody from `schedule.json`. **`simnetrun/run_test.go`**: column params keys.
 - **`simctl/config.py`**: `data_columns:` block on `SimConfig` (`:60`); require
   `super_node_fraction > 0` and `V ≥ N`.
 - **`metrics/tracer.go`**: `ColumnID(slot, column, origin)`; per-slot custody-complete rate alongside

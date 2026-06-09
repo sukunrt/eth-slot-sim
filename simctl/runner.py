@@ -1,9 +1,9 @@
 """Shadow + simnet run orchestration.
 
-Generates the committee assignment (when the run has an attestation phase), the
+Generates the schedule assignment (when the run has an attestation phase), the
 topology and GML network, and one Shadow host per node. The per-slot block proposer
-(a supernode) lives in committee.json; the attestation duties are computed in Go from
-committee.json + flags. So Python sets up inputs and both backends read the same files.
+(a supernode) lives in schedule.json; the attestation duties are computed in Go from
+schedule.json + flags. So Python sets up inputs and both backends read the same files.
 Also drives the simnet backend and the cross-backend comparison.
 """
 
@@ -18,7 +18,7 @@ from typing import Any
 import yaml
 
 from analysis import check_arrivals
-from simctl import committee
+from simctl import schedule
 from simctl.config import SimConfig
 from simctl.manifest import format_dir_timestamp, random_suffix, write_json_atomic
 from simctl.topology import (
@@ -30,8 +30,8 @@ from simctl.topology import (
 )
 
 
-def _committee_assignment(config: SimConfig) -> committee.Assignment | None:
-    """The committee assignment for this run, or None if the attestation phase is off. Block
+def _schedule_assignment(config: SimConfig) -> schedule.Assignment | None:
+    """The schedule assignment for this run, or None if the attestation phase is off. Block
     proposers are drawn from the topology's supernode set (the same supernode_ids the topology
     bandwidth uses, keyed by the topology seed), so only supernodes propose."""
     a = config.attestation
@@ -41,7 +41,7 @@ def _committee_assignment(config: SimConfig) -> committee.Assignment | None:
     supers = sorted(supernode_ids(tc.num_nodes, tc.super_node_fraction, tc.seed))
     col_kwargs: dict[str, Any] = {}
     dc = config.data_columns
-    if dc is not None and dc.enabled:  # the data-columns phase adds custody to committee.json
+    if dc is not None and dc.enabled:  # the data-columns phase adds custody to schedule.json
         col_kwargs = dict(
             num_columns=dc.num_columns,
             custody_floor=dc.custody_floor,
@@ -49,8 +49,8 @@ def _committee_assignment(config: SimConfig) -> committee.Assignment | None:
             column_backbone_floor=dc.column_backbone_floor,
             per_subnet_floor=dc.per_subnet_floor,
         )
-    return committee.generate(
-        committee.Params(
+    return schedule.generate(
+        schedule.Params(
             n=tc.num_nodes,
             v=a.validators,
             c=a.committees,
@@ -116,7 +116,7 @@ def generate_gml(topology: Topology, latency_multiple: float = 1.0) -> str:
 
 
 def _host_args(
-    config: SimConfig, node_num: int, num_nodes: int, peers: list[int], committee_path: str
+    config: SimConfig, node_num: int, num_nodes: int, peers: list[int], schedule_path: str
 ) -> str:
     """Command-line args for one slot-sim-node host. Shared flags are identical
     across hosts; node-num and peer-nums are per-host."""
@@ -136,11 +136,11 @@ def _host_args(
         f"-startup={config.startup_seconds}s",
         f"-rpc-log-node={config.rpc_log_node}",
     ]
-    if committee_path:
+    if schedule_path:
         # Always passed (absolute: a host's cwd is its own data dir). It carries the proposer
         # schedule, which applies whether or not attestations are on; -attestations alone gates
         # attestation traffic.
-        args.append(f"-committee={committee_path}")
+        args.append(f"-schedule={schedule_path}")
     if config.attestation is not None:
         a = config.attestation
         args += [
@@ -170,7 +170,7 @@ def generate_shadow_yaml(
     config: SimConfig,
     topology: Topology,
     peer_lists: dict[int, list[int]],
-    committee_path: str = "",
+    schedule_path: str = "",
     binary_path: str = "./slot-sim-node",
 ) -> dict[str, Any]:
     """Shadow configuration: one host per node, plus the GML network."""
@@ -182,7 +182,7 @@ def generate_shadow_yaml(
             "network_node_id": node.num,
             "processes": [{
                 "path": binary_path,
-                "args": _host_args(config, node.num, num_nodes, peer_lists.get(node.num, []), committee_path),
+                "args": _host_args(config, node.num, num_nodes, peer_lists.get(node.num, []), schedule_path),
                 "start_time": "0 sec",
             }],
         }
@@ -249,7 +249,7 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
             att_batch_window_ms=a.batch_window_ms,
         )
     dc = config.data_columns
-    if dc is not None and dc.enabled:  # custody lives in committee.json; these size the verifier
+    if dc is not None and dc.enabled:  # custody lives in schedule.json; these size the verifier
         params.update(
             col_verify_service_ms=dc.verify_service_ms,
             col_verify_super=dc.verify_parallelism_super,
@@ -258,7 +258,7 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
     return params
 
 
-def _build_topology(config: SimConfig, assignment: committee.Assignment | None) -> Topology:
+def _build_topology(config: SimConfig, assignment: schedule.Assignment | None) -> Topology:
     tc = config.topology
     if assignment is not None:
         # Attestation runs: one discv5-biased graph at target degree K (= tc.degree) where
@@ -307,20 +307,20 @@ def prepare_run_dir(config: SimConfig, output_dir: Path) -> Path:
     """Create a unique run dir and write topology.json, config.yaml, and
     shadow.yaml — everything except the Go binary and the shadow run itself.
     Shared by run_simulation and --dry-run."""
-    assignment = _committee_assignment(config)
+    assignment = _schedule_assignment(config)
     topology = _build_topology(config, assignment)
     peer_lists = compute_peer_lists(topology)
 
     run_dir = _create_run_dir(output_dir, config)
     topology.save(run_dir / "topology.json")
-    committee_path = ""
+    schedule_path = ""
     if assignment is not None:
-        committee_path = str((run_dir / "committee.json").resolve())
-        write_json_atomic(run_dir / "committee.json", assignment.to_dict())
+        schedule_path = str((run_dir / "schedule.json").resolve())
+        write_json_atomic(run_dir / "schedule.json", assignment.to_dict())
     with open(run_dir / "config.yaml", "w") as f:
         yaml.dump(config.model_dump(), f, default_flow_style=False, sort_keys=False)
     write_shadow_config(
-        generate_shadow_yaml(config, topology, peer_lists, committee_path), run_dir / "shadow.yaml"
+        generate_shadow_yaml(config, topology, peer_lists, schedule_path), run_dir / "shadow.yaml"
     )
     return run_dir
 
@@ -356,9 +356,9 @@ def run_simnet(config: SimConfig, run_dir: Path) -> Path:
     params = _simnet_params(config)
     params["topology"] = str((run_dir / "topology.json").resolve())
     params["csv"] = str(csv_path.resolve())
-    committee_path = run_dir / "committee.json"
-    if committee_path.exists():
-        params["committee"] = str(committee_path.resolve())
+    schedule_path = run_dir / "schedule.json"
+    if schedule_path.exists():
+        params["schedule"] = str(schedule_path.resolve())
     params_path = run_dir / "simnet_params.json"
     write_json_atomic(params_path, params)
 
@@ -403,24 +403,24 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
     }
 
     # Attestation phase: report both backends' coverage/no-leak + CDF. The simnet check
-    # against committee.json is the only automated coverage test of the real topology.json
+    # against schedule.json is the only automated coverage test of the real topology.json
     # graph (the Go suites only exercise the in-process discv5Graph). Skipped when
-    # attestations are disabled — committee.json still exists (for the proposer schedule),
+    # attestations are disabled — schedule.json still exists (for the proposer schedule),
     # but no attestation traffic was emitted, so coverage would be a spurious all-missing.
     attest_on = config.attestation is not None and config.attestation.enabled
     subscribers = check_arrivals.load_committee(run_dir) if attest_on else None
     if subscribers is not None:
-        committee_data = json.loads((run_dir / "committee.json").read_text())
+        schedule_data = json.loads((run_dir / "schedule.json").read_text())
         shadow_att = check_arrivals.analyze_attestations(pubs, arrs, subscribers)
-        simnet_att = check_arrivals.analyze_attestations_csv(csv_path, committee_data)
+        simnet_att = check_arrivals.analyze_attestations_csv(csv_path, schedule_data)
         comparison["attestations"] = {
             "expected": shadow_att.expected,
             "shadow": _att_summary(shadow_att),
             "simnet": _att_summary(simnet_att),
         }
-        if committee_data["slots"] and committee_data["slots"][0].get("aggregators"):
-            shadow_agg = check_arrivals.analyze_aggregates(pubs, arrs, committee_data)
-            simnet_agg = check_arrivals.analyze_aggregates_csv(csv_path, committee_data)
+        if schedule_data["slots"] and schedule_data["slots"][0].get("aggregators"):
+            shadow_agg = check_arrivals.analyze_aggregates(pubs, arrs, schedule_data)
+            simnet_agg = check_arrivals.analyze_aggregates_csv(csv_path, schedule_data)
             comparison["aggregates"] = {
                 "expected": shadow_agg.expected,
                 "shadow": _agg_summary(shadow_agg),
@@ -431,10 +431,10 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
     # the attestation gate above (a columns-only run still disseminates + measures columns).
     columns_on = config.data_columns is not None and config.data_columns.enabled
     if columns_on:
-        committee_data = json.loads((run_dir / "committee.json").read_text())
-        custodiers = {col: set(m) for col, m in enumerate(committee_data["column_subscribers"])}
+        schedule_data = json.loads((run_dir / "schedule.json").read_text())
+        custodiers = {col: set(m) for col, m in enumerate(schedule_data["column_subscribers"])}
         shadow_col = check_arrivals.analyze_columns(pubs, arrs, custodiers)
-        simnet_col = check_arrivals.analyze_columns_csv(csv_path, committee_data)
+        simnet_col = check_arrivals.analyze_columns_csv(csv_path, schedule_data)
         comparison["columns"] = {
             "expected": shadow_col.expected,
             "shadow": _col_summary(shadow_col),
@@ -442,7 +442,7 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
         }
 
     # Proposer guard: every scheduled proposer is a supernode, and every Shadow block was
-    # published by its slot's proposer. Both backends read this one committee.json, so a
+    # published by its slot's proposer. Both backends read this one schedule.json, so a
     # failure means the schedule or the two generated files disagree.
     proposers = check_arrivals.load_proposers(run_dir)
     supernodes = check_arrivals.load_supernodes(run_dir)
