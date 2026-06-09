@@ -240,6 +240,77 @@ def test_columns_off_keeps_committee_json_unchanged():
     assert "column_subscribers" not in d and "full_custody" not in d and "num_columns" not in d
 
 
+# --- sync-committee membership (node-based, stable for the run) ----------------
+#
+# A seeded subset of sync_size member nodes, each assigned one of sync_subnets subnets
+# round-robin (so subnets are even); per slot, sync_target_aggregators members per subnet
+# publish a contribution. Members subscribe their one subnet — no backbone, one message each.
+
+
+def test_sync_subscribers_partition_even_and_in_range():
+    p = schedule.Params(
+        n=40, v=80, c=2, sc=4, sync_size=20, sync_subnets=4, num_slots=2
+    )
+    a = schedule.generate(p)
+    assert a.sync_subscribers is not None
+    assert len(a.sync_subscribers) == p.sync_subnets
+    flat = [m for subs in a.sync_subscribers for m in subs]
+    # Exactly sync_size distinct member nodes, in range, each on exactly one subnet.
+    assert len(flat) == p.sync_size
+    assert len(set(flat)) == p.sync_size
+    assert all(0 <= m < p.n for m in flat)
+    # Subnets are even: round-robin ⇒ each holds floor or ceil of size/subnets, sorted/distinct.
+    lo, hi = divmod(p.sync_size, p.sync_subnets)
+    for subs in a.sync_subscribers:
+        assert len(subs) in (lo, lo + (1 if hi else 0))
+        assert subs == sorted(set(subs))
+
+
+def test_sync_size_exceeds_n_raises():
+    with pytest.raises(ValueError):
+        schedule.generate(schedule.Params(n=8, v=16, c=1, sc=2, sync_size=10, sync_subnets=2))
+
+
+def test_sync_subnets_exceeds_size_raises():
+    with pytest.raises(ValueError):
+        schedule.generate(schedule.Params(n=20, v=40, c=1, sc=2, sync_size=4, sync_subnets=8))
+
+
+def test_sync_aggregators_are_subscribers_and_clamped():
+    # target > a subnet's member count ⇒ every member aggregates (clamped); else exactly target.
+    p = schedule.Params(
+        n=40, v=80, c=2, sc=4, sync_size=20, sync_subnets=4,
+        sync_target_aggregators=3, num_slots=3,
+    )
+    a = schedule.generate(p)
+    for sp in a.slots:
+        assert sp.sync_aggregators is not None
+        assert len(sp.sync_aggregators) == p.sync_subnets
+        for i, aggs in enumerate(sp.sync_aggregators):
+            subs = a.sync_subscribers[i]
+            assert len(aggs) == min(p.sync_target_aggregators, len(subs))
+            assert aggs == sorted(set(aggs))
+            assert set(aggs) <= set(subs)
+
+
+def test_sync_off_keeps_schedule_json_unchanged():
+    # sync_subnets=0 (off) ⇒ no sync keys in schedule.json (back-compat with non-sync runs).
+    d = schedule.generate(schedule.Params(n=8, v=16, c=2, sc=4, num_slots=1), supers=[0, 1]).to_dict()
+    assert "sync_subscribers" not in d
+    assert all("sync_aggregators" not in s for s in d["slots"])
+
+
+def test_sync_same_seed_identical_seed_plus_one_differs():
+    base = schedule.Params(
+        n=40, v=80, c=2, sc=4, sync_size=16, sync_subnets=4, seed=7, num_slots=3
+    )
+    assert schedule.generate(base).to_dict() == schedule.generate(base).to_dict()
+    other = schedule.Params(
+        n=40, v=80, c=2, sc=4, sync_size=16, sync_subnets=4, seed=8, num_slots=3
+    )
+    assert schedule.generate(other).to_dict() != schedule.generate(base).to_dict()
+
+
 def test_aggregators_seeded_vary_across_slots_and_with_seed():
     base = schedule.Params(
         n=40, v=80, c=2, sc=4, subscribe_floor=20, target_aggregators=4, seed=7, num_slots=4

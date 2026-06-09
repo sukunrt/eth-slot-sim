@@ -49,6 +49,9 @@ type SlotPlan struct {
 	SubnetOf    []int           `json:"subnet_of"`   // [committee] → subnet id
 	Proposer    int             `json:"proposer"`    // node that publishes this slot's block (a supernode)
 	Aggregators [][]int         `json:"aggregators"` // [committee] → aggregator node ids
+	// SyncAggregators[i] = aggregator node ids on sync subnet i (drawn from SyncSubscribers[i]);
+	// each publishes one contribution on the global topic. Empty/nil when the sync phase is off.
+	SyncAggregators [][]int `json:"sync_aggregators,omitempty"`
 }
 
 // Assignment is the whole run's plan: the stable per-subnet subscribe set plus the
@@ -63,10 +66,15 @@ type Assignment struct {
 	// i (the full-custody backbone ∪ the ordinary nodes that drew i); FullCustody = nodes
 	// holding every column. Generated in Python, carried here verbatim (Go never re-derives
 	// the full-custody set — see data-columns-spec.md §3).
-	NumColumns        int        `json:"num_columns,omitempty"`
-	ColumnSubscribers [][]int    `json:"column_subscribers,omitempty"`
-	FullCustody       []int      `json:"full_custody,omitempty"`
-	Slots             []SlotPlan `json:"slots"`
+	NumColumns        int     `json:"num_columns,omitempty"`
+	ColumnSubscribers [][]int `json:"column_subscribers,omitempty"`
+	FullCustody       []int   `json:"full_custody,omitempty"`
+	// Sync-committee membership (the dissemination + contribution phase). Empty when off.
+	// SyncSubscribers[i] = the member nodes on sync subnet i (stable for the run; a member is on
+	// exactly one subnet) — both the subnet's mesh and the per-subnet coverage set. Generated in
+	// Python, carried here verbatim. The transpose of the per-node membership attribute.
+	SyncSubscribers [][]int    `json:"sync_subscribers,omitempty"`
+	Slots           []SlotPlan `json:"slots"`
 }
 
 // Load reads a schedule.json produced by simctl/schedule.py.
@@ -98,6 +106,15 @@ func (a *Assignment) ColumnSubscribersOf(col int) []int {
 		return nil
 	}
 	return a.ColumnSubscribers[col]
+}
+
+// SyncSubscribersOf returns the member nodes on sync subnet i (its stable subscriber set) — the
+// expected receiver set for any sync message on it. Nil if i is out of range.
+func (a *Assignment) SyncSubscribersOf(subnet int) []int {
+	if subnet < 0 || subnet >= len(a.SyncSubscribers) {
+		return nil
+	}
+	return a.SyncSubscribers[subnet]
 }
 
 // ProposerSchedule returns the per-slot block proposer (a supernode), one entry per slot in
@@ -191,6 +208,35 @@ func (v View) AggregateSubnets(slot int) []int {
 	for ci, aggs := range sp.Aggregators {
 		if slices.Contains(aggs, v.node) {
 			out = append(out, sp.SubnetOf[ci])
+		}
+	}
+	return out
+}
+
+// SyncSubnet returns this node's sync-committee subnet and whether it is a member. Membership is
+// node-based and stable: a member is on exactly one subnet (round-robin assignment) and emits one
+// message there; a non-member returns (-1, false) and emits none.
+func (v View) SyncSubnet() (subnet int, member bool) {
+	for s, members := range v.a.SyncSubscribers {
+		if slices.Contains(members, v.node) {
+			return s, true
+		}
+	}
+	return -1, false
+}
+
+// SyncAggregateSubnets returns the sync subnets this node aggregates this slot — the subnets whose
+// aggregator set includes it. It publishes one contribution on each (on the global contribution
+// topic). Empty if the node isn't a sync aggregator this slot. SyncAggregators is indexed by
+// subnet directly (unlike attestation Aggregators, which need the SubnetOf map).
+func (v View) SyncAggregateSubnets(slot int) []int {
+	if slot < 0 || slot >= len(v.a.Slots) {
+		return nil
+	}
+	var out []int
+	for subnet, aggs := range v.a.Slots[slot].SyncAggregators {
+		if slices.Contains(aggs, v.node) {
+			out = append(out, subnet)
 		}
 	}
 	return out

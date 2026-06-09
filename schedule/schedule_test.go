@@ -225,6 +225,50 @@ func TestCustodyColumns(t *testing.T) {
 	}
 }
 
+// SyncSubnet / SyncSubscribersOf / SyncAggregateSubnets expose the sync-committee membership
+// carried in schedule.json: a member is on exactly one subnet (round-robin), and the per-slot
+// sync aggregators are drawn from a subnet's members.
+func TestSyncMembership(t *testing.T) {
+	a := &Assignment{
+		Params: Params{N: 6, NumSlots: 1},
+		// 4 members: subnet 0 = {0,2}, subnet 1 = {4,5}; nodes 1,3 are non-members.
+		SyncSubscribers: [][]int{{0, 2}, {4, 5}},
+		Slots: []SlotPlan{{
+			Slot:            0,
+			SyncAggregators: [][]int{{0}, {4, 5}}, // subnet 0 → {0}; subnet 1 → {4,5}
+		}},
+	}
+	// SyncSubnet: members map to their one subnet; non-members return (-1,false).
+	for node, want := range map[int]int{0: 0, 2: 0, 4: 1, 5: 1} {
+		if got, member := a.Node(node).SyncSubnet(); !member || got != want {
+			t.Fatalf("node %d SyncSubnet = (%d,%v), want (%d,true)", node, got, member, want)
+		}
+	}
+	for _, node := range []int{1, 3} {
+		if got, member := a.Node(node).SyncSubnet(); member || got != -1 {
+			t.Fatalf("node %d SyncSubnet = (%d,%v), want (-1,false)", node, got, member)
+		}
+	}
+	// SyncSubscribersOf: a subnet's member set; out-of-range ⇒ nil.
+	if got := a.SyncSubscribersOf(1); !slices.Equal(got, []int{4, 5}) {
+		t.Fatalf("SyncSubscribersOf(1) = %v, want [4 5]", got)
+	}
+	if got := a.SyncSubscribersOf(9); got != nil {
+		t.Fatalf("SyncSubscribersOf(9) = %v, want nil", got)
+	}
+	// SyncAggregateSubnets: the subnets whose aggregator set includes the node.
+	if got := a.Node(5).SyncAggregateSubnets(0); !slices.Equal(got, []int{1}) {
+		t.Fatalf("node5 SyncAggregateSubnets = %v, want [1]", got)
+	}
+	if got := a.Node(0).SyncAggregateSubnets(0); !slices.Equal(got, []int{0}) {
+		t.Fatalf("node0 SyncAggregateSubnets = %v, want [0]", got)
+	}
+	// A member that isn't an aggregator this slot aggregates nothing.
+	if got := a.Node(2).SyncAggregateSubnets(0); got != nil {
+		t.Fatalf("node2 SyncAggregateSubnets = %v, want nil", got)
+	}
+}
+
 // AggregateSubnets returns the subnets a node aggregates this slot — the committees whose
 // aggregator set includes it. A node can aggregate several committees, or none.
 func TestAggregateSubnets(t *testing.T) {

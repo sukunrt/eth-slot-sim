@@ -40,6 +40,12 @@ class Params:
     full_custody_fraction: float = 0.5
     column_backbone_floor: int = 3  # min F so every column subnet has a backbone core
     per_subnet_floor: int = 0  # optional thin-column backstop (0 = off; the backbone covers it)
+    # Sync-committee phase (sync_subnets 0 ⇒ off). Node-based membership: sync_size member nodes
+    # (a seeded subset of N), each assigned one of sync_subnets subnets round-robin; per slot,
+    # sync_target_aggregators members per subnet publish a contribution. See sync-committee-spec.md.
+    sync_size: int = 0
+    sync_subnets: int = 0
+    sync_target_aggregators: int = 16  # TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE; clamped to members
 
 
 @dataclass(frozen=True)
@@ -57,6 +63,8 @@ class SlotPlan:
     subnet_of: list[int]  # [committee] → subnet id
     aggregators: list[list[int]]  # [committee] → aggregator node ids (subset of its subscribers)
     proposer: int = 0  # node that publishes this slot's block (a supernode; see generate)
+    # [sync subnet] → aggregator node ids (subset of its members); None when the sync phase is off.
+    sync_aggregators: list[list[int]] | None = None
 
 
 @dataclass
@@ -68,6 +76,9 @@ class Assignment:
     # custodying column i; full_custody = the nodes holding every column (the relay backbone).
     column_subscribers: list[list[int]] | None = None
     full_custody: list[int] | None = None
+    # Sync-committee membership (None when off). sync_subscribers[i] = the member nodes on sync
+    # subnet i (stable; each member on exactly one subnet) — the subnet's mesh and coverage set.
+    sync_subscribers: list[list[int]] | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -84,16 +95,7 @@ class Assignment:
                 "num_slots": self.params.num_slots,
             },
             "subnet_subscribers": self.subnet_subscribers,
-            "slots": [
-                {
-                    "slot": s.slot,
-                    "committees": [[_ref_dict(r) for r in com] for com in s.committees],
-                    "subnet_of": s.subnet_of,
-                    "aggregators": s.aggregators,
-                    "proposer": s.proposer,
-                }
-                for s in self.slots
-            ],
+            "slots": [_slot_dict(s) for s in self.slots],
         }
         # Column custody keys appear only when the phase is on (back-compat: a non-column
         # schedule.json is byte-identical to before).
@@ -101,11 +103,28 @@ class Assignment:
             d["num_columns"] = self.params.num_columns
             d["column_subscribers"] = self.column_subscribers
             d["full_custody"] = self.full_custody
+        # Sync membership appears only when the phase is on (the per-slot sync_aggregators ride
+        # each slot dict via _slot_dict).
+        if self.params.sync_subnets > 0:
+            d["sync_subscribers"] = self.sync_subscribers
         return d
 
 
 def _ref_dict(r: AttesterRef) -> dict:
     return {"node": r.node, "val": r.val, "subnet": r.subnet, "position": r.position}
+
+
+def _slot_dict(s: SlotPlan) -> dict:
+    d = {
+        "slot": s.slot,
+        "committees": [[_ref_dict(r) for r in com] for com in s.committees],
+        "subnet_of": s.subnet_of,
+        "aggregators": s.aggregators,
+        "proposer": s.proposer,
+    }
+    if s.sync_aggregators is not None:  # only when the sync phase is on
+        d["sync_aggregators"] = s.sync_aggregators
+    return d
 
 
 def _rng(seed: int, *stream: int) -> random.Random:
@@ -150,13 +169,22 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
         column_subscribers = _column_subscribers(p, full_custody)
         proposer_pool = full_custody  # proposers originate all columns ⇒ must be full-custody
 
+    sync_subscribers: list[list[int]] | None = None
+    if p.sync_subnets > 0:
+        if p.sync_size > p.n:
+            raise ValueError(f"sync_size ({p.sync_size}) > N ({p.n})")
+        if p.sync_subnets > p.sync_size:
+            raise ValueError(f"sync_subnets ({p.sync_subnets}) > sync_size ({p.sync_size})")
+        sync_subscribers = _sync_subscribers(p)
+
     slots = [
-        _slot_plan(p, slot, subscribers, proposer_pool[slot % len(proposer_pool)])
+        _slot_plan(p, slot, subscribers, proposer_pool[slot % len(proposer_pool)], sync_subscribers)
         for slot in range(p.num_slots)
     ]
     return Assignment(
         params=p, subnet_subscribers=subscribers, slots=slots,
         column_subscribers=column_subscribers, full_custody=full_custody,
+        sync_subscribers=sync_subscribers,
     )
 
 
@@ -216,7 +244,25 @@ def _subnet_subscribers(p: Params) -> list[list[int]]:
     return [sorted(s) for s in subs]
 
 
-def _slot_plan(p: Params, slot: int, subscribers: list[list[int]], proposer: int) -> SlotPlan:
+def _sync_subscribers(p: Params) -> list[list[int]]:
+    """sync_subscribers[i] = the member nodes on sync subnet i. Draw sync_size member nodes from
+    0..N-1 (seeded), assign each a subnet round-robin (member j → j % sync_subnets) so subnets are
+    even; a member is on exactly one subnet. Stable for the run — both the subnet's mesh and its
+    coverage set. Node-based (like column custody), not the per-node subnet subscribe."""
+    members = _rng(p.seed, 6).sample(range(p.n), p.sync_size)
+    subs: list[list[int]] = [[] for _ in range(p.sync_subnets)]
+    for j, node in enumerate(members):
+        subs[j % p.sync_subnets].append(node)
+    return [sorted(s) for s in subs]
+
+
+def _slot_plan(
+    p: Params,
+    slot: int,
+    subscribers: list[list[int]],
+    proposer: int,
+    sync_subscribers: list[list[int]] | None = None,
+) -> SlotPlan:
     # Independent per-slot draw: s_c·C distinct validators, chunked into C committees.
     vals = _rng(p.seed, 2, slot).sample(range(p.v), p.c * p.sc)
     agg_rng = _rng(p.seed, 3, slot)  # aggregator draw, independent of the committee draw
@@ -236,4 +282,16 @@ def _slot_plan(p: Params, slot: int, subscribers: list[list[int]], proposer: int
         subs = subscribers[subnet]
         k = min(p.target_aggregators, len(subs))
         aggregators.append(sorted(agg_rng.sample(subs, k)))
-    return SlotPlan(slot=slot, committees=committees, subnet_of=subnet_of, aggregators=aggregators, proposer=proposer)
+    # Sync aggregators: per subnet, sync_target_aggregators members (clamped), drawn from that
+    # subnet's stable membership — exactly as attestation aggregators are drawn from subscribers.
+    sync_aggregators: list[list[int]] | None = None
+    if sync_subscribers is not None:
+        sync_rng = _rng(p.seed, 7, slot)
+        sync_aggregators = [
+            sorted(sync_rng.sample(subs, min(p.sync_target_aggregators, len(subs))))
+            for subs in sync_subscribers
+        ]
+    return SlotPlan(
+        slot=slot, committees=committees, subnet_of=subnet_of, aggregators=aggregators,
+        proposer=proposer, sync_aggregators=sync_aggregators,
+    )
