@@ -32,12 +32,15 @@ const defaultBatchWindow = 50 * time.Millisecond
 type Kind int
 
 const (
-	KindBlock            Kind = 1
-	KindAttestation      Kind = 2
-	KindAggregate        Kind = 3
-	KindColumn           Kind = 4
-	KindSyncMessage      Kind = 5
-	KindSyncContribution Kind = 6
+	KindBlock             Kind = 1
+	KindAttestation       Kind = 2
+	KindAggregate         Kind = 3
+	KindColumn            Kind = 4
+	KindSyncMessage       Kind = 5
+	KindSyncContribution  Kind = 6
+	KindACVote            Kind = 7
+	KindFinalityVote      Kind = 8
+	KindFinalityAggregate Kind = 9
 )
 
 // Received is the node's outward hand-off for one decoded message: the node
@@ -78,7 +81,7 @@ type Node struct {
 	RPCLogger *slog.Logger
 
 	ps          *pubsub.PubSub
-	verifier    *batchVerifier
+	verifiers   map[string]*batchVerifier // flood class → its single-server queue (lazy; see batchClass)
 	colVerifier *columnVerifier
 
 	mu        sync.Mutex
@@ -143,18 +146,8 @@ func (n *Node) JoinTopics(ctx context.Context) error {
 	n.topics = make(map[string]*pubsub.Topic)
 	n.validated = make(map[string]bool)
 	n.subs = make(map[string]*pubsub.Subscription)
+	n.verifiers = make(map[string]*batchVerifier)
 	n.rctx, n.cancel = context.WithCancel(ctx)
-
-	base := n.AttestVerifyDelay
-	if base == nil {
-		base = n.VerifyDelay
-	}
-	window := n.AttestBatchWindow
-	if window <= 0 {
-		window = defaultBatchWindow
-	}
-	n.verifier = newBatchVerifier(base, n.AttestPerItem, window, slog.Default())
-	go n.verifier.run()
 
 	colService := n.ColVerifyService
 	if colService == nil {
@@ -217,14 +210,48 @@ func (n *Node) Subscribe(topic string) error {
 	return nil
 }
 
-// batchedTopic reports whether topic's verification routes through the per-node batched
-// verifier (the t≈4s attestation/sync-message floods and the t≈8s aggregate/contribution
-// floods) rather than the block's fixed per-hop delay (one block per slot). The sync floods
-// join the same single-server queue as attestations (one CPU). SyncMessageTopicPrefix also
-// covers SyncContributionTopic, which shares the prefix.
-func batchedTopic(topic string) bool {
-	return strings.HasPrefix(topic, validator.AttestationTopicPrefix) || topic == validator.AggregateTopic ||
-		strings.HasPrefix(topic, validator.SyncMessageTopicPrefix)
+// batchClass reports which batched-verifier queue topic's verification routes through, or "" for
+// none (the block's fixed per-hop delay; columns have their own width-P verifier). Each class is an
+// independent single-server queue (one CPU per flood): "consensus" carries the t≈4s
+// attestation/sync-message and t≈8s aggregate/contribution floods (they share one CPU, as today;
+// SyncMessageTopicPrefix also covers SyncContributionTopic); the decoupled floods each get their
+// own — "ac" (availability votes), "fcvote" (finality votes), "fcagg" (finality aggregates) — so
+// they do NOT contend with each other. finality_vote_ and finality_aggregate_ don't share a prefix.
+func batchClass(topic string) string {
+	switch {
+	case topic == validator.AvailabilityVoteTopic:
+		return "ac"
+	case strings.HasPrefix(topic, validator.FinalityVoteTopicPrefix):
+		return "fcvote"
+	case topic == validator.FinalityAggregateTopic:
+		return "fcagg"
+	case strings.HasPrefix(topic, validator.AttestationTopicPrefix), topic == validator.AggregateTopic,
+		strings.HasPrefix(topic, validator.SyncMessageTopicPrefix):
+		return "consensus"
+	default:
+		return ""
+	}
+}
+
+// batchVerifierFor returns the batched verifier for a flood class, creating it (and starting its
+// run loop) on first use, so a node spins up only the queues it actually joins. All classes use the
+// same validation-as-sleep knobs. Caller holds n.mu.
+func (n *Node) batchVerifierFor(class string) *batchVerifier {
+	if v, ok := n.verifiers[class]; ok {
+		return v
+	}
+	base := n.AttestVerifyDelay
+	if base == nil {
+		base = n.VerifyDelay
+	}
+	window := n.AttestBatchWindow
+	if window <= 0 {
+		window = defaultBatchWindow
+	}
+	v := newBatchVerifier(base, n.AttestPerItem, window, slog.Default())
+	go v.run()
+	n.verifiers[class] = v
+	return v
 }
 
 // columnTopic reports whether topic is a data-column subnet — its verification routes through
@@ -234,23 +261,24 @@ func columnTopic(topic string) bool {
 }
 
 // registerVerifyHook registers topic's validation-as-sleep hook once, three-way: the column
-// burst goes through the per-node P-server column verifier; the attestation and aggregate
-// floods share the batched verifier (the M/D/1 flood queue); everything else (the block) gets
-// the fixed per-hop delay. Caller holds n.mu.
+// burst goes through the per-node P-server column verifier; a batched flood goes through its
+// class's single-server queue (batchClass); everything else (the block) gets the fixed per-hop
+// delay. Caller holds n.mu.
 func (n *Node) registerVerifyHook(topic string) error {
 	if n.validated[topic] {
 		return nil
 	}
 	var hook pubsub.ValidatorEx
-	switch {
+	switch class := batchClass(topic); {
 	case columnTopic(topic):
 		hook = func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
 			n.colVerifier.verify()
 			return pubsub.ValidationAccept
 		}
-	case batchedTopic(topic):
+	case class != "":
+		v := n.batchVerifierFor(class)
 		hook = func(context.Context, peer.ID, *pubsub.Message) pubsub.ValidationResult {
-			n.verifier.submitAndWait(verificationItem{Attestations: []any{nil}})
+			v.submitAndWait(verificationItem{Attestations: []any{nil}})
 			return pubsub.ValidationAccept
 		}
 	default:
@@ -266,7 +294,7 @@ func (n *Node) registerVerifyHook(topic string) error {
 	return nil
 }
 
-// Close stops the receive loops and the verifier and waits for them to exit. A
+// Close stops the receive loops and every batched verifier and waits for them to exit. A
 // no-op if the node never joined; safe to call once.
 func (n *Node) Close() {
 	if n.cancel != nil {
@@ -277,9 +305,13 @@ func (n *Node) Close() {
 	for _, sub := range n.subs {
 		sub.Cancel()
 	}
+	verifiers := make([]*batchVerifier, 0, len(n.verifiers))
+	for _, v := range n.verifiers {
+		verifiers = append(verifiers, v)
+	}
 	n.mu.Unlock()
-	if n.verifier != nil {
-		n.verifier.stop()
+	for _, v := range verifiers { // stop() blocks on drain, so release n.mu first
+		v.stop()
 	}
 }
 
@@ -404,6 +436,24 @@ func decode(topic string, data []byte, at time.Time) (Received, error) {
 			return Received{}, err
 		}
 		return Received{Kind: KindSyncMessage, Obj: sm, At: at}, nil
+	case topic == validator.AvailabilityVoteTopic:
+		v := new(pb.ACVote)
+		if err := proto.Unmarshal(data, v); err != nil {
+			return Received{}, err
+		}
+		return Received{Kind: KindACVote, Obj: v, At: at}, nil
+	case topic == validator.FinalityAggregateTopic: // before the vote prefix (distinct stems, but explicit)
+		fa := new(pb.FinalityAggregate)
+		if err := proto.Unmarshal(data, fa); err != nil {
+			return Received{}, err
+		}
+		return Received{Kind: KindFinalityAggregate, Obj: fa, At: at}, nil
+	case strings.HasPrefix(topic, validator.FinalityVoteTopicPrefix):
+		fv := new(pb.FinalityVote)
+		if err := proto.Unmarshal(data, fv); err != nil {
+			return Received{}, err
+		}
+		return Received{Kind: KindFinalityVote, Obj: fv, At: at}, nil
 	default:
 		return Received{}, fmt.Errorf("unknown topic %q", topic)
 	}

@@ -6,22 +6,29 @@ import (
 	"github.com/ethp2p/slot-sim/validator"
 )
 
-// batchedTopic decides which topics route through the per-node batched verifier — the t≈4s
-// attestation flood and the t≈8s aggregate flood — vs the fixed per-hop delay (the block,
-// one per slot).
-func TestBatchedTopic(t *testing.T) {
+// batchClass decides which single-server queue a topic's verification routes through: the existing
+// attestation/aggregate/sync floods share "consensus"; the decoupled floods each get their own
+// ("ac"/"fcvote"/"fcagg"); the block and anything else get "" (fixed per-hop / column verifier).
+func TestBatchClass(t *testing.T) {
 	cases := []struct {
 		topic string
-		want  bool
+		want  string
 	}{
-		{validator.BlockTopic, false},
-		{validator.AttestationTopic(0), true},
-		{validator.AttestationTopic(63), true},
-		{validator.AggregateTopic, true},
+		{validator.BlockTopic, ""},
+		{validator.ColumnTopic(0), ""},
+		{validator.AttestationTopic(0), "consensus"},
+		{validator.AttestationTopic(63), "consensus"},
+		{validator.AggregateTopic, "consensus"},
+		{validator.SyncMessageTopic(0), "consensus"},
+		{validator.SyncContributionTopic, "consensus"},
+		{validator.AvailabilityVoteTopic, "ac"},
+		{validator.FinalityVoteTopic(0), "fcvote"},
+		{validator.FinalityVoteTopic(39), "fcvote"},
+		{validator.FinalityAggregateTopic, "fcagg"},
 	}
 	for _, c := range cases {
-		if got := batchedTopic(c.topic); got != c.want {
-			t.Errorf("batchedTopic(%q) = %v, want %v", c.topic, got, c.want)
+		if got := batchClass(c.topic); got != c.want {
+			t.Errorf("batchClass(%q) = %q, want %q", c.topic, got, c.want)
 		}
 	}
 }

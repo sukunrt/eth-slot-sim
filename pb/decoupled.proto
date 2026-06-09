@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package block;
+
+option go_package = "github.com/ethp2p/slot-sim/pb";
+
+// ACVote is the availability-chain vote (~240 B), one per VRF-selected validator per slot,
+// published on the single global availability_vote topic (no subnets, no committees, no
+// aggregation — every node downloads all). Like an attestation, it is block→vote coupled and
+// data-availability gated, so voted_origin records the voted block's origin (proposer node) or a
+// sentinel (max uint32) for the prior head — the measurable output of the column gate over the
+// global voter set. There is deliberately no subnet field: the topic is global.
+message ACVote {
+  uint32 slot         = 1;
+  uint32 val          = 2; // global validator index — the stable identity
+  uint32 origin       = 3; // publishing node (gossip origin; for the loopback skip)
+  uint32 voted_origin = 4; // voted block's origin, or a sentinel (max uint32) for prior head
+  bytes  payload      = 5; // random filler so the marshaled message ≈ 240 B
+}
+
+// FinalityVote is the finality-chain vote (~226 B), one per validator a node hosts, published on
+// the node's stable finality subnet at a fixed offset into the finality slot. It is
+// dissemination-only this cut (no fork-choice outcome measured): un-gated by data availability and
+// not block-coupled, so it carries no voted_origin. val is the identity (one vote per validator);
+// a node hosting m selected validators publishes m votes (k-multiplicity, like attestations).
+message FinalityVote {
+  uint32 finality_slot = 1;
+  uint32 subnet        = 2; // this node's stable finality subnet, 0 .. fs_subnets-1
+  uint32 val           = 3; // global validator index — the identity (one vote per validator)
+  uint32 origin        = 4; // publishing member node (gossip origin; for the loopback skip)
+  bytes  payload       = 5; // random filler so the marshaled message ≈ 226 B
+}
+
+// FinalityAggregate is the finality-chain aggregate, published on the single global
+// finality_aggregate_and_proof topic at the aggregation deadline. Each subnet has fs_aggregators
+// aggregators per finality slot; every aggregator publishes one distinct aggregate. Its size
+// scales with the subnet's voting population: base 328 B + a ceil(validators_per_subnet/8)
+// aggregation bitfield. origin carries the aggregator node, which both makes the aggregate
+// distinct (so gossipsub does not dedup them) and is the gossip origin for the loopback skip.
+message FinalityAggregate {
+  uint32 finality_slot = 1;
+  uint32 subnet        = 2; // subcommittee (for distinctness; the topic is global)
+  uint32 origin        = 3; // aggregator node (its key makes the aggregate distinct; gossip origin)
+  bytes  payload       = 4; // random filler sized to base + the scaled aggregation bitfield
+}

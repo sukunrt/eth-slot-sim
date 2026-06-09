@@ -70,6 +70,28 @@ func SyncContributionID(slot, subnet, aggregator int) MsgID {
 	return MsgID{Kind: node.KindSyncContribution, Slot: slot, Subnet: subnet, Attester: aggregator, Origin: -1}
 }
 
+// ACVoteID is the MsgID for the availability-chain vote by validator val, published by origin in
+// slot on the single global topic. It mirrors AttestID minus the subnet (there are no subnets on
+// the AC), so Subnet is -1; it carries the voted-block bool via OnPublish, like an attestation.
+func ACVoteID(slot, val, origin int) MsgID {
+	return MsgID{Kind: node.KindACVote, Slot: slot, Subnet: -1, Attester: val, Origin: origin}
+}
+
+// FinalityVoteID is the MsgID for the finality-chain vote by validator val on subnet in finality
+// slot fslot, published by origin. It mirrors AttestID (the finality slot rides Slot); one vote per
+// validator, so val is the identity carried in the Attester field.
+func FinalityVoteID(fslot, subnet, val, origin int) MsgID {
+	return MsgID{Kind: node.KindFinalityVote, Slot: fslot, Subnet: subnet, Attester: val, Origin: origin}
+}
+
+// FinalityAggregateID is the MsgID for the aggregate published by aggregator (a node) for subnet's
+// subcommittee in finality slot fslot, on the global topic. Each aggregator publishes one distinct
+// aggregate, identified by the aggregator carried in the Attester field (so it survives the CSV),
+// exactly as an aggregate or sync contribution is.
+func FinalityAggregateID(fslot, subnet, aggregator int) MsgID {
+	return MsgID{Kind: node.KindFinalityAggregate, Slot: fslot, Subnet: subnet, Attester: aggregator, Origin: -1}
+}
+
 // Tracer receives app-level publish/receive events. votedBlock is meaningful only for
 // attestations (false for blocks); the receive side recovers it by joining to the
 // publish record, so OnReceive needs only the identity.
@@ -167,8 +189,15 @@ func (r *Recorder) FractionVotedHead(slot int) float64 {
 	return r.fractionVoted(slot, node.KindSyncMessage)
 }
 
-// fractionVoted is the shared core of FractionVotedBlock/FractionVotedHead: over a slot's published
-// messages of the given kind, the fraction whose publish recorded a (block/head) vote. 0 if none.
+// FractionVotedACVote is the availability-chain analogue of FractionVotedBlock: over a slot's
+// published AC votes, the fraction that voted for the block (vs. the prior head). The AC vote is
+// the column-gated attestation retargeted, so this is its headline data-availability metric.
+func (r *Recorder) FractionVotedACVote(slot int) float64 {
+	return r.fractionVoted(slot, node.KindACVote)
+}
+
+// fractionVoted is the shared core of FractionVotedBlock/FractionVotedHead/FractionVotedACVote: over
+// a slot's published messages of the given kind, the fraction whose publish recorded a vote. 0 if none.
 func (r *Recorder) fractionVoted(slot int, kind node.Kind) float64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
