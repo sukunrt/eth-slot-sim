@@ -187,3 +187,123 @@ def test_sync_disabled_skips_validation(tmp_path):
     p.write_text("topology:\n  num_nodes: 16\nsync:\n  enabled: false\n  size: 99\n  subnets: 2\n")
     cfg = config.load_config(p)
     assert cfg.sync.enabled is False
+
+
+# --- decoupled consensus ------------------------------------------------------
+
+
+def test_decoupled_defaults():
+    dc = config.DecoupledConsensusConfig()
+    assert dc.enabled is True
+    assert dc.ac_vote_size == 512 and dc.ac_slots_per_finality_slot == 10
+    assert dc.fs_subnets == 40 and dc.fs_aggregators == 16
+    assert dc.finality_slot_aggregation_fraction == 50 and dc.fc_vote_offset_ms == 1000
+
+
+def _decoupled_yaml(num_nodes=16, validators=32, super_frac=0.5, dc_body=None,
+                    attest_enabled=False, columns="  num_columns: 8\n", extra=""):
+    dc = dc_body if dc_body is not None else (
+        "  ac_vote_size: 8\n  ac_slots_per_finality_slot: 2\n  fs_subnets: 2\n  fs_aggregators: 2\n"
+    )
+    return (
+        "topology:\n"
+        f"  num_nodes: {num_nodes}\n"
+        f"  super_node_fraction: {super_frac}\n"
+        "attestation:\n"
+        f"  enabled: {'true' if attest_enabled else 'false'}\n"
+        f"  validators: {validators}\n"
+        + ("data_columns:\n" + columns if columns else "")
+        + "decoupled_consensus:\n" + dc
+        + extra
+    )
+
+
+def test_decoupled_loads(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml())
+    cfg = config.load_config(p)
+    assert cfg.decoupled_consensus.enabled is True
+    assert cfg.decoupled_consensus.ac_vote_size == 8 and cfg.decoupled_consensus.fs_subnets == 2
+
+
+def test_decoupled_requires_attestation_block(tmp_path):
+    # decoupled reuses attestation V + attestation_due_ms, so the block must be present.
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "topology:\n  num_nodes: 16\n  super_node_fraction: 0.5\n"
+        "data_columns:\n  num_columns: 8\n"
+        "decoupled_consensus:\n  ac_vote_size: 8\n  fs_subnets: 2\n"
+    )
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_decoupled_requires_columns_enabled(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml(columns=""))  # no data_columns block
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_decoupled_requires_supernodes(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml(super_frac=0.0))
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_decoupled_requires_v_at_least_n(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml(num_nodes=50, validators=40))  # V < N
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_decoupled_ac_vote_size_exceeds_v_raises(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml(dc_body="  ac_vote_size: 99\n  fs_subnets: 2\n"))
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_decoupled_fs_subnets_exceeds_n_raises(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml(dc_body="  ac_vote_size: 8\n  fs_subnets: 99\n"))
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_decoupled_rejects_attestation_emit(tmp_path):
+    # decoupled replaces attestations; the old attestation emit must be off.
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml(attest_enabled=True))
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_decoupled_rejects_sync(tmp_path):
+    # decoupled and sync are mutually exclusive (both replace the finality/attestation phases).
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml(extra="sync:\n  size: 8\n  subnets: 2\n"))
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_decoupled_vote_offset_must_precede_aggregation(tmp_path):
+    # fc_vote_offset_ms must be < finality_slot_aggregation_fraction% · k · slot (votes precede agg).
+    body = (
+        "  ac_vote_size: 8\n  ac_slots_per_finality_slot: 2\n  fs_subnets: 2\n  fs_aggregators: 2\n"
+        "  finality_slot_aggregation_fraction: 50\n  fc_vote_offset_ms: 20000\n"  # 20s > 50%·2·12s=12s
+    )
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml(dc_body=body))
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_decoupled_disabled_skips_validation(tmp_path):
+    # enabled=False ⇒ decoupled requirements don't apply.
+    p = tmp_path / "c.yaml"
+    p.write_text("topology:\n  num_nodes: 16\ndecoupled_consensus:\n  enabled: false\n  fs_subnets: 99\n")
+    cfg = config.load_config(p)
+    assert cfg.decoupled_consensus.enabled is False

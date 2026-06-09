@@ -108,6 +108,22 @@ def test_committed_go_fixture_is_current():
     assert schedule.generate(_FIXTURE_PARAMS).to_dict() == on_disk, "stale fixture; regenerate it"
 
 
+# Params of the committed decoupled Go contract fixture (schedule/testdata/decoupled_schedule.json).
+_DECOUPLED_FIXTURE = Path(__file__).parent.parent / "schedule" / "testdata" / "decoupled_schedule.json"
+_DECOUPLED_FIXTURE_PARAMS = schedule.Params(
+    n=12, v=24, c=0, sc=0, num_columns=4, full_custody_fraction=0.5, column_backbone_floor=3,
+    decoupled=True, ac_vote_size=4, ac_slots_per_finality_slot=2, fs_subnets=3, fs_aggregators=2,
+    seed=1, num_slots=4,
+)
+
+
+def test_committed_decoupled_fixture_is_current():
+    # The Go contract test (schedule/schedule_test.go) loads this exact file; regenerate if stale.
+    on_disk = json.loads(_DECOUPLED_FIXTURE.read_text())
+    got = schedule.generate(_DECOUPLED_FIXTURE_PARAMS, supers=list(range(8))).to_dict()
+    assert got == on_disk, "stale decoupled fixture; regenerate it"
+
+
 def test_proposers_are_supernodes_round_robin():
     # Block proposers are drawn only from the supernode set, round-robin over its sorted ids.
     p = schedule.Params(n=10, v=40, c=2, sc=4, num_slots=5)
@@ -309,6 +325,123 @@ def test_sync_same_seed_identical_seed_plus_one_differs():
         n=40, v=80, c=2, sc=4, sync_size=16, sync_subnets=4, seed=8, num_slots=3
     )
     assert schedule.generate(other).to_dict() != schedule.generate(base).to_dict()
+
+
+# --- decoupled-consensus membership (availability + finality chains) -----------
+#
+# Decoupled mode (p.decoupled) replaces committees + sync with: a per-slot flat AC-voter
+# draw (ac_vote_size validators, one global topic), a node-partition into fs_subnets
+# finality subnets (every node on exactly one), and per-finality-slot fc_aggregators on
+# the boundary AC slot. Data columns are required (they gate the AC vote).
+
+
+def _decoupled_params(**kw):
+    base = dict(
+        n=16, v=32, c=0, sc=0, num_columns=8, full_custody_fraction=0.5,
+        column_backbone_floor=3, decoupled=True, ac_vote_size=8,
+        ac_slots_per_finality_slot=2, fs_subnets=2, fs_aggregators=2, seed=1, num_slots=4,
+    )
+    base.update(kw)
+    return schedule.Params(**base)
+
+
+_DECOUPLED_SUPERS = list(range(8))  # F = round(0.5*8) = 4 full-custody nodes (>= backbone floor)
+
+
+def test_finality_subscribers_partition_all_nodes():
+    a = schedule.generate(_decoupled_params(), supers=_DECOUPLED_SUPERS)
+    assert a.finality_subscribers is not None
+    assert len(a.finality_subscribers) == 4 or len(a.finality_subscribers) == 2  # fs_subnets
+    flat = [node for subs in a.finality_subscribers for node in subs]
+    # Every node on exactly one subnet — a partition of all N (not a sample).
+    assert sorted(flat) == list(range(16))
+    for subs in a.finality_subscribers:
+        assert subs == sorted(set(subs))
+        assert all(0 <= node < 16 for node in subs)
+
+
+def test_validators_per_subnet_sums_to_v():
+    a = schedule.generate(_decoupled_params(), supers=_DECOUPLED_SUPERS)
+    assert a.validators_per_subnet is not None
+    assert len(a.validators_per_subnet) == 2
+    assert sum(a.validators_per_subnet) == 32  # every validator votes on exactly one subnet
+    # Each subnet's count = Σ over member nodes of validators that node hosts (uniform v % N).
+    for subnet, members in enumerate(a.finality_subscribers):
+        want = sum((32 - 1 - node) // 16 + 1 for node in members)
+        assert a.validators_per_subnet[subnet] == want
+
+
+def test_ac_voters_size_and_fresh_per_slot():
+    a = schedule.generate(_decoupled_params(), supers=_DECOUPLED_SUPERS)
+    seen = []
+    for sp in a.slots:
+        assert sp.ac_voters is not None
+        assert len(sp.ac_voters) == 8  # ac_vote_size distinct validators
+        vals = [r.val for r in sp.ac_voters]
+        assert len(set(vals)) == 8
+        assert all(0 <= r.val < 32 and r.node == r.val % 16 for r in sp.ac_voters)
+        seen.append(tuple(sorted(vals)))
+        # No committees/subnets on the AC.
+        assert sp.committees == [] and sp.subnet_of == [] and sp.aggregators == []
+    assert len(set(seen)) > 1, "AC voters should be re-drawn per slot"
+
+
+def test_fc_aggregators_on_boundary_only_and_clamped():
+    a = schedule.generate(_decoupled_params(), supers=_DECOUPLED_SUPERS)
+    for sp in a.slots:
+        if sp.slot % 2 == 0:  # finality boundary (k=2)
+            assert sp.finality_aggregators is not None
+            assert len(sp.finality_aggregators) == 2  # fs_subnets
+            for subnet, aggs in enumerate(sp.finality_aggregators):
+                members = a.finality_subscribers[subnet]
+                assert len(aggs) == min(2, len(members))  # fs_aggregators, clamped
+                assert aggs == sorted(set(aggs))
+                assert set(aggs) <= set(members)
+        else:
+            assert sp.finality_aggregators is None  # only the boundary slot carries them
+
+
+def test_decoupled_requires_columns():
+    with pytest.raises(ValueError):
+        schedule.generate(_decoupled_params(num_columns=0), supers=_DECOUPLED_SUPERS)
+
+
+def test_ac_vote_size_exceeds_v_raises():
+    with pytest.raises(ValueError):
+        schedule.generate(_decoupled_params(ac_vote_size=100), supers=_DECOUPLED_SUPERS)
+
+
+def test_fs_subnets_exceeds_n_raises():
+    with pytest.raises(ValueError):
+        schedule.generate(_decoupled_params(fs_subnets=100), supers=_DECOUPLED_SUPERS)
+
+
+def test_decoupled_proposers_are_full_custody():
+    a = schedule.generate(_decoupled_params(), supers=_DECOUPLED_SUPERS)
+    assert a.full_custody is not None
+    for sp in a.slots:
+        assert sp.proposer in a.full_custody  # proposer originates all columns
+
+
+def test_decoupled_off_keeps_schedule_json_unchanged():
+    # decoupled=False ⇒ no decoupled keys in schedule.json (back-compat).
+    d = schedule.generate(schedule.Params(n=8, v=16, c=2, sc=4, num_slots=1), supers=[0, 1]).to_dict()
+    assert "finality_subscribers" not in d and "validators_per_subnet" not in d
+    assert all("ac_voters" not in s and "finality_aggregators" not in s for s in d["slots"])
+    assert "ac_vote_size" not in d["params"]
+
+
+def test_decoupled_same_seed_identical_seed_plus_one_differs():
+    base = _decoupled_params(seed=7)
+    assert (
+        schedule.generate(base, supers=_DECOUPLED_SUPERS).to_dict()
+        == schedule.generate(base, supers=_DECOUPLED_SUPERS).to_dict()
+    )
+    other = _decoupled_params(seed=8)
+    assert (
+        schedule.generate(other, supers=_DECOUPLED_SUPERS).to_dict()
+        != schedule.generate(base, supers=_DECOUPLED_SUPERS).to_dict()
+    )
 
 
 def test_aggregators_seeded_vary_across_slots_and_with_seed():

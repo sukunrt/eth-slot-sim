@@ -30,6 +30,15 @@ type Params struct {
 	TargetAggregators int    `json:"target_aggregators"`
 	Seed              uint64 `json:"seed"`
 	NumSlots          int    `json:"num_slots"`
+	// Decoupled-consensus knobs (0 ⇒ phase off). AcVoteSize is the per-slot VRF-selected validator
+	// count voting on the availability chain (one global topic); AcSlotsPerFinalitySlot is k (a
+	// finality slot spans k AC slots); FsSubnets is the node-partitioned finality subnet count;
+	// FsAggregators is the aggregators drawn per finality subnet per finality slot. See
+	// decoupled-consensus-spec.md.
+	AcVoteSize             int `json:"ac_vote_size,omitempty"`
+	AcSlotsPerFinalitySlot int `json:"ac_slots_per_finality_slot,omitempty"`
+	FsSubnets              int `json:"fs_subnets,omitempty"`
+	FsAggregators          int `json:"fs_aggregators,omitempty"`
 }
 
 // AttesterRef is one committee seat: which node publishes, which validator, on which
@@ -52,6 +61,14 @@ type SlotPlan struct {
 	// SyncAggregators[i] = aggregator node ids on sync subnet i (drawn from SyncSubscribers[i]);
 	// each publishes one contribution on the global topic. Empty/nil when the sync phase is off.
 	SyncAggregators [][]int `json:"sync_aggregators,omitempty"`
+	// ACVoters = the VRF-selected validators voting on the availability chain this slot — a flat set
+	// (no committees, no subnets; one global topic), so a node hosting m of them emits m votes.
+	// Empty/nil when the decoupled-consensus phase is off.
+	ACVoters []AttesterRef `json:"ac_voters,omitempty"`
+	// FinalityAggregators[i] = aggregator node ids on finality subnet i for this finality slot;
+	// present only on a finality-boundary slot (slot % k == 0), nil otherwise. Drawn per finality
+	// slot, mirroring SyncAggregators.
+	FinalityAggregators [][]int `json:"finality_aggregators,omitempty"`
 }
 
 // Assignment is the whole run's plan: the stable per-subnet subscribe set plus the
@@ -73,8 +90,15 @@ type Assignment struct {
 	// SyncSubscribers[i] = the member nodes on sync subnet i (stable for the run; a member is on
 	// exactly one subnet) — both the subnet's mesh and the per-subnet coverage set. Generated in
 	// Python, carried here verbatim. The transpose of the per-node membership attribute.
-	SyncSubscribers [][]int    `json:"sync_subscribers,omitempty"`
-	Slots           []SlotPlan `json:"slots"`
+	SyncSubscribers [][]int `json:"sync_subscribers,omitempty"`
+	// Decoupled-consensus membership (empty when the phase is off). FinalitySubscribers[i] = the
+	// member nodes on finality subnet i — a partition of ALL N nodes (every node on exactly one
+	// subnet), so it is both the subnet's mesh and its per-subnet coverage set.
+	// ValidatorsPerSubnet[i] = the validators voting on subnet i (Σ over its member nodes, uniform
+	// V→N), carried for the scaled aggregate size and the coverage count. Generated in Python.
+	FinalitySubscribers [][]int    `json:"finality_subscribers,omitempty"`
+	ValidatorsPerSubnet []int      `json:"validators_per_subnet,omitempty"`
+	Slots               []SlotPlan `json:"slots"`
 }
 
 // Load reads a schedule.json produced by simctl/schedule.py.
@@ -115,6 +139,15 @@ func (a *Assignment) SyncSubscribersOf(subnet int) []int {
 		return nil
 	}
 	return a.SyncSubscribers[subnet]
+}
+
+// FinalitySubscribersOf returns the member nodes on finality subnet i (its stable membership) — the
+// expected receiver set for any finality vote on it. Nil if i is out of range.
+func (a *Assignment) FinalitySubscribersOf(subnet int) []int {
+	if subnet < 0 || subnet >= len(a.FinalitySubscribers) {
+		return nil
+	}
+	return a.FinalitySubscribers[subnet]
 }
 
 // ProposerSchedule returns the per-slot block proposer (a supernode), one entry per slot in
@@ -240,4 +273,64 @@ func (v View) SyncAggregateSubnets(slot int) []int {
 		}
 	}
 	return out
+}
+
+// ACVoteDuties returns the availability-chain votes this node owes this slot — one per hosted
+// validator in the slot's VRF draw (k>1 possible). The AC vote is on one global topic, so Subnet is
+// unused (left zero); only Val is meaningful. Empty when the node holds none of the slot's voters.
+func (v View) ACVoteDuties(slot int) []AttestDuty {
+	if slot < 0 || slot >= len(v.a.Slots) {
+		return nil
+	}
+	var duties []AttestDuty
+	for _, r := range v.a.Slots[slot].ACVoters {
+		if r.Node == v.node {
+			duties = append(duties, AttestDuty{Val: r.Val})
+		}
+	}
+	return duties
+}
+
+// FinalitySubnet returns this node's finality subnet and whether it is a member. Membership is
+// node-based and stable: finality subnets partition ALL N nodes, so under the decoupled phase every
+// node is a member of exactly one subnet; (-1, false) when the phase is off (no membership).
+func (v View) FinalitySubnet() (subnet int, member bool) {
+	for s, members := range v.a.FinalitySubscribers {
+		if slices.Contains(members, v.node) {
+			return s, true
+		}
+	}
+	return -1, false
+}
+
+// FinalityVoteDuties returns the validators this node hosts — it emits one FinalityVote per validator
+// on its finality subnet, every finality slot (all validators vote). Uniform V→N: the validators v
+// with v % N == node. The Dist seam (operator skew) changes only this mapping.
+func (v View) FinalityVoteDuties() []int {
+	var out []int
+	for val := v.node; val < v.a.Params.V; val += v.a.Params.N {
+		out = append(out, val)
+	}
+	return out
+}
+
+// FinalityAggregator reports whether this node is an aggregator for finality slot n, and for which
+// subnet (its own). Aggregators are drawn per finality slot and stored on the boundary AC slot
+// (n·k), so this reads Slots[n·k].FinalityAggregators. (-1, false) if the node isn't an aggregator
+// or n is out of range.
+func (v View) FinalityAggregator(n int) (subnet int, isAgg bool) {
+	k := v.a.Params.AcSlotsPerFinalitySlot
+	if k <= 0 {
+		return -1, false
+	}
+	boundary := n * k
+	if boundary < 0 || boundary >= len(v.a.Slots) {
+		return -1, false
+	}
+	for s, aggs := range v.a.Slots[boundary].FinalityAggregators {
+		if slices.Contains(aggs, v.node) {
+			return s, true
+		}
+	}
+	return -1, false
 }

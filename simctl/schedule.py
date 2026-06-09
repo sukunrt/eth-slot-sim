@@ -46,6 +46,16 @@ class Params:
     sync_size: int = 0
     sync_subnets: int = 0
     sync_target_aggregators: int = 16  # TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE; clamped to members
+    # Decoupled-consensus phase (decoupled ⇒ on; replaces committees + sync, needs data columns for
+    # the AC gate). ac_vote_size validators vote on the availability chain each slot (one global
+    # topic); a finality slot spans ac_slots_per_finality_slot AC slots; fs_subnets node-partitioned
+    # finality subnets (every node on one); fs_aggregators per subnet per finality slot. See
+    # decoupled-consensus-spec.md.
+    decoupled: bool = False
+    ac_vote_size: int = 0
+    ac_slots_per_finality_slot: int = 0
+    fs_subnets: int = 0
+    fs_aggregators: int = 0
 
 
 @dataclass(frozen=True)
@@ -65,6 +75,12 @@ class SlotPlan:
     proposer: int = 0  # node that publishes this slot's block (a supernode; see generate)
     # [sync subnet] → aggregator node ids (subset of its members); None when the sync phase is off.
     sync_aggregators: list[list[int]] | None = None
+    # ac_voters = the VRF-selected validators voting on the availability chain this slot — a flat set
+    # (no committees/subnets; one global topic). None when the decoupled phase is off.
+    ac_voters: list[AttesterRef] | None = None
+    # finality_aggregators[i] = aggregator node ids on finality subnet i for this finality slot;
+    # set only on a finality-boundary slot (slot % k == 0), None otherwise.
+    finality_aggregators: list[list[int]] | None = None
 
 
 @dataclass
@@ -79,6 +95,12 @@ class Assignment:
     # Sync-committee membership (None when off). sync_subscribers[i] = the member nodes on sync
     # subnet i (stable; each member on exactly one subnet) — the subnet's mesh and coverage set.
     sync_subscribers: list[list[int]] | None = None
+    # Decoupled-consensus membership (None when off). finality_subscribers[i] = the member nodes on
+    # finality subnet i — a partition of ALL N nodes (every node on exactly one). validators_per_subnet[i]
+    # = the validators voting on subnet i (Σ over its member nodes, uniform v % N), for the scaled
+    # aggregate size and coverage count.
+    finality_subscribers: list[list[int]] | None = None
+    validators_per_subnet: list[int] | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -107,6 +129,15 @@ class Assignment:
         # each slot dict via _slot_dict).
         if self.params.sync_subnets > 0:
             d["sync_subscribers"] = self.sync_subscribers
+        # Decoupled-consensus membership + knobs appear only when the phase is on (the per-slot
+        # ac_voters / finality_aggregators ride each slot dict via _slot_dict).
+        if self.params.decoupled:
+            d["params"]["ac_vote_size"] = self.params.ac_vote_size
+            d["params"]["ac_slots_per_finality_slot"] = self.params.ac_slots_per_finality_slot
+            d["params"]["fs_subnets"] = self.params.fs_subnets
+            d["params"]["fs_aggregators"] = self.params.fs_aggregators
+            d["finality_subscribers"] = self.finality_subscribers
+            d["validators_per_subnet"] = self.validators_per_subnet
         return d
 
 
@@ -124,6 +155,10 @@ def _slot_dict(s: SlotPlan) -> dict:
     }
     if s.sync_aggregators is not None:  # only when the sync phase is on
         d["sync_aggregators"] = s.sync_aggregators
+    if s.ac_voters is not None:  # only when the decoupled phase is on
+        d["ac_voters"] = [_ref_dict(r) for r in s.ac_voters]
+    if s.finality_aggregators is not None:  # only on a finality-boundary slot
+        d["finality_aggregators"] = s.finality_aggregators
     return d
 
 
@@ -152,12 +187,17 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
 
     With ``num_columns > 0`` the data-columns phase is added: a full-custody backbone (a
     subset of ``supers``) plus per-node custody, and proposers are drawn from the full-custody
-    set instead (a proposer originates all columns, so it must hold them all)."""
-    if p.c * p.sc > p.v:
-        raise ValueError(f"C*s_c ({p.c * p.sc}) > V ({p.v}): too many committee positions")
-    if p.c > p.subnet_count:
-        raise ValueError(f"C ({p.c}) > subnet_count ({p.subnet_count}): no committee→subnet map")
-    subscribers = _subnet_subscribers(p)
+    set instead (a proposer originates all columns, so it must hold them all).
+
+    With ``decoupled`` the attestation committees + sync are replaced by the availability +
+    finality chains: per-slot ac_voters, a node-partition into fs_subnets finality subnets, and
+    per-finality-slot fc_aggregators. Data columns are required (they gate the AC vote)."""
+    if not p.decoupled:
+        if p.c * p.sc > p.v:
+            raise ValueError(f"C*s_c ({p.c * p.sc}) > V ({p.v}): too many committee positions")
+        if p.c > p.subnet_count:
+            raise ValueError(f"C ({p.c}) > subnet_count ({p.subnet_count}): no committee→subnet map")
+    subscribers = [] if p.decoupled else _subnet_subscribers(p)
 
     column_subscribers: list[list[int]] | None = None
     full_custody: list[int] | None = None
@@ -170,21 +210,35 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
         proposer_pool = full_custody  # proposers originate all columns ⇒ must be full-custody
 
     sync_subscribers: list[list[int]] | None = None
-    if p.sync_subnets > 0:
+    if p.sync_subnets > 0 and not p.decoupled:
         if p.sync_size > p.n:
             raise ValueError(f"sync_size ({p.sync_size}) > N ({p.n})")
         if p.sync_subnets > p.sync_size:
             raise ValueError(f"sync_subnets ({p.sync_subnets}) > sync_size ({p.sync_size})")
         sync_subscribers = _sync_subscribers(p)
 
+    finality_subscribers: list[list[int]] | None = None
+    validators_per_subnet: list[int] | None = None
+    if p.decoupled:
+        if p.num_columns <= 0:
+            raise ValueError("decoupled consensus needs data columns (num_columns > 0) — they gate the AC vote")
+        if p.ac_vote_size > p.v:
+            raise ValueError(f"ac_vote_size ({p.ac_vote_size}) > V ({p.v})")
+        if p.fs_subnets > p.n:
+            raise ValueError(f"fs_subnets ({p.fs_subnets}) > N ({p.n})")
+        finality_subscribers = _finality_subscribers(p)
+        validators_per_subnet = _validators_per_subnet(p, finality_subscribers)
+
     slots = [
-        _slot_plan(p, slot, subscribers, proposer_pool[slot % len(proposer_pool)], sync_subscribers)
+        _slot_plan(p, slot, subscribers, proposer_pool[slot % len(proposer_pool)],
+                   sync_subscribers, finality_subscribers)
         for slot in range(p.num_slots)
     ]
     return Assignment(
         params=p, subnet_subscribers=subscribers, slots=slots,
         column_subscribers=column_subscribers, full_custody=full_custody,
-        sync_subscribers=sync_subscribers,
+        sync_subscribers=sync_subscribers, finality_subscribers=finality_subscribers,
+        validators_per_subnet=validators_per_subnet,
     )
 
 
@@ -256,32 +310,53 @@ def _sync_subscribers(p: Params) -> list[list[int]]:
     return [sorted(s) for s in subs]
 
 
+def _finality_subscribers(p: Params) -> list[list[int]]:
+    """finality_subscribers[i] = the member nodes on finality subnet i. Assign every node to one
+    subnet by a stable random draw (seeded) — a partition of ALL N nodes (each on exactly one), not
+    a sample. Sizes need not be exactly even; coverage stays exact (it reads these sets). Stable for
+    the run — both the subnet's mesh and its per-subnet coverage set."""
+    rng = _rng(p.seed, 9)
+    subs: list[list[int]] = [[] for _ in range(p.fs_subnets)]
+    for node in range(p.n):
+        subs[rng.randrange(p.fs_subnets)].append(node)
+    return [sorted(s) for s in subs]
+
+
+def _validators_per_subnet(p: Params, finality_subscribers: list[list[int]]) -> list[int]:
+    """validators_per_subnet[i] = the validators voting on subnet i = Σ over its member nodes of the
+    validators that node hosts (uniform V→N: validator v → node v % N). Node `node` hosts the
+    validators v with v % N == node, i.e. (V - 1 - node) // N + 1 of them."""
+    return [sum((p.v - 1 - node) // p.n + 1 for node in members) for members in finality_subscribers]
+
+
 def _slot_plan(
     p: Params,
     slot: int,
     subscribers: list[list[int]],
     proposer: int,
     sync_subscribers: list[list[int]] | None = None,
+    finality_subscribers: list[list[int]] | None = None,
 ) -> SlotPlan:
-    # Independent per-slot draw: s_c·C distinct validators, chunked into C committees.
-    vals = _rng(p.seed, 2, slot).sample(range(p.v), p.c * p.sc)
-    agg_rng = _rng(p.seed, 3, slot)  # aggregator draw, independent of the committee draw
     committees: list[list[AttesterRef]] = []
     subnet_of: list[int] = []
     aggregators: list[list[int]] = []
-    for ci in range(p.c):
-        subnet = ci  # identity: committee ci → subnet ci (C ≤ subnet_count)
-        members = [
-            AttesterRef(node=v % p.n, val=v, subnet=subnet, position=pos)
-            for pos, v in enumerate(vals[ci * p.sc : (ci + 1) * p.sc])
-        ]
-        committees.append(members)
-        subnet_of.append(subnet)
-        # Aggregators are drawn from the subnet's stable subscribers (they already receive
-        # the attestations); ~target_aggregators of them, clamped to the subscriber count.
-        subs = subscribers[subnet]
-        k = min(p.target_aggregators, len(subs))
-        aggregators.append(sorted(agg_rng.sample(subs, k)))
+    if not p.decoupled:
+        # Independent per-slot draw: s_c·C distinct validators, chunked into C committees.
+        vals = _rng(p.seed, 2, slot).sample(range(p.v), p.c * p.sc)
+        agg_rng = _rng(p.seed, 3, slot)  # aggregator draw, independent of the committee draw
+        for ci in range(p.c):
+            subnet = ci  # identity: committee ci → subnet ci (C ≤ subnet_count)
+            members = [
+                AttesterRef(node=v % p.n, val=v, subnet=subnet, position=pos)
+                for pos, v in enumerate(vals[ci * p.sc : (ci + 1) * p.sc])
+            ]
+            committees.append(members)
+            subnet_of.append(subnet)
+            # Aggregators are drawn from the subnet's stable subscribers (they already receive
+            # the attestations); ~target_aggregators of them, clamped to the subscriber count.
+            subs = subscribers[subnet]
+            k = min(p.target_aggregators, len(subs))
+            aggregators.append(sorted(agg_rng.sample(subs, k)))
     # Sync aggregators: per subnet, sync_target_aggregators members (clamped), drawn from that
     # subnet's stable membership — exactly as attestation aggregators are drawn from subscribers.
     sync_aggregators: list[list[int]] | None = None
@@ -291,7 +366,25 @@ def _slot_plan(
             sorted(sync_rng.sample(subs, min(p.sync_target_aggregators, len(subs))))
             for subs in sync_subscribers
         ]
+    # Decoupled consensus: a flat per-slot AC-voter draw (ac_vote_size validators, one global topic),
+    # plus per-finality-slot aggregators on the finality-boundary slot (slot % k == 0).
+    ac_voters: list[AttesterRef] | None = None
+    finality_aggregators: list[list[int]] | None = None
+    if finality_subscribers is not None:
+        voters = _rng(p.seed, 8, slot).sample(range(p.v), p.ac_vote_size)
+        ac_voters = [
+            AttesterRef(node=v % p.n, val=v, subnet=0, position=pos)  # subnet unused (global topic)
+            for pos, v in enumerate(voters)
+        ]
+        if slot % p.ac_slots_per_finality_slot == 0:  # a finality-slot boundary
+            fslot = slot // p.ac_slots_per_finality_slot
+            agg_rng = _rng(p.seed, 10, fslot)
+            finality_aggregators = [
+                sorted(agg_rng.sample(members, min(p.fs_aggregators, len(members))))
+                for members in finality_subscribers
+            ]
     return SlotPlan(
         slot=slot, committees=committees, subnet_of=subnet_of, aggregators=aggregators,
-        proposer=proposer, sync_aggregators=sync_aggregators,
+        proposer=proposer, sync_aggregators=sync_aggregators, ac_voters=ac_voters,
+        finality_aggregators=finality_aggregators,
     )

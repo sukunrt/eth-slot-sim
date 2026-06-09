@@ -1,0 +1,269 @@
+{
+  "params": {
+    "n": 12,
+    "v": 24,
+    "c": 0,
+    "sc": 0,
+    "subnet_count": 64,
+    "subnets_per_node": 2,
+    "subscribe_floor": 10,
+    "target_aggregators": 16,
+    "seed": 1,
+    "num_slots": 4,
+    "ac_vote_size": 4,
+    "ac_slots_per_finality_slot": 2,
+    "fs_subnets": 3,
+    "fs_aggregators": 2
+  },
+  "subnet_subscribers": [],
+  "slots": [
+    {
+      "slot": 0,
+      "committees": [],
+      "subnet_of": [],
+      "aggregators": [],
+      "proposer": 0,
+      "ac_voters": [
+        {
+          "node": 4,
+          "val": 4,
+          "subnet": 0,
+          "position": 0
+        },
+        {
+          "node": 2,
+          "val": 14,
+          "subnet": 0,
+          "position": 1
+        },
+        {
+          "node": 1,
+          "val": 1,
+          "subnet": 0,
+          "position": 2
+        },
+        {
+          "node": 9,
+          "val": 21,
+          "subnet": 0,
+          "position": 3
+        }
+      ],
+      "finality_aggregators": [
+        [
+          8,
+          9
+        ],
+        [
+          5,
+          7
+        ],
+        [
+          0
+        ]
+      ]
+    },
+    {
+      "slot": 1,
+      "committees": [],
+      "subnet_of": [],
+      "aggregators": [],
+      "proposer": 1,
+      "ac_voters": [
+        {
+          "node": 6,
+          "val": 6,
+          "subnet": 0,
+          "position": 0
+        },
+        {
+          "node": 3,
+          "val": 3,
+          "subnet": 0,
+          "position": 1
+        },
+        {
+          "node": 11,
+          "val": 11,
+          "subnet": 0,
+          "position": 2
+        },
+        {
+          "node": 10,
+          "val": 22,
+          "subnet": 0,
+          "position": 3
+        }
+      ]
+    },
+    {
+      "slot": 2,
+      "committees": [],
+      "subnet_of": [],
+      "aggregators": [],
+      "proposer": 2,
+      "ac_voters": [
+        {
+          "node": 0,
+          "val": 12,
+          "subnet": 0,
+          "position": 0
+        },
+        {
+          "node": 10,
+          "val": 22,
+          "subnet": 0,
+          "position": 1
+        },
+        {
+          "node": 9,
+          "val": 9,
+          "subnet": 0,
+          "position": 2
+        },
+        {
+          "node": 5,
+          "val": 5,
+          "subnet": 0,
+          "position": 3
+        }
+      ],
+      "finality_aggregators": [
+        [
+          2,
+          11
+        ],
+        [
+          1,
+          6
+        ],
+        [
+          0
+        ]
+      ]
+    },
+    {
+      "slot": 3,
+      "committees": [],
+      "subnet_of": [],
+      "aggregators": [],
+      "proposer": 4,
+      "ac_voters": [
+        {
+          "node": 7,
+          "val": 7,
+          "subnet": 0,
+          "position": 0
+        },
+        {
+          "node": 3,
+          "val": 15,
+          "subnet": 0,
+          "position": 1
+        },
+        {
+          "node": 8,
+          "val": 8,
+          "subnet": 0,
+          "position": 2
+        },
+        {
+          "node": 8,
+          "val": 20,
+          "subnet": 0,
+          "position": 3
+        }
+      ]
+    }
+  ],
+  "num_columns": 4,
+  "column_subscribers": [
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ]
+  ],
+  "full_custody": [
+    0,
+    1,
+    2,
+    4
+  ],
+  "finality_subscribers": [
+    [
+      2,
+      3,
+      8,
+      9,
+      11
+    ],
+    [
+      1,
+      4,
+      5,
+      6,
+      7,
+      10
+    ],
+    [
+      0
+    ]
+  ],
+  "validators_per_subnet": [
+    10,
+    12,
+    2
+  ]
+}

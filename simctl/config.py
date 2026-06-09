@@ -94,6 +94,26 @@ class SyncConfig(BaseModel):
     target_aggregators: int = 16  # per subnet → contributions (clamped to a subnet's members)
 
 
+class DecoupledConsensusConfig(BaseModel):
+    """Decoupled-consensus phase knobs (availability + finality chains). Present+enabled ⇒ the run
+    replaces attestations and sync with: a global flood of ac_vote_size VRF-selected validator votes
+    on the availability chain each slot (block→vote coupled + data-availability gated, like
+    attestations); and, every ac_slots_per_finality_slot (k) AC slots, a finality vote per validator
+    on one of fs_subnets node-partitioned subnets, then fs_aggregators per subnet publish a
+    population-scaled aggregate at finality_slot_aggregation_fraction% of the finality slot. Reuses
+    the attestation deadline + data columns (the AC gate). See decoupled-consensus-spec.md."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    ac_vote_size: int = 512  # VRF-selected validators voting on the AC each slot (one global topic); ≤ V
+    ac_slots_per_finality_slot: int = 10  # k: a finality slot spans k AC slots
+    fs_subnets: int = 40  # finality subnets, node-partitioned (every node on one); ≤ N
+    fs_aggregators: int = 16  # aggregators per finality subnet per finality slot (clamped to members)
+    finality_slot_aggregation_fraction: int = 50  # % of the finality slot when aggregates publish
+    fc_vote_offset_ms: int = 1000  # offset into the finality slot for the per-validator vote burst
+
+
 class SimConfig(BaseModel):
     """Root configuration for a single block-dissemination run."""
 
@@ -104,6 +124,8 @@ class SimConfig(BaseModel):
     attestation: AttestationConfig | None = None  # present ⇒ run the attestation phase
     data_columns: DataColumnsConfig | None = None  # present+enabled ⇒ run the data-columns phase
     sync: SyncConfig | None = None  # present+enabled ⇒ run the sync-committee phase
+    # present+enabled ⇒ run decoupled consensus (replaces attestations + sync)
+    decoupled_consensus: DecoupledConsensusConfig | None = None
     num_slots: int = 5
     slot_duration_seconds: int = 12
     block_size: int = 128 * 1024
@@ -149,6 +171,43 @@ class SimConfig(BaseModel):
             raise ValueError(f"sync.size ({sc.size}) > N ({n}): members are a subset of the nodes")
         if sc.subnets > sc.size:
             raise ValueError(f"sync.subnets ({sc.subnets}) > sync.size ({sc.size})")
+        return self
+
+    @model_validator(mode="after")
+    def _check_decoupled_consensus(self) -> "SimConfig":
+        dc = self.decoupled_consensus
+        if dc is None or not dc.enabled:
+            return self
+        # Decoupled reuses the attestation block for V + attestation_due_ms (the AC-vote deadline),
+        # so it must be present — but the OLD attestation emit is off (the AC vote replaces it).
+        if self.attestation is None:
+            raise ValueError("decoupled_consensus needs an attestation block (it reuses V + the deadline)")
+        if self.attestation.enabled:
+            raise ValueError("decoupled_consensus replaces attestations: set attestation.enabled=false")
+        if self.sync is not None and self.sync.enabled:
+            raise ValueError("decoupled_consensus and sync are mutually exclusive")
+        # Data columns gate the AC vote (the 'availability' chain), so they must be on; they in turn
+        # require supernodes (the full-custody backbone) and V ≥ N (uniform custody).
+        if self.data_columns is None or not self.data_columns.enabled:
+            raise ValueError("decoupled_consensus needs data_columns enabled (they gate the AC vote)")
+        n = self.topology.num_nodes
+        if self.topology.super_node_fraction <= 0:
+            raise ValueError("decoupled_consensus needs topology.super_node_fraction > 0 (column backbone)")
+        if self.attestation.validators < n:
+            raise ValueError(f"decoupled_consensus needs V ({self.attestation.validators}) >= N ({n})")
+        if dc.ac_vote_size > self.attestation.validators:
+            raise ValueError(f"ac_vote_size ({dc.ac_vote_size}) > V ({self.attestation.validators})")
+        if dc.fs_subnets > n:
+            raise ValueError(f"fs_subnets ({dc.fs_subnets}) > N ({n})")
+        if not 0 < dc.finality_slot_aggregation_fraction < 100:
+            raise ValueError("finality_slot_aggregation_fraction must be in (0, 100)")
+        # The per-validator vote burst must precede the aggregation deadline within the finality slot.
+        agg_ms = dc.finality_slot_aggregation_fraction * dc.ac_slots_per_finality_slot * \
+            self.slot_duration_seconds * 1000 // 100
+        if dc.fc_vote_offset_ms >= agg_ms:
+            raise ValueError(
+                f"fc_vote_offset_ms ({dc.fc_vote_offset_ms}) must be < the aggregation deadline ({agg_ms} ms)"
+            )
         return self
 
 
