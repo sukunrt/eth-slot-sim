@@ -58,6 +58,11 @@ type Config struct {
 	// committee assignment) publish one distinct aggregate each at this offset.
 	AggregateDue time.Duration // aggregate emit, offset into the slot (≈8s)
 
+	// Decoupled-consensus phase (optional; nil ⇒ off). When set, the runner emits AC votes +
+	// finality votes/aggregates and attestation/sync emit is forced off (the AC vote replaces
+	// attestations). The AC-vote deadline reuses AttestationDue; columns gate it.
+	Decoupled *DecoupledParams
+
 	// Data-columns phase (optional; active when Schedule.NumColumns > 0). The proposer bursts
 	// one DataColumnSidecar per column subnet at t=0; each node verifies columns through a
 	// width-P semaphore, P sized from its full-custody role.
@@ -114,8 +119,14 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 				nd.ColVerifyParallelism = cfg.ColVerifyParallelismReg
 			}
 		}
-		r := NewRunner(i, nd, val, cfg.Schedule, cfg.Attest, cfg.Sync, tracer, cfg.SlotDuration, cfg.AttestationDue,
-			cfg.AggregateDue, cfg.Prep, cfg.Seed, nw.Peers(i))
+		// Decoupled consensus replaces attestations + sync, so force both emit flags off when it's on
+		// (the runner's mutual-exclusion invariant: a slot emits an AC vote OR an attestation, never both).
+		attest, sync := cfg.Attest, cfg.Sync
+		if cfg.Decoupled != nil {
+			attest, sync = false, false
+		}
+		r := NewRunner(i, nd, val, cfg.Schedule, attest, sync, tracer, cfg.SlotDuration, cfg.AttestationDue,
+			cfg.AggregateDue, cfg.Prep, cfg.Seed, nw.Peers(i), cfg.Decoupled)
 		r.Attach()
 		d.nodes[i] = nd
 		d.runners[i] = r

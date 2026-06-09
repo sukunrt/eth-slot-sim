@@ -30,6 +30,17 @@ type scenario struct {
 }
 
 func buildScenario(t *testing.T, a *schedule.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int) *scenario {
+	return buildScenarioRunners(t, a, due, suppressBlock, tracer, peersP, true, a.SyncSubscribers != nil, nil)
+}
+
+// buildDecoupledScenario is buildScenario's decoupled twin: attestation/sync emit off, the
+// decoupled phase on (via dc). The AC vote rides the same block/column trigger, so the column-gate
+// and block-suppression filters (suppressBlock, dropColumnTo) work unchanged.
+func buildDecoupledScenario(t *testing.T, a *schedule.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int, dc *driver.DecoupledParams) *scenario {
+	return buildScenarioRunners(t, a, due, suppressBlock, tracer, peersP, false, false, dc)
+}
+
+func buildScenarioRunners(t *testing.T, a *schedule.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int, attest, sync bool, dc *driver.DecoupledParams) *scenario {
 	t.Helper()
 	n := a.Params.N
 	const slotDur = 12 * time.Second
@@ -60,7 +71,7 @@ func buildScenario(t *testing.T, a *schedule.Assignment, due time.Duration, supp
 				nd.ColVerifyParallelism = 16
 			}
 		}
-		r := driver.NewRunner(i, nd, val, a, true, a.SyncSubscribers != nil, tracer, slotDur, due, 0, 0, 1, nw.Peers(i))
+		r := driver.NewRunner(i, nd, val, a, attest, sync, tracer, slotDur, due, 0, 0, 1, nw.Peers(i), dc)
 		r.Attach()
 		if suppressBlock[i] {
 			orig := nd.OnReceive

@@ -303,6 +303,8 @@ def generate_subnet_topology(
         g.random_tree(list(subs), rng)  # each column's custodiers: one connected piece (DA backbone)
     for subs in assignment.sync_subscribers or []:
         g.random_tree(list(subs), rng)  # each sync subnet's members: one connected piece
+    for subs in assignment.finality_subscribers or []:
+        g.random_tree(list(subs), rng)  # each finality subnet's members: one connected piece
     g.fill(min(k, num_nodes - 1), rng)
 
     edges = _edges_from_adjacency(g.adj, nodes, latencies, min_latency_ms)

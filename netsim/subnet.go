@@ -52,6 +52,9 @@ func discv5Graph(a *schedule.Assignment, k int, seed uint64) [][]int {
 	for _, subs := range a.SyncSubscribers {
 		g.randomTree(subs, rng) // each sync subnet's members: one connected piece
 	}
+	for _, subs := range a.FinalitySubscribers {
+		g.randomTree(subs, rng) // each finality subnet's members: one connected piece
+	}
 	g.fill(k, rng)
 	return g.adj
 }
