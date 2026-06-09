@@ -154,7 +154,8 @@ func TestRecorderAggregate(t *testing.T) {
 	r := NewRecorder()
 	t0 := time.Unix(1000, 0)
 	id := AggregateID(2, 5, 7) // slot2 subnet5 aggregator-node7
-	if want := (MsgID{Kind: node.KindAggregate, Slot: 2, Subnet: 5, Attester: 7, Origin: -1}); id != want {
+	want := MsgID{node.KindAggregate, node.Identity{Slot: 2, Subnet: 5, Attester: 7, Origin: -1}}
+	if id != want {
 		t.Fatalf("AggregateID = %+v, want %+v", id, want)
 	}
 	r.OnPublish(id, false, t0)

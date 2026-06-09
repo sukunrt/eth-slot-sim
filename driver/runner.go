@@ -9,7 +9,6 @@ import (
 
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
-	"github.com/ethp2p/slot-sim/pb"
 	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/validator"
 )
@@ -518,68 +517,19 @@ func (r *NodeRunner) publishBlock(when time.Time, msg validator.Message) {
 	r.onBlockProcessed(msg.Slot, r.num, now)
 }
 
-// onReceive routes a decoded receipt: record block/attestation arrivals (skipping the
-// node's own loopback), and feed the block into the coupling.
+// onReceive routes a decoded receipt: skip the node's own loopback (Received.Origin is the
+// publisher for every kind, even where the identity drops it), record the arrival, and feed
+// blocks and columns into the coupling.
 func (r *NodeRunner) onReceive(rec node.Received) {
+	if rec.Origin == r.num {
+		return
+	}
+	r.tracer.OnReceive(r.num, metrics.MsgID{Kind: rec.Kind, Identity: rec.ID}, rec.At)
 	switch rec.Kind {
 	case node.KindBlock:
-		blk := rec.Obj.(*pb.Block)
-		if int(blk.Origin) == r.num {
-			return
-		}
-		r.tracer.OnReceive(r.num, metrics.BlockID(int(blk.Slot), int(blk.Origin)), rec.At)
-		r.onBlockProcessed(int(blk.Slot), int(blk.Origin), rec.At)
-	case node.KindAttestation:
-		att := rec.Obj.(*pb.Attestation)
-		if int(att.Origin) == r.num {
-			return
-		}
-		r.tracer.OnReceive(r.num, metrics.AttestID(int(att.Slot), int(att.Subnet), int(att.Val), int(att.Origin)), rec.At)
-	case node.KindAggregate:
-		agg := rec.Obj.(*pb.Aggregate)
-		if int(agg.Origin) == r.num { // skip our own published aggregate (loopback)
-			return
-		}
-		r.tracer.OnReceive(r.num, metrics.AggregateID(int(agg.Slot), int(agg.Subnet), int(agg.Origin)), rec.At)
+		r.onBlockProcessed(rec.ID.Slot, rec.ID.Origin, rec.At)
 	case node.KindColumn:
-		col := rec.Obj.(*pb.Column)
-		if int(col.Origin) == r.num { // skip our own published column (loopback)
-			return
-		}
-		r.tracer.OnReceive(r.num, metrics.ColumnID(int(col.Slot), int(col.Column), int(col.Origin)), rec.At)
-		r.onColumnProcessed(int(col.Slot), int(col.Column), rec.At)
-	case node.KindSyncMessage:
-		sm := rec.Obj.(*pb.SyncMessage)
-		if int(sm.Origin) == r.num { // skip our own published sync message (loopback)
-			return
-		}
-		r.tracer.OnReceive(r.num, metrics.SyncMessageID(int(sm.Slot), int(sm.Subnet), int(sm.Origin)), rec.At)
-	case node.KindSyncContribution:
-		sc := rec.Obj.(*pb.SyncContribution)
-		if int(sc.Origin) == r.num { // skip our own published contribution (loopback)
-			return
-		}
-		r.tracer.OnReceive(r.num, metrics.SyncContributionID(int(sc.Slot), int(sc.Subnet), int(sc.Origin)), rec.At)
-	case node.KindACVote:
-		v := rec.Obj.(*pb.ACVote)
-		if int(v.Origin) == r.num { // skip our own published AC vote (loopback)
-			return
-		}
-		r.tracer.OnReceive(r.num, metrics.ACVoteID(int(v.Slot), int(v.Val), int(v.Origin)), rec.At)
-	case node.KindFinalityVote:
-		fv := rec.Obj.(*pb.FinalityVote)
-		if int(fv.Origin) == r.num { // skip our own published finality vote (loopback)
-			return
-		}
-		r.tracer.OnReceive(r.num,
-			metrics.FinalityVoteID(int(fv.FinalitySlot), int(fv.Subnet), int(fv.Val), int(fv.Origin)), rec.At)
-	case node.KindFinalityAggregate:
-		fa := rec.Obj.(*pb.FinalityAggregate)
-		if int(fa.Origin) == r.num { // skip our own published aggregate (loopback)
-			return
-		}
-		r.tracer.OnReceive(r.num,
-			metrics.FinalityAggregateID(int(fa.FinalitySlot), int(fa.Subnet), int(fa.Origin)), rec.At)
+		r.onColumnProcessed(rec.ID.Slot, rec.ID.Subnet, rec.At) // the column index rides Subnet
 	}
 }
 

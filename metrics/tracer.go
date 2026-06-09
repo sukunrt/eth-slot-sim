@@ -16,80 +16,74 @@ import (
 	"github.com/ethp2p/slot-sim/node"
 )
 
-// MsgID identifies one disseminated message. A block is the special case
-// {KindBlock, slot, -1, -1, origin} (no subnet/attester); an attestation is
-// {KindAttestation, slot, subnet, attester, origin}; an aggregate is
-// {KindAggregate, slot, subnet, aggregator, -1} (Attester carries the aggregator node; one
-// distinct aggregate per aggregator). The tuple is unique per message, so arrival delay is
-// recv - publish.
+// MsgID identifies one disseminated message: a Kind plus its node.Identity tuple, unique per
+// message so arrival delay is recv - publish. The per-kind encoding policy (what rides
+// Subnet/Attester/Origin, and why -1 where it does) lives on the registry entries in
+// node/registry.go; the constructors below are their publish-side twins, and
+// roundtrip_test.go pins the two against each other.
 type MsgID struct {
-	Kind                           node.Kind
-	Slot, Subnet, Attester, Origin int
+	Kind node.Kind
+	node.Identity
 }
 
 // BlockID is the MsgID for a block published by origin in slot.
 func BlockID(slot, origin int) MsgID {
-	return MsgID{Kind: node.KindBlock, Slot: slot, Subnet: -1, Attester: -1, Origin: origin}
+	return MsgID{node.KindBlock, node.Identity{Slot: slot, Subnet: -1, Attester: -1, Origin: origin}}
 }
 
 // AttestID is the MsgID for one attestation (validator attester on subnet, published by
 // origin) in slot.
 func AttestID(slot, subnet, attester, origin int) MsgID {
-	return MsgID{Kind: node.KindAttestation, Slot: slot, Subnet: subnet, Attester: attester, Origin: origin}
+	return MsgID{node.KindAttestation,
+		node.Identity{Slot: slot, Subnet: subnet, Attester: attester, Origin: origin}}
 }
 
-// AggregateID is the MsgID for the aggregate published by aggregator (a node) for subnet's
-// committee in slot. Each aggregator publishes one distinct aggregate, identified by the
-// aggregator — carried in the Attester field so it survives the CSV (which has no origin
-// column), exactly as an attestation's attester does.
+// AggregateID is the MsgID for the one distinct aggregate published by aggregator (a node)
+// for subnet's committee in slot.
 func AggregateID(slot, subnet, aggregator int) MsgID {
-	return MsgID{Kind: node.KindAggregate, Slot: slot, Subnet: subnet, Attester: aggregator, Origin: -1}
+	return MsgID{node.KindAggregate,
+		node.Identity{Slot: slot, Subnet: subnet, Attester: aggregator, Origin: -1}}
 }
 
-// ColumnID is the MsgID for the data column (column/subnet index) published by origin (the
-// proposer) in slot. The column index rides the Subnet field so it survives the CSV;
-// Attester is unused (-1), exactly as a block's is.
+// ColumnID is the MsgID for the data column (index riding Subnet) published by origin (the
+// proposer) in slot.
 func ColumnID(slot, column, origin int) MsgID {
-	return MsgID{Kind: node.KindColumn, Slot: slot, Subnet: column, Attester: -1, Origin: origin}
+	return MsgID{node.KindColumn, node.Identity{Slot: slot, Subnet: column, Attester: -1, Origin: origin}}
 }
 
-// SyncMessageID is the MsgID for the sync-committee message published by member (a node) on
-// subnet in slot. One message per member, so the member is the distinct identity — carried in
-// the Attester field so it survives the CSV (which has no origin column), exactly as an
-// aggregate's aggregator is (and unlike a column, which is one-per-subnet). It carries the
-// head-vote bool via OnPublish, the sync analogue of an attestation's block vote.
+// SyncMessageID is the MsgID for member's one sync-committee message on subnet in slot. It
+// carries the head-vote bool via OnPublish, the sync analogue of an attestation's block vote.
 func SyncMessageID(slot, subnet, member int) MsgID {
-	return MsgID{Kind: node.KindSyncMessage, Slot: slot, Subnet: subnet, Attester: member, Origin: -1}
+	return MsgID{node.KindSyncMessage,
+		node.Identity{Slot: slot, Subnet: subnet, Attester: member, Origin: -1}}
 }
 
-// SyncContributionID is the MsgID for the contribution published by aggregator (a node) for
-// subnet's subcommittee in slot, on the global contribution topic. Each aggregator publishes one
-// distinct contribution, identified by the aggregator carried in the Attester field (so it
-// survives the CSV), exactly as an aggregate is.
+// SyncContributionID is the MsgID for the one distinct contribution published by aggregator
+// (a node) for sync subnet's subcommittee in slot, on the global contribution topic.
 func SyncContributionID(slot, subnet, aggregator int) MsgID {
-	return MsgID{Kind: node.KindSyncContribution, Slot: slot, Subnet: subnet, Attester: aggregator, Origin: -1}
+	return MsgID{node.KindSyncContribution,
+		node.Identity{Slot: slot, Subnet: subnet, Attester: aggregator, Origin: -1}}
 }
 
-// ACVoteID is the MsgID for the availability-chain vote by validator val, published by origin in
-// slot on the single global topic. It mirrors AttestID minus the subnet (there are no subnets on
-// the AC), so Subnet is -1; it carries the voted-block bool via OnPublish, like an attestation.
+// ACVoteID is the MsgID for the availability-chain vote by validator val, published by origin
+// in slot on the single global topic. It carries the voted-block bool via OnPublish, like an
+// attestation.
 func ACVoteID(slot, val, origin int) MsgID {
-	return MsgID{Kind: node.KindACVote, Slot: slot, Subnet: -1, Attester: val, Origin: origin}
+	return MsgID{node.KindACVote, node.Identity{Slot: slot, Subnet: -1, Attester: val, Origin: origin}}
 }
 
-// FinalityVoteID is the MsgID for the finality-chain vote by validator val on subnet in finality
-// slot fslot, published by origin. It mirrors AttestID (the finality slot rides Slot); one vote per
-// validator, so val is the identity carried in the Attester field.
+// FinalityVoteID is the MsgID for the finality-chain vote by validator val on subnet in
+// finality slot fslot (riding Slot), published by origin.
 func FinalityVoteID(fslot, subnet, val, origin int) MsgID {
-	return MsgID{Kind: node.KindFinalityVote, Slot: fslot, Subnet: subnet, Attester: val, Origin: origin}
+	return MsgID{node.KindFinalityVote,
+		node.Identity{Slot: fslot, Subnet: subnet, Attester: val, Origin: origin}}
 }
 
-// FinalityAggregateID is the MsgID for the aggregate published by aggregator (a node) for subnet's
-// subcommittee in finality slot fslot, on the global topic. Each aggregator publishes one distinct
-// aggregate, identified by the aggregator carried in the Attester field (so it survives the CSV),
-// exactly as an aggregate or sync contribution is.
+// FinalityAggregateID is the MsgID for the one distinct aggregate published by aggregator (a
+// node) for finality subnet's subcommittee in finality slot fslot, on the global topic.
 func FinalityAggregateID(fslot, subnet, aggregator int) MsgID {
-	return MsgID{Kind: node.KindFinalityAggregate, Slot: fslot, Subnet: subnet, Attester: aggregator, Origin: -1}
+	return MsgID{node.KindFinalityAggregate,
+		node.Identity{Slot: fslot, Subnet: subnet, Attester: aggregator, Origin: -1}}
 }
 
 // Tracer receives app-level publish/receive events. votedBlock is meaningful only for
