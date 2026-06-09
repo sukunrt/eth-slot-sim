@@ -132,6 +132,22 @@ func TestRecorderCustodyCompleteRate(t *testing.T) {
 	}
 }
 
+// FinalityCoverageAtDeadline: over a subnet's votes × its aggregators (excluding each vote's own
+// publisher), the share that reached the aggregator by the deadline. Two votes (val 10 by node 0,
+// val 11 by node 1), two aggregators (0, 1) ⇒ each vote expected at the OTHER aggregator: 2 pairs.
+func TestRecorderFinalityCoverageAtDeadline(t *testing.T) {
+	r := NewRecorder()
+	t0 := time.Unix(1000, 0)
+	r.OnPublish(FinalityVoteID(1, 0, 10, 0), false, t0) // val 10, published by node 0
+	r.OnPublish(FinalityVoteID(1, 0, 11, 1), false, t0) // val 11, published by node 1
+	// Aggregators 0 and 1. Vote 11 reaches aggregator 0 in time; vote 10 reaches aggregator 1 late.
+	r.OnReceive(0, FinalityVoteID(1, 0, 11, 1), t0.Add(20*time.Millisecond))
+	r.OnReceive(1, FinalityVoteID(1, 0, 10, 0), t0.Add(5*time.Second)) // after the 4 s deadline
+	if got, want := r.FinalityCoverageAtDeadline(1, 0, []int{0, 1}, 4*time.Second), 0.5; got != want {
+		t.Fatalf("FinalityCoverageAtDeadline = %v, want %v (1 of 2 vote→aggregator pairs in time)", got, want)
+	}
+}
+
 // An aggregate's identity is (slot, subnet, aggregator) — the aggregator node (in Attester)
 // makes each aggregator's aggregate distinct (no dedup). Delay joins to the publish record.
 func TestRecorderAggregate(t *testing.T) {

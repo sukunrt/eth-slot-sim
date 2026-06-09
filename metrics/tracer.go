@@ -264,6 +264,52 @@ func (r *Recorder) CustodyCompleteRate(slot int, custody map[int][]int, due time
 	return float64(complete) / float64(total)
 }
 
+// FinalityCoverageAtDeadline is the finality-chain companion to CustodyCompleteRate: over a finality
+// subnet's published votes paired with its aggregators (a vote is not expected back at its own
+// publisher), the share that reached the aggregator by the aggregation deadline `due`. It answers
+// "how much of the subnet's vote does each aggregate capture?" — the aggregators come from the
+// schedule (the Recorder lacks membership), so they're passed in. 0 if the subnet had no votes.
+func (r *Recorder) FinalityCoverageAtDeadline(fslot, subnet int, aggregators []int, due time.Duration) float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	type voteKey struct{ val, origin, agg int }
+	var votes []MsgID
+	for id := range r.pub {
+		if id.Kind == node.KindFinalityVote && id.Slot == fslot && id.Subnet == subnet {
+			votes = append(votes, id)
+		}
+	}
+	arrived := map[voteKey]bool{}
+	aggSet := map[int]bool{}
+	for _, a := range aggregators {
+		aggSet[a] = true
+	}
+	for _, a := range r.arrivals {
+		if a.ID.Kind != node.KindFinalityVote || a.ID.Slot != fslot || a.ID.Subnet != subnet {
+			continue
+		}
+		if aggSet[a.Node] && a.Delay <= due {
+			arrived[voteKey{a.ID.Attester, a.ID.Origin, a.Node}] = true
+		}
+	}
+	var total, covered int
+	for _, v := range votes {
+		for _, agg := range aggregators {
+			if agg == v.Origin {
+				continue // an aggregator doesn't receive its own vote (loopback)
+			}
+			total++
+			if arrived[voteKey{v.Attester, v.Origin, agg}] {
+				covered++
+			}
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(covered) / float64(total)
+}
+
 // WriteCSV dumps every arrival as node,slot,kind,subnet,attester,delay_ms,voted_block.
 func (r *Recorder) WriteCSV(w io.Writer) error {
 	cw := csv.NewWriter(w)

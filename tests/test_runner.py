@@ -170,6 +170,53 @@ def test_schedule_assignment_carries_sync_knobs():
     assert a.slots[0].sync_aggregators is not None and len(a.slots[0].sync_aggregators) == 2
 
 
+def _decoupled_config(**overrides):
+    # A valid decoupled config: attestation off (supplies V + the AC deadline), data columns on
+    # (the AC gate), supernodes for the backbone, V >= N.
+    base = dict(
+        topology=config.TopologyConfig(num_nodes=16, degree=6, super_node_fraction=0.5),
+        attestation=config.AttestationConfig(enabled=False, validators=32),
+        data_columns=config.DataColumnsConfig(num_columns=8),
+        decoupled_consensus=config.DecoupledConsensusConfig(
+            ac_vote_size=8, ac_slots_per_finality_slot=2, fs_subnets=2, fs_aggregators=2
+        ),
+    )
+    base.update(overrides)
+    return config.SimConfig(**base)
+
+
+def test_host_args_include_decoupled_flags():
+    on = _decoupled_config()
+    args = runner._host_args(on, 0, 16, [1], "/s.json")
+    assert "-decoupled=true" in args and "-k=2" in args
+    assert "-fc-vote-offset=1000ms" in args and "-fc-agg-fraction=50" in args
+    assert "-att-due=4000ms" in args  # the AC-vote deadline is reused, not a new flag
+    # No decoupled block ⇒ no -decoupled flag (the Go binary defaults it off).
+    none = config.SimConfig(attestation=config.AttestationConfig())
+    assert "-decoupled" not in runner._host_args(none, 0, 8, [1], "/s.json")
+
+
+def test_simnet_params_carry_decoupled_flags():
+    p = runner._simnet_params(_decoupled_config())
+    assert p["decoupled"] is True and p["k"] == 2
+    assert p["fc_vote_offset_ms"] == 1000 and p["fc_agg_fraction"] == 50
+    # Absent ⇒ no decoupled key (the simnet backend defaults it off).
+    assert "decoupled" not in runner._simnet_params(config.SimConfig())
+
+
+def test_schedule_assignment_carries_decoupled_knobs():
+    a = runner._schedule_assignment(_decoupled_config())
+    # Finality subnets partition all N; validators_per_subnet sums to V; no attestation committees.
+    assert a.finality_subscribers is not None and len(a.finality_subscribers) == 2
+    flat = sorted(node for subs in a.finality_subscribers for node in subs)
+    assert flat == list(range(16))
+    assert a.validators_per_subnet is not None and sum(a.validators_per_subnet) == 32
+    assert a.slots[0].ac_voters is not None and len(a.slots[0].ac_voters) == 8
+    assert a.slots[0].committees == []  # decoupled replaces committees
+    assert a.slots[0].finality_aggregators is not None  # slot 0 is a finality boundary
+    assert a.slots[1].finality_aggregators is None  # a non-boundary slot carries none
+
+
 def test_stop_time_covers_startup_slots_drain():
     # startup 120s + 10 slots * 12s + drain/margin > config's 1 min floor.
     cfg = config.SimConfig(num_slots=10, slot_duration_seconds=12,

@@ -41,15 +41,20 @@ type params struct {
 
 	// Attestation phase (empty Schedule ⇒ block-only). Attest false with a Schedule set
 	// keeps the proposer schedule but emits no attestations (block-only on the same network).
-	Schedule         string `json:"schedule"`
-	Attest           bool   `json:"attest"`
-	Sync             bool   `json:"sync"` // sync-committee phase (size/subnets/aggregators in schedule.json)
-	AttDueMs         int    `json:"att_due_ms"`
-	AggDueMs         int    `json:"agg_due_ms"` // aggregate phase (0 ⇒ off)
-	PrepMs           int    `json:"prep_ms"`
-	AttVerifyMs      int    `json:"att_verify_ms"`
-	AttPerItemMs     int    `json:"att_per_item_ms"`
-	AttBatchWindowMs int    `json:"att_batch_window_ms"`
+	Schedule string `json:"schedule"`
+	Attest   bool   `json:"attest"`
+	Sync     bool   `json:"sync"` // sync-committee phase (size/subnets/aggregators in schedule.json)
+	// Decoupled-consensus phase (membership/voters in schedule.json). Forces attest/sync off.
+	Decoupled        bool `json:"decoupled"`
+	K                int  `json:"k"`
+	FCVoteOffsetMs   int  `json:"fc_vote_offset_ms"`
+	FCAggFraction    int  `json:"fc_agg_fraction"`
+	AttDueMs         int  `json:"att_due_ms"`
+	AggDueMs         int  `json:"agg_due_ms"` // aggregate phase (0 ⇒ off)
+	PrepMs           int  `json:"prep_ms"`
+	AttVerifyMs      int  `json:"att_verify_ms"`
+	AttPerItemMs     int  `json:"att_per_item_ms"`
+	AttBatchWindowMs int  `json:"att_batch_window_ms"`
 
 	// Data-columns phase (active when schedule.json has num_columns > 0). The verifier P is
 	// sized per node from its full-custody role in schedule.json.
@@ -107,6 +112,13 @@ func TestRun(t *testing.T) {
 			cfg.Schedule = a
 			cfg.Attest = p.Attest
 			cfg.Sync = p.Sync
+			if p.Decoupled { // replaces attestations + sync (driver.New forces those off)
+				cfg.Decoupled = &driver.DecoupledParams{
+					K:             p.K,
+					FCVoteOffset:  time.Duration(p.FCVoteOffsetMs) * time.Millisecond,
+					FCAggFraction: p.FCAggFraction,
+				}
+			}
 			cfg.AttestationDue = time.Duration(p.AttDueMs) * time.Millisecond
 			cfg.AggregateDue = time.Duration(p.AggDueMs) * time.Millisecond
 			cfg.Prep = time.Duration(p.PrepMs) * time.Millisecond

@@ -80,6 +80,10 @@ func main() {
 		schedulePath  = flag.String("schedule", "", "path to schedule.json (empty → block-only)")
 		attestations  = flag.Bool("attestations", true, "emit attestations (false → block-only; committee still sets the proposer schedule)")
 		syncOn        = flag.Bool("sync", false, "emit sync-committee messages + contributions (members only; needs schedule.json; reuses -att-due/-agg-due)")
+		decoupledOn   = flag.Bool("decoupled", false, "decoupled consensus: emit AC votes + finality votes/aggregates (replaces attestations+sync; needs schedule.json; AC deadline reuses -att-due)")
+		acK           = flag.Int("k", 10, "ac_slots_per_finality_slot (a finality slot spans k AC slots)")
+		fcVoteOffset  = flag.Duration("fc-vote-offset", time.Second, "offset into the finality slot for the per-validator finality-vote burst")
+		fcAggFraction = flag.Int("fc-agg-fraction", 50, "percent of the finality slot when finality aggregates publish")
 		attDue        = flag.Duration("att-due", 4*time.Second, "attestation deadline offset into the slot")
 		aggDue        = flag.Duration("agg-due", 0, "aggregate emit offset into the slot (0 ⇒ aggregates off)")
 		prep          = flag.Duration("prep", 0, "extra processing before emitting on block receipt")
@@ -108,9 +112,16 @@ func main() {
 			log.Fatalf("load schedule %s: %v", *schedulePath, err)
 		}
 		proposers = c.ProposerSchedule() // supernode block schedule (used even when block-only)
-		if *attestations || *syncOn || c.NumColumns > 0 {
-			sched = c // drives attestations, sync, and/or columns; the flags gate emission
+		if *attestations || *syncOn || *decoupledOn || c.NumColumns > 0 {
+			sched = c // drives attestations, sync, decoupled, and/or columns; the flags gate emission
 		}
+	}
+	// Decoupled consensus replaces attestations + sync (the AC vote stands in for the attestation).
+	attest, syncEmit := *attestations, *syncOn
+	var decoupled *driver.DecoupledParams
+	if *decoupledOn {
+		attest, syncEmit = false, false
+		decoupled = &driver.DecoupledParams{K: *acK, FCVoteOffset: *fcVoteOffset, FCAggFraction: *fcAggFraction}
 	}
 	val := validator.New(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
 		rand.New(rand.NewPCG(*seed, uint64(*nodeNum))), proposers)
@@ -132,7 +143,7 @@ func main() {
 		nd.RPCLogger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	peers := parseIntList(*peerNumsStr)
-	runner := driver.NewRunner(*nodeNum, nd, val, sched, *attestations, *syncOn, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers, nil)
+	runner := driver.NewRunner(*nodeNum, nd, val, sched, attest, syncEmit, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers, decoupled)
 	runner.Attach() // sets nd.OnReceive before JoinTopics
 
 	ctx := context.Background()

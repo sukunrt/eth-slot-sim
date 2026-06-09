@@ -57,6 +57,16 @@ def _schedule_assignment(config: SimConfig) -> schedule.Assignment | None:
             sync_subnets=sc.subnets,
             sync_target_aggregators=sc.target_aggregators,
         )
+    dcc_kwargs: dict[str, Any] = {}
+    dcc = config.decoupled_consensus
+    if dcc is not None and dcc.enabled:  # decoupled replaces committee + sync gen with AC/FC membership
+        dcc_kwargs = dict(
+            decoupled=True,
+            ac_vote_size=dcc.ac_vote_size,
+            ac_slots_per_finality_slot=dcc.ac_slots_per_finality_slot,
+            fs_subnets=dcc.fs_subnets,
+            fs_aggregators=dcc.fs_aggregators,
+        )
     return schedule.generate(
         schedule.Params(
             n=tc.num_nodes,
@@ -71,6 +81,7 @@ def _schedule_assignment(config: SimConfig) -> schedule.Assignment | None:
             num_slots=config.num_slots,
             **col_kwargs,
             **sync_kwargs,
+            **dcc_kwargs,
         ),
         supers=supers,
     )
@@ -164,6 +175,15 @@ def _host_args(
     if config.sync is not None:
         # size/subnets/aggregators ride schedule.json; the deadlines reuse -att-due/-agg-due.
         args.append(f"-sync={'true' if config.sync.enabled else 'false'}")
+    dcc = config.decoupled_consensus
+    if dcc is not None and dcc.enabled:
+        # ac_vote_size/fs_subnets/fs_aggregators ride schedule.json; the AC deadline reuses -att-due.
+        args += [
+            "-decoupled=true",
+            f"-k={dcc.ac_slots_per_finality_slot}",
+            f"-fc-vote-offset={dcc.fc_vote_offset_ms}ms",
+            f"-fc-agg-fraction={dcc.finality_slot_aggregation_fraction}",
+        ]
     if peers:
         args.append(f"-peer-nums={','.join(str(p) for p in peers)}")
     return " ".join(args)
@@ -270,6 +290,14 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
     sc = config.sync
     if sc is not None and sc.enabled:  # membership lives in schedule.json; this just flips it on
         params.update(sync=True)
+    dcc = config.decoupled_consensus
+    if dcc is not None and dcc.enabled:  # membership/voters live in schedule.json; these are the knobs
+        params.update(
+            decoupled=True,
+            k=dcc.ac_slots_per_finality_slot,
+            fc_vote_offset_ms=dcc.fc_vote_offset_ms,
+            fc_agg_fraction=dcc.finality_slot_aggregation_fraction,
+        )
     return params
 
 
@@ -476,6 +504,36 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
                 "expected": shadow_sc.expected,
                 "shadow": _agg_summary(shadow_sc),
                 "simnet": _agg_summary(simnet_sc),
+            }
+
+    # Decoupled-consensus phase: global AC-vote coverage + fraction-voted-block (AttestResult shape),
+    # per-subnet finality-vote coverage/no-leak (SyncMessageResult shape), and global finality-aggregate
+    # coverage (AggregateResult shape). Mutually exclusive with attestation/sync above.
+    decoupled_on = config.decoupled_consensus is not None and config.decoupled_consensus.enabled
+    if decoupled_on:
+        schedule_data = json.loads((run_dir / "schedule.json").read_text())
+        shadow_ac = check_arrivals.analyze_ac_votes(pubs, arrs, schedule_data)
+        simnet_ac = check_arrivals.analyze_ac_votes_csv(csv_path, schedule_data)
+        comparison["ac_votes"] = {
+            "expected": shadow_ac.expected,
+            "shadow": _att_summary(shadow_ac),
+            "simnet": _att_summary(simnet_ac),
+        }
+        fin_subs = {i: set(m) for i, m in enumerate(schedule_data["finality_subscribers"])}
+        shadow_fv = check_arrivals.analyze_finality_votes(pubs, arrs, fin_subs)
+        simnet_fv = check_arrivals.analyze_finality_votes_csv(csv_path, schedule_data)
+        comparison["finality_votes"] = {
+            "expected": shadow_fv.expected,
+            "shadow": _sync_msg_summary(shadow_fv),
+            "simnet": _sync_msg_summary(simnet_fv),
+        }
+        if any(sp.get("finality_aggregators") for sp in schedule_data["slots"]):
+            shadow_fa = check_arrivals.analyze_finality_aggregates(pubs, arrs, schedule_data)
+            simnet_fa = check_arrivals.analyze_finality_aggregates_csv(csv_path, schedule_data)
+            comparison["finality_aggregates"] = {  # AggregateResult shape; reuse _agg_summary
+                "expected": shadow_fa.expected,
+                "shadow": _agg_summary(shadow_fa),
+                "simnet": _agg_summary(simnet_fa),
             }
 
     # Proposer guard: every scheduled proposer is a supernode, and every Shadow block was
