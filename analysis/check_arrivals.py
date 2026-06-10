@@ -19,6 +19,12 @@ subnet members); and finality aggregates (kind=9, global topic, one distinct agg
 aggregator reaching every node but itself) — the AC/finality twins of aggregates/sync.
 
 Usage: python analysis/check_arrivals.py <run-dir>
+
+Output: the human summary on stdout AND the full machine-readable report in
+<run-dir>/analysis.json — per-kind and per-slot CDFs (fine percentile grid), both loss
+structures (publisher-side drops vs missing-by-receiver), validator skew, proposer guard.
+The JSON is the durable artifact: keep extending it, never reshape it, so old runs stay
+comparable and shadow.data never needs re-parsing.
 """
 
 import csv
@@ -917,6 +923,34 @@ def cdf(delays_ms: list[float]) -> dict[str, float]:
     }
 
 
+PERCENTILES = (1, 5, 10, 25, 50, 75, 90, 95, 99, 99.9, 100)
+
+
+def percentile_grid(delays_ms: list[float]) -> dict[str, float]:
+    """Fine percentile grid, enough to plot a CDF from analysis.json without ever
+    re-parsing the run's shadow.data."""
+    return {f"p{g:g}": percentile(delays_ms, g) for g in PERCENTILES}
+
+
+def delay_details(
+    pubs: dict[PubKey, tuple[int, bool]], arrs: list[Arrival], kind: int
+) -> tuple[dict[int, list[float]], list[PubKey]]:
+    """Per-slot arrival delays and publisher-side drops (publishes nobody received) for one
+    kind. Publish and arrival log the same identity fields, so the exact-key match is
+    uniform across kinds; for the finality kinds the slot field is the finality slot."""
+    pub_t = {key: t for key, (t, _v) in pubs.items() if key[0] == kind}
+    per_slot: dict[int, list[float]] = {}
+    reached: Counter = Counter()
+    for n, k, s, sub, a, o, t in arrs:
+        key = (k, s, sub, a, o)
+        if k != kind or key not in pub_t:
+            continue
+        per_slot.setdefault(s, []).append((t - pub_t[key]) / 1e6)
+        reached[key] += 1
+    drops = sorted(key for key in pub_t if not reached[key])
+    return per_slot, drops
+
+
 def delays_from_csv(path: Path, kind: int = BLOCK_KIND) -> list[float]:
     """Arrival delays (ms) of the given kind from a slot-sim CSV — the simnet backend's
     output, read in the same units as the Shadow path's delays. Pre-attestation CSVs
@@ -992,123 +1026,193 @@ def load_run(run_dir: Path) -> tuple[dict[PubKey, tuple[int, bool]], list[Arriva
     return pubs, arrs, node_nums
 
 
-def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print(f"usage: {argv[0]} <run-dir>", file=sys.stderr)
-        return 2
-    run_dir = Path(argv[1])
-    pubs, arrs, node_nums = load_run(run_dir)
-    res = analyze(pubs, arrs, node_nums)
+def _kind_report(
+    label: str,
+    plural: str,
+    res,
+    pubs: dict[PubKey, tuple[int, bool]],
+    arrs: list[Arrival],
+    kind: int,
+    published: int | None = None,
+    voted: tuple[str, float] | None = None,
+) -> dict:
+    """Print one kind's section and return its JSON-ready summary: counts, headline +
+    fine-grid CDFs, per-slot CDFs (the boundary-slot contention view), and both loss
+    structures — publisher-side drops vs missing-by-receiver."""
+    per_slot, drops = delay_details(pubs, arrs, kind)
+    if published is None:
+        published = getattr(res, "published", 0)
+    leaked = getattr(res, "leaked", [])
+    missing_by_node = Counter(m[0] for m in res.missing)
+    rep = {
+        "published": published,
+        "arrivals": res.arrivals,
+        "expected": res.expected,
+        "missing": len(res.missing),
+        "leaked": len(leaked),
+        "duplicates": len(res.duplicates),
+        "publisher_drops": len(drops),
+        "ok": res.ok,
+        "cdf_ms": cdf(res.delays_ms),
+        "percentiles_ms": percentile_grid(res.delays_ms),
+        "per_slot": {str(slot): cdf(d) for slot, d in sorted(per_slot.items())},
+        "missing_by_node": {str(n): c for n, c in missing_by_node.most_common(20)},
+        "missing_examples": [list(m) for m in res.missing[:20]],
+        "leaked_examples": [list(m) for m in leaked[:20]],
+        "drop_examples": [list(d) for d in drops[:20]],
+    }
+    if voted is not None:
+        rep[voted[0]] = voted[1]
 
-    print(f"nodes: {len(node_nums)}  blocks published: {sum(1 for k, *_ in pubs if k == BLOCK_KIND)}")
-    print(f"block arrivals: {res.arrivals} (expected {res.expected})")
-    print(f"  missing: {len(res.missing)}  duplicates: {len(res.duplicates)}")
+    def fmt(c: dict[str, float]) -> str:
+        return f"p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}"
+
+    print(f"{plural} published: {published}")
+    print(f"{label} arrivals: {res.arrivals} (expected {res.expected})")
+    print(
+        f"  missing: {len(res.missing)}  leaked: {len(leaked)}  "
+        f"duplicates: {len(res.duplicates)}  publisher drops: {len(drops)}"
+    )
     if res.delays_ms:
-        c = cdf(res.delays_ms)
-        print(f"  block CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
+        print(f"  {label} CDF (ms): {fmt(rep['cdf_ms'])}")
+    if len(per_slot) > 1:
+        print("  per-slot CDF (ms):")
+        for slot, c in rep["per_slot"].items():
+            print(f"    slot {slot}: n={c['count']} {fmt(c)}")
+    if missing_by_node:
+        top = "  ".join(f"node {n}: {c}" for n, c in missing_by_node.most_common(10))
+        print(f"  top missing receivers: {top}")
+    if drops:
+        print(f"  publisher drops (kind,slot,subnet,attester,origin): {drops[:10]}")
+    if leaked:
+        print(f"  leaked (first 10): {leaked[:10]}")
+    if voted is not None:
+        print(f"  {voted[0].replace('_', ' ')}: {voted[1]:.3f}")
+    return rep
 
+
+def build_report(run_dir: Path) -> dict:
+    """Analyze a Shadow run dir: print the human summary AND write the full
+    machine-readable report to <run_dir>/analysis.json. The JSON carries everything the
+    run comparisons need — per-kind/per-slot CDFs, loss structure, validator skew — so a
+    question about an old run never requires re-parsing its shadow.data."""
+    pubs, arrs, node_nums = load_run(run_dir)
+    report: dict = {"run_dir": str(run_dir), "nodes": len(node_nums), "kinds": {}}
+    kinds = report["kinds"]
+
+    print(f"nodes: {len(node_nums)}")
+    res = analyze(pubs, arrs, node_nums)
     ok = res.ok
+    n_blocks = sum(1 for k, *_ in pubs if k == BLOCK_KIND)
+    kinds["blocks"] = _kind_report(
+        "block", "blocks", res, pubs, arrs, BLOCK_KIND, published=n_blocks
+    )
+
     schedule_path = run_dir / "schedule.json"
     if schedule_path.exists():
         schedule_data = json.loads(schedule_path.read_text())
         subscribers = {sub: set(mem) for sub, mem in enumerate(schedule_data["subnet_subscribers"])}
         ares = analyze_attestations(pubs, arrs, subscribers)
         ok = ok and ares.ok
-        print(f"attestations published: {ares.published}")
-        print(f"attestation arrivals: {ares.arrivals} (expected {ares.expected})")
-        print(f"  missing: {len(ares.missing)}  leaked: {len(ares.leaked)}  duplicates: {len(ares.duplicates)}")
-        if ares.leaked:
-            print("  leaked (node,slot,subnet,attester,origin):", ares.leaked[:10])
-        if ares.delays_ms:
-            c = cdf(ares.delays_ms)
-            print(f"  attestation CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
-        print(f"  fraction voted block: {ares.fraction_voted_block:.3f}")
+        kinds["attestations"] = _kind_report(
+            "attestation", "attestations", ares, pubs, arrs, ATTEST_KIND,
+            voted=("fraction_voted_block", ares.fraction_voted_block),
+        )
 
         if schedule_data["slots"] and schedule_data["slots"][0].get("aggregators"):
             gres = analyze_aggregates(pubs, arrs, schedule_data)
             ok = ok and gres.ok
-            print(f"aggregates published (distinct): {gres.published}")
-            print(f"aggregate arrivals: {gres.arrivals} (expected {gres.expected})")
-            print(f"  missing: {len(gres.missing)}  leaked: {len(gres.leaked)}  duplicates: {len(gres.duplicates)}")
-            if gres.delays_ms:
-                c = cdf(gres.delays_ms)
-                print(f"  aggregate CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
+            kinds["aggregates"] = _kind_report(
+                "aggregate", "aggregates (distinct)", gres, pubs, arrs, AGGREGATE_KIND
+            )
 
         if schedule_data.get("column_subscribers"):
             custodiers = {col: set(m) for col, m in enumerate(schedule_data["column_subscribers"])}
             cres = analyze_columns(pubs, arrs, custodiers)
             ok = ok and cres.ok
-            print(f"columns published (distinct): {cres.published}")
-            print(f"column arrivals: {cres.arrivals} (expected {cres.expected})")
-            print(f"  missing: {len(cres.missing)}  leaked: {len(cres.leaked)}  duplicates: {len(cres.duplicates)}")
-            if cres.delays_ms:
-                c = cdf(cres.delays_ms)
-                print(f"  column CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
+            kinds["columns"] = _kind_report(
+                "column", "columns (distinct)", cres, pubs, arrs, COLUMN_KIND
+            )
 
         if schedule_data.get("sync_subscribers"):
             sync_subs = {i: set(m) for i, m in enumerate(schedule_data["sync_subscribers"])}
             smres = analyze_sync_messages(pubs, arrs, sync_subs)
             ok = ok and smres.ok
-            print(f"sync messages published: {smres.published}")
-            print(f"sync message arrivals: {smres.arrivals} (expected {smres.expected})")
-            print(f"  missing: {len(smres.missing)}  leaked: {len(smres.leaked)}  duplicates: {len(smres.duplicates)}")
-            if smres.delays_ms:
-                c = cdf(smres.delays_ms)
-                print(f"  sync message CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
-            print(f"  fraction voted head: {smres.fraction_voted_head:.3f}")
+            kinds["sync_messages"] = _kind_report(
+                "sync message", "sync messages", smres, pubs, arrs, SYNC_MESSAGE_KIND,
+                voted=("fraction_voted_head", smres.fraction_voted_head),
+            )
 
             if schedule_data["slots"] and schedule_data["slots"][0].get("sync_aggregators"):
                 scres = analyze_sync_contributions(pubs, arrs, schedule_data)
                 ok = ok and scres.ok
-                print(f"sync contributions published (distinct): {scres.published}")
-                print(f"sync contribution arrivals: {scres.arrivals} (expected {scres.expected})")
-                print(f"  missing: {len(scres.missing)}  leaked: {len(scres.leaked)}  duplicates: {len(scres.duplicates)}")
-                if scres.delays_ms:
-                    c = cdf(scres.delays_ms)
-                    print(f"  sync contribution CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
+                kinds["sync_contributions"] = _kind_report(
+                    "sync contribution", "sync contributions (distinct)",
+                    scres, pubs, arrs, SYNC_CONTRIBUTION_KIND,
+                )
 
         if schedule_data.get("finality_subscribers"):
             if schedule_data["slots"] and schedule_data["slots"][0].get("ac_voters"):
                 avres = analyze_ac_votes(pubs, arrs, schedule_data)
                 ok = ok and avres.ok
-                print(f"AC votes published: {avres.published}")
-                print(f"AC vote arrivals: {avres.arrivals} (expected {avres.expected})")
-                print(f"  missing: {len(avres.missing)}  leaked: {len(avres.leaked)}  duplicates: {len(avres.duplicates)}")
-                if avres.delays_ms:
-                    c = cdf(avres.delays_ms)
-                    print(f"  AC vote CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
-                print(f"  fraction voted block: {avres.fraction_voted_block:.3f}")
+                kinds["ac_votes"] = _kind_report(
+                    "AC vote", "AC votes", avres, pubs, arrs, AC_VOTE_KIND,
+                    voted=("fraction_voted_block", avres.fraction_voted_block),
+                )
 
             fvres = analyze_finality_votes(pubs, arrs, schedule_data)
             ok = ok and fvres.ok
-            print(f"finality votes published: {fvres.published}")
-            print(f"finality vote arrivals: {fvres.arrivals} (expected {fvres.expected})")
-            print(f"  missing: {len(fvres.missing)}  leaked: {len(fvres.leaked)}  duplicates: {len(fvres.duplicates)}")
-            if fvres.delays_ms:
-                c = cdf(fvres.delays_ms)
-                print(f"  finality vote CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
+            kinds["finality_attestations"] = _kind_report(
+                "finality attestation", "finality attestations",
+                fvres, pubs, arrs, FINALITY_VOTE_KIND,
+            )
 
             k = schedule_data["params"]["ac_slots_per_finality_slot"]
-            if any(sp["slot"] % k == 0 and sp.get("finality_aggregators") for sp in schedule_data["slots"]):
+            slots = schedule_data["slots"]
+            if any(sp["slot"] % k == 0 and sp.get("finality_aggregators") for sp in slots):
                 fares = analyze_finality_aggregates(pubs, arrs, schedule_data)
                 ok = ok and fares.ok
-                print(f"finality aggregates published (distinct): {fares.published}")
-                print(f"finality aggregate arrivals: {fares.arrivals} (expected {fares.expected})")
-                print(f"  missing: {len(fares.missing)}  leaked: {len(fares.leaked)}  duplicates: {len(fares.duplicates)}")
-                if fares.delays_ms:
-                    c = cdf(fares.delays_ms)
-                    print(f"  finality aggregate CDF (ms): p50={c['p50']:.1f} p90={c['p90']:.1f} p99={c['p99']:.1f} p100={c['p100']:.1f}")
+                kinds["finality_aggregates"] = _kind_report(
+                    "finality aggregate", "finality aggregates (distinct)",
+                    fares, pubs, arrs, FINALITY_AGGREGATE_KIND,
+                )
+
+        counts = schedule_data.get("validator_counts")
+        if counts:
+            top = sorted(enumerate(counts), key=lambda x: -x[1])[:10]
+            report["validators"] = {
+                "v": sum(counts),
+                "max_per_node": max(counts),
+                "top_hosts": [[n, c] for n, c in top],
+                "counts_per_node": counts,
+            }
+            print(
+                f"validators: V={sum(counts)} max/node={max(counts)} "
+                "top hosts: " + " ".join(f"{n}={c}" for n, c in top[:5])
+            )
 
     proposers = load_proposers(run_dir)
     supernodes = load_supernodes(run_dir)
     if proposers is not None and supernodes is not None:
         problems = check_proposers(proposers, supernodes, block_origins(pubs))
         ok = ok and not problems
+        report["proposer_guard"] = {"ok": not problems, "problems": problems[:20]}
         print(f"proposer guard: {'OK' if not problems else 'FAIL'} (all proposers are supernodes)")
         for p in problems[:10]:
             print("  ", p)
-    print("RESULT:", "OK" if ok else "FAIL")
-    return 0 if ok else 1
+
+    report["result"] = "OK" if ok else "FAIL"
+    (run_dir / "analysis.json").write_text(json.dumps(report, indent=2) + "\n")
+    print("RESULT:", report["result"])
+    return report
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        print(f"usage: {argv[0]} <run-dir>", file=sys.stderr)
+        return 2
+    report = build_report(Path(argv[1]))
+    return 0 if report["result"] == "OK" else 1
 
 
 if __name__ == "__main__":

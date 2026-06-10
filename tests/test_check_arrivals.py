@@ -4,6 +4,8 @@ Blocks (kind=1) must reach every node; attestations (kind=2) must reach exactly 
 subnet's subscribers and nobody else (missing/leaked/duplicate all fail).
 """
 
+import json
+
 from analysis import check_arrivals as ca
 
 MS = 1_000_000  # ns per ms
@@ -1108,3 +1110,70 @@ def test_analyze_finality_aggregates_csv_coverage_ok(tmp_path):
     csv_path.write_text("\n".join(rows) + "\n")
     res = ca.analyze_finality_aggregates_csv(csv_path, data)
     assert res.expected == 6 and res.arrivals == 6 and res.ok
+
+
+# --- the run report (analysis.json + per-slot/loss-structure views) ---
+
+
+def test_delay_details_per_slot_and_drops():
+    # Two block publishes; slot 0 reaches both nodes, slot 1 reaches nobody (publisher-side
+    # drop). Delays group by slot; the dropped publish is reported by its full identity key.
+    lines = [
+        _pub(0, 0, 0),
+        _pub(1, 1, 12_000),
+        _arr(1, 0, 0, 500),
+        _arr(2, 0, 0, 1000),
+    ]
+    pubs, arrs = ca.parse_events(lines)
+    per_slot, drops = ca.delay_details(pubs, arrs, ca.BLOCK_KIND)
+    assert per_slot == {0: [500.0, 1000.0]}
+    assert drops == [(ca.BLOCK_KIND, 1, -1, -1, 1)]
+
+
+def test_delay_details_filters_kind():
+    lines = [_pub(0, 0, 0), _apub(0, 3, 7, 1, 0, True), _aarr(2, 0, 3, 7, 1, 40)]
+    pubs, arrs = ca.parse_events(lines)
+    per_slot, drops = ca.delay_details(pubs, arrs, ca.ATTEST_KIND)
+    assert per_slot == {0: [40.0]}
+    assert drops == []  # the block pub is not this kind's drop
+
+
+def test_percentile_grid_keys():
+    grid = ca.percentile_grid([float(i) for i in range(1, 101)])
+    assert grid["p50"] == 50.0 and grid["p100"] == 100.0
+    assert "p99.9" in grid and grid["p99.9"] == 100.0
+
+
+def test_build_report_writes_json(tmp_path, capsys):
+    # A block-only mini run dir: the report carries counts, headline + per-slot CDFs, and
+    # the loss-structure views, and lands in analysis.json. This pins the JSON schema the
+    # long runs depend on — extend it, don't reshape it.
+    hosts = tmp_path / "shadow.data" / "hosts"
+    (hosts / "node0").mkdir(parents=True)
+    (hosts / "node1").mkdir()
+    (hosts / "node2").mkdir()
+    (hosts / "node0" / "slot-sim-node.1000.stdout").write_text(
+        _pub(0, 0, 0) + "\n" + _pub(1, 0, 12_000) + "\n"
+    )
+    (hosts / "node1" / "slot-sim-node.1001.stdout").write_text(
+        _arr(1, 0, 0, 500) + "\n" + _arr(1, 1, 0, 12_400) + "\n"
+    )
+    (hosts / "node2" / "slot-sim-node.1002.stdout").write_text(
+        _arr(2, 0, 0, 700) + "\n"  # slot 1 never arrives at node 2
+    )
+
+    report = ca.build_report(tmp_path)
+    out = json.loads((tmp_path / "analysis.json").read_text())
+    assert out == report
+    assert out["nodes"] == 3 and out["result"] == "FAIL"
+    blocks = out["kinds"]["blocks"]
+    assert blocks["published"] == 2
+    assert blocks["arrivals"] == 3 and blocks["expected"] == 4
+    assert blocks["missing"] == 1 and blocks["missing_by_node"] == {"2": 1}
+    assert blocks["publisher_drops"] == 0
+    assert blocks["per_slot"]["0"]["count"] == 2
+    assert blocks["per_slot"]["1"]["count"] == 1
+    assert blocks["cdf_ms"]["p50"] == 500.0
+    assert blocks["percentiles_ms"]["p99.9"] == 700.0
+    text = capsys.readouterr().out
+    assert "per-slot" in text and "RESULT: FAIL" in text
