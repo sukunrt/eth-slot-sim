@@ -301,7 +301,13 @@ func (n *Node) registerVerifyHook(topic string) error {
 		}
 		return verify(ctx, pid, msg)
 	}
-	if err := n.ps.RegisterTopicValidator(topic, hook); err != nil {
+	// Lift the per-topic concurrency cap (default 1024, drop-on-overflow, markSeen
+	// already done ⇒ the drop is permanent — no gossip recovery). Validation-as-sleep
+	// parks a whole subnet burst in the verifier, so in-flight counts reach the burst
+	// size; the n500 run lost 15% of finality attestations at multi-subnet supernodes
+	// to this cap. Like the global throttle, it must sit above any modeled backlog.
+	if err := n.ps.RegisterTopicValidator(topic, hook,
+		pubsub.WithValidatorConcurrency(50000)); err != nil {
 		return err
 	}
 	n.validated[topic] = true

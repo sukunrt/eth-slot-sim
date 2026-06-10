@@ -306,3 +306,56 @@ func TestPublishBurstNotSelfVerified(t *testing.T) {
 		}
 	})
 }
+
+// gossipsub's PER-TOPIC validator concurrency cap (defaultValidateConcurrency = 1024,
+// separate from the global throttle) silently and PERMANENTLY drops messages once 1024
+// validations are in flight on one topic — markSeen runs before validation, so gossip
+// recovery never re-delivers a throttled message. Validation-as-sleep parks the whole
+// burst in the verifier, so a >1024 flood trips it (the n500 supernode 15% loss). Our
+// registration must lift the cap: 1500 in-flight on one topic, none dropped.
+func TestFloodBeyondTopicValidatorConcurrency(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		nw, err := netsim.New(netsim.Config{N: 2, P: 1, Seed: 1, MinLatency: 5 * time.Millisecond, MaxLatency: 5 * time.Millisecond})
+		if err != nil {
+			t.Fatalf("netsim: %v", err)
+		}
+		t.Cleanup(nw.Close)
+
+		nodes := buildNodes(nw, 2)
+		for _, nd := range nodes {
+			// One long batch window so the whole burst is simultaneously in flight.
+			nd.AttestVerifyDelay = func() time.Duration { return 10 * time.Millisecond }
+			nd.AttestBatchWindow = 2 * time.Second
+		}
+		got := make(chan node.Received, 2048)
+		nodes[1].OnReceive = func(r node.Received) { got <- r }
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		bringUp(t, ctx, nodes, nw)
+		defer func() {
+			for _, nd := range nodes {
+				nd.Close()
+			}
+		}()
+		topic := validator.FinalityVoteTopic(0)
+		for _, nd := range nodes {
+			if err := nd.Subscribe(topic); err != nil {
+				t.Fatalf("subscribe %d: %v", nd.Num, err)
+			}
+		}
+		time.Sleep(time.Second)
+
+		const burst = 1500 // > the library's per-topic 1024
+		for v := range burst {
+			msg := validator.MakeFinalityVote(0, 0, v, 0)
+			if err := nodes[0].Publish(ctx, topic, msg.Payload); err != nil {
+				t.Fatalf("publish %d: %v", v, err)
+			}
+		}
+		time.Sleep(3 * 2 * time.Second) // a few windows: the whole backlog drains
+		if n := len(got); n != burst {
+			t.Fatalf("receiver got %d/%d — per-topic validator concurrency dropped the rest", n, burst)
+		}
+	})
+}
