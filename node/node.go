@@ -138,6 +138,12 @@ func (n *Node) Start(ctx context.Context) error {
 		// ~10k-vote bursts dropped 11% of finality attestations in the n500 run, hitting
 		// the multi-subnet aggregator hosts hardest. 20k holds ~2 full subnet bursts.
 		pubsub.WithValidateQueueSize(20000),
+		// 50k: the throttle caps CONCURRENT validations and silently drops past it; our
+		// validators sleep in the batch verifier, so a ~10k burst parks ~10k goroutines
+		// there and every message popped beyond 8192 (the default) died — measured n500
+		// loss was burst−throttle ≈ 1.1k per member per finality slot. Queueing must be
+		// modeled by the verifier, not this cap, so keep it above any realistic backlog.
+		pubsub.WithValidateThrottle(50000),
 		pubsub.WithMaxMessageSize(maxMessageSize),
 	}
 	if n.RPCLogger != nil {
