@@ -187,6 +187,9 @@ func TestNodeUnsubscribe(t *testing.T) {
 		nodes := buildNodes(nw, 3)
 		got := make(chan node.Received, 8)
 		nodes[1].OnReceive = func(r node.Received) { got <- r }
+		// Set before bring-up: OnReceive must not be mutated once receive goroutines run.
+		got2 := make(chan node.Received, 8)
+		nodes[2].OnReceive = func(r node.Received) { got2 <- r }
 
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
@@ -236,8 +239,9 @@ func TestNodeUnsubscribe(t *testing.T) {
 		}
 
 		// The topic stays joined: node 1 can still publish, and subscriber 2 receives it.
-		got2 := make(chan node.Received, 8)
-		nodes[2].OnReceive = func(r node.Received) { got2 <- r }
+		for len(got2) > 0 { // drop node 2's copies of the earlier publishes
+			<-got2
+		}
 		msg := validator.MakeFinalityVote(0, 3, 9, 1)
 		if err := nodes[1].Publish(ctx, topic, msg.Payload); err != nil {
 			t.Fatalf("publish after unsubscribe: %v", err)
