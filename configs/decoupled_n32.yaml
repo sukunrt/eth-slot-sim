@@ -1,5 +1,6 @@
-# Decoupled consensus, small local Shadow run: 32 nodes, 320 validators (10 per node),
-# 2 finality subnets. Same shape as decoupled_n16.yaml, scaled up one notch.
+# Decoupled consensus, small local Shadow run: 32 nodes, ~320 validators (tiered skew:
+# 16 supernodes ~18.5 keys each + 16 regulars 1-3 keys), 2 finality subnets. Same shape
+# as decoupled_n16.yaml, scaled up one notch.
 topology:
   num_nodes: 32
   degree: 6                # K: target peers per node
@@ -13,8 +14,8 @@ gossipsub:
   Dhigh: 12
 
 attestation:
-  enabled: false           # OFF: this block only supplies V + the AC-vote deadline (attestation_due_ms)
-  validators: 320          # V (>= N): every node validates ⇒ uniform custody
+  enabled: false           # OFF: this block only supplies the AC-vote deadline (attestation_due_ms)
+  validators: 320          # ignored under tiered (V is emergent ≈ 320)
   committees: 1            # ignored under decoupled (no attestation committees)
   committee_size: 8        # ignored under decoupled
   attestation_due_ms: 4000 # the AC-vote deadline (reused; no new knob)
@@ -38,6 +39,13 @@ decoupled_consensus:
   fs_aggregators: 2                      # aggregator validators per subnet per finality slot (whole-set sample)
   finality_slot_aggregation_fraction: 50 # % of the finality slot when aggregates publish
   fc_vote_offset_ms: 1000                # offset into the finality slot for the vote burst
+
+validator_distribution:
+  type: tiered             # skewed hosting: V emergent ≈ 16·1.45 + 16·18.5 ≈ 320
+  super:
+    min: 1
+    max: 100
+    mean: 18.5
 
 num_slots: 5
 slot_duration_seconds: 12
