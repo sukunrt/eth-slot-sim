@@ -133,7 +133,7 @@ func TestLoadDecoupledFixtureContract(t *testing.T) {
 		t.Fatalf("params = %+v, want n12 v24 acVote4 k2 fs3 fsAgg2", p)
 	}
 
-	// Finality subnets partition all N nodes (every node on exactly one).
+	// Finality subnets partition all N nodes (every node on exactly one) — the receiver core.
 	var flat []int
 	for _, members := range a.FinalitySubscribers {
 		flat = append(flat, members...)
@@ -146,13 +146,20 @@ func TestLoadDecoupledFixtureContract(t *testing.T) {
 	if !slices.Equal(flat, want) {
 		t.Fatalf("finality subnets not a partition of N: %v", flat)
 	}
-	// ValidatorsPerSubnet sums to V (every validator votes on exactly one subnet).
-	sum := 0
-	for _, c := range a.ValidatorsPerSubnet {
-		sum += c
+	// FinalitySubnetOf partitions the VALIDATOR set: one subnet per validator, in range, and
+	// ValidatorsPerSubnet is exactly that draw's per-subnet counts.
+	if len(a.FinalitySubnetOf) != p.V {
+		t.Fatalf("finality_subnet_of len %d, want V=%d", len(a.FinalitySubnetOf), p.V)
 	}
-	if sum != p.V {
-		t.Fatalf("Σ validators_per_subnet = %d, want V=%d", sum, p.V)
+	counts := make([]int, p.FsSubnets)
+	for val, s := range a.FinalitySubnetOf {
+		if s < 0 || s >= p.FsSubnets {
+			t.Fatalf("finality_subnet_of[%d] = %d out of range", val, s)
+		}
+		counts[s]++
+	}
+	if !slices.Equal(counts, a.ValidatorsPerSubnet) {
+		t.Fatalf("validators_per_subnet %v != draw counts %v", a.ValidatorsPerSubnet, counts)
 	}
 
 	for _, sp := range a.Slots {
@@ -171,6 +178,18 @@ func TestLoadDecoupledFixtureContract(t *testing.T) {
 			if len(sp.FinalityAggregators) != p.FsSubnets {
 				t.Fatalf("boundary slot %d aggregators = %d, want %d", sp.Slot, len(sp.FinalityAggregators), p.FsSubnets)
 			}
+			// Aggregators are VALIDATOR refs from the entire set; the host node carries the duty.
+			for subnet, aggs := range sp.FinalityAggregators {
+				if len(aggs) != min(p.FsAggregators, p.V) {
+					t.Fatalf("boundary slot %d subnet %d aggregators = %d, want %d",
+						sp.Slot, subnet, len(aggs), min(p.FsAggregators, p.V))
+				}
+				for _, r := range aggs {
+					if r.Node != r.Val%p.N || r.Subnet != subnet {
+						t.Fatalf("boundary slot %d subnet %d aggregator %+v inconsistent", sp.Slot, subnet, r)
+					}
+				}
+			}
 		} else if sp.FinalityAggregators != nil {
 			t.Fatalf("non-boundary slot %d carries finality_aggregators", sp.Slot)
 		}
@@ -181,6 +200,32 @@ func TestLoadDecoupledFixtureContract(t *testing.T) {
 		s, member := a.Node(node).FinalitySubnet()
 		if !member || !slices.Contains(a.FinalitySubscribers[s], node) {
 			t.Fatalf("node %d FinalitySubnet = (%d,%v) inconsistent with FinalitySubscribers", node, s, member)
+		}
+		// One duty per hosted validator (uniform v%N here), on its drawn subnet.
+		duties := a.Node(node).FinalityVoteDuties()
+		var wantDuties []AttestDuty
+		for val := node; val < p.V; val += p.N {
+			wantDuties = append(wantDuties, AttestDuty{Subnet: a.FinalitySubnetOf[val], Val: val})
+		}
+		if !slices.Equal(duties, wantDuties) {
+			t.Fatalf("node %d FinalityVoteDuties = %v, want %v", node, duties, wantDuties)
+		}
+	}
+	// FinalityAggregations agrees with the boundary slot's refs (deduped to subnets).
+	for n := 0; n*p.AcSlotsPerFinalitySlot < len(a.Slots); n++ {
+		refs := a.Slots[n*p.AcSlotsPerFinalitySlot].FinalityAggregators
+		for node := range p.N {
+			var want []int
+			for subnet, aggs := range refs {
+				for _, r := range aggs {
+					if r.Node == node && !slices.Contains(want, subnet) {
+						want = append(want, subnet)
+					}
+				}
+			}
+			if got := a.Node(node).FinalityAggregations(n); !slices.Equal(got, want) {
+				t.Fatalf("node %d FinalityAggregations(%d) = %v, want %v", node, n, got, want)
+			}
 		}
 	}
 }
@@ -335,21 +380,31 @@ func TestSyncMembership(t *testing.T) {
 	}
 }
 
-// ACVoteDuties / FinalitySubnet / FinalityVoteDuties / FinalitySubscribersOf / FinalityAggregator
+// ACVoteDuties / FinalitySubnet / FinalityVoteDuties / FinalitySubscribersOf / FinalityAggregations
 // expose the decoupled-consensus membership carried in schedule.json: a per-slot flat AC-voter set
-// (no subnets), a node-partition into finality subnets (every node a member of exactly one), the
-// validators a node hosts (uniform V→N), and the per-finality-slot aggregators on the boundary slot.
+// (no subnets), a node-partition into finality subnets (the stable receiver core), a VALIDATOR
+// partition (finality_subnet_of — each hosted validator votes on its drawn subnet), and the
+// per-finality-slot aggregator refs on the boundary slot (validators from the entire set; the host
+// node carries the duty).
 func TestDecoupledMembership(t *testing.T) {
 	a := &Assignment{
 		Params: Params{N: 6, V: 12, AcSlotsPerFinalitySlot: 2, NumSlots: 2},
 		// Finality subnets partition all 6 nodes: subnet 0 = {0,2,4}, subnet 1 = {1,3,5}.
 		FinalitySubscribers: [][]int{{0, 2, 4}, {1, 3, 5}},
+		// The validator partition: val → subnet, independent of hosting.
+		FinalitySubnetOf:    []int{0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1},
 		ValidatorsPerSubnet: []int{6, 6},
 		Slots: []SlotPlan{
 			{
-				Slot:                0,
-				ACVoters:            []AttesterRef{{Node: 0, Val: 0}, {Node: 1, Val: 7}, {Node: 0, Val: 6}},
-				FinalityAggregators: [][]int{{0}, {1, 3}}, // boundary slot (0 % 2 == 0)
+				Slot:     0,
+				ACVoters: []AttesterRef{{Node: 0, Val: 0}, {Node: 1, Val: 7}, {Node: 0, Val: 6}},
+				// Boundary slot (0 % 2 == 0). Aggregator refs: node 0 aggregates subnet 0 and —
+				// via two of its validators (dedup) — subnet 1; node 3 aggregates subnet 1. Node 0
+				// is NOT a member of subnet 1: aggregators come from the whole validator set.
+				FinalityAggregators: [][]AttesterRef{
+					{{Node: 0, Val: 0, Subnet: 0}},
+					{{Node: 3, Val: 9, Subnet: 1}, {Node: 0, Val: 6, Subnet: 1}, {Node: 0, Val: 0, Subnet: 1}},
+				},
 			},
 			{Slot: 1, ACVoters: []AttesterRef{{Node: 2, Val: 2}}},
 		},
@@ -373,12 +428,17 @@ func TestDecoupledMembership(t *testing.T) {
 		}
 	}
 
-	// FinalityVoteDuties: uniform V→N — node hosts the validators v with v%N == node.
-	if got := a.Node(0).FinalityVoteDuties(); !slices.Equal(got, []int{0, 6}) {
-		t.Fatalf("node0 FinalityVoteDuties = %v, want [0 6]", got)
+	// FinalityVoteDuties: one (val, subnet) pair per hosted validator (uniform v%N), the subnet
+	// from finality_subnet_of — a node's keys can land on several subnets.
+	if got := a.Node(0).FinalityVoteDuties(); !slices.Equal(got, []AttestDuty{
+		{Subnet: 0, Val: 0}, {Subnet: 1, Val: 6},
+	}) {
+		t.Fatalf("node0 FinalityVoteDuties = %v, want [(0,0) (1,6)]", got)
 	}
-	if got := a.Node(5).FinalityVoteDuties(); !slices.Equal(got, []int{5, 11}) {
-		t.Fatalf("node5 FinalityVoteDuties = %v, want [5 11]", got)
+	if got := a.Node(5).FinalityVoteDuties(); !slices.Equal(got, []AttestDuty{
+		{Subnet: 1, Val: 5}, {Subnet: 1, Val: 11},
+	}) {
+		t.Fatalf("node5 FinalityVoteDuties = %v, want [(1,5) (1,11)]", got)
 	}
 
 	// FinalitySubscribersOf: a subnet's member set; out-of-range ⇒ nil.
@@ -389,15 +449,19 @@ func TestDecoupledMembership(t *testing.T) {
 		t.Fatalf("FinalitySubscribersOf(9) = %v, want nil", got)
 	}
 
-	// FinalityAggregator(0): the boundary slot is 0*k=0. node0→(0,true), node3→(1,true), node2 not an aggregator.
-	if s, ok := a.Node(0).FinalityAggregator(0); !ok || s != 0 {
-		t.Fatalf("node0 FinalityAggregator(0) = (%d,%v), want (0,true)", s, ok)
+	// FinalityAggregations(0): the boundary slot is 0*k=0. Node 0 aggregates both subnets (its
+	// two refs on subnet 1 dedup to one duty); node 3 only subnet 1; node 2 none.
+	if got := a.Node(0).FinalityAggregations(0); !slices.Equal(got, []int{0, 1}) {
+		t.Fatalf("node0 FinalityAggregations(0) = %v, want [0 1]", got)
 	}
-	if s, ok := a.Node(3).FinalityAggregator(0); !ok || s != 1 {
-		t.Fatalf("node3 FinalityAggregator(0) = (%d,%v), want (1,true)", s, ok)
+	if got := a.Node(3).FinalityAggregations(0); !slices.Equal(got, []int{1}) {
+		t.Fatalf("node3 FinalityAggregations(0) = %v, want [1]", got)
 	}
-	if _, ok := a.Node(2).FinalityAggregator(0); ok {
-		t.Fatal("node2 FinalityAggregator(0) = true, want false (a member but not an aggregator)")
+	if got := a.Node(2).FinalityAggregations(0); got != nil {
+		t.Fatalf("node2 FinalityAggregations(0) = %v, want nil", got)
+	}
+	if got := a.Node(0).FinalityAggregations(7); got != nil {
+		t.Fatalf("FinalityAggregations(7) = %v, want nil (out of range)", got)
 	}
 }
 
@@ -406,17 +470,24 @@ func TestDecoupledMembership(t *testing.T) {
 // uniform fallback (no counts) is pinned by TestDecoupledMembership above.
 func TestFinalityVoteDutiesWithCounts(t *testing.T) {
 	a := &Assignment{
-		Params:          Params{N: 3, V: 6},
-		ValidatorCounts: []int{3, 1, 2},
+		Params:           Params{N: 3, V: 6},
+		ValidatorCounts:  []int{3, 1, 2},
+		FinalitySubnetOf: []int{1, 0, 0, 1, 0, 1},
 	}
-	want := [][]int{{0, 1, 2}, {3}, {4, 5}}
+	want := [][]AttestDuty{
+		{{Subnet: 1, Val: 0}, {Subnet: 0, Val: 1}, {Subnet: 0, Val: 2}},
+		{{Subnet: 1, Val: 3}},
+		{{Subnet: 0, Val: 4}, {Subnet: 1, Val: 5}},
+	}
 	var all []int
 	for node, w := range want {
 		got := a.Node(node).FinalityVoteDuties()
 		if !slices.Equal(got, w) {
 			t.Fatalf("node%d FinalityVoteDuties = %v, want %v", node, got, w)
 		}
-		all = append(all, got...)
+		for _, d := range got {
+			all = append(all, d.Val)
+		}
 	}
 	// The per-node ranges partition the id space: every validator hosted exactly once.
 	if !slices.Equal(all, []int{0, 1, 2, 3, 4, 5}) {

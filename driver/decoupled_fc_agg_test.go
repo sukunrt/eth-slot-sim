@@ -54,21 +54,30 @@ func (d *dialRecorder) after(runStart time.Time) []int {
 }
 
 // decoupledFCAggAssignment builds an N-node decoupled assignment focused on the finality aggregate:
-// the given finality-subnet partition + per-subnet aggregator sets (drawn on every finality
-// boundary slot), V validators (uniform v%N ⇒ validators_per_subnet). Node 0 proposes the
-// (irrelevant) block.
+// the given finality-subnet member partition + per-subnet aggregator VALIDATORS (sampled from the
+// whole set — their host node may well not be a member of the subnet they aggregate; drawn on
+// every finality boundary slot), V validators (uniform v%N; each votes on subnet v % fs_subnets,
+// which under the evens/odds partitions used here keeps every vote on its host's own subnet).
+// Node 0 proposes the (irrelevant) block.
 func decoupledFCAggAssignment(n, v, k int, subnets, aggregators [][]int, numSlots int) *schedule.Assignment {
+	subnetOf := make([]int, v)
 	vps := make([]int, len(subnets))
-	for i, members := range subnets {
-		for _, nd := range members {
-			vps[i] += (v-1-nd)/n + 1 // validators node nd hosts (uniform)
+	for val := range subnetOf {
+		subnetOf[val] = val % len(subnets)
+		vps[subnetOf[val]]++
+	}
+	refs := make([][]schedule.AttesterRef, len(aggregators))
+	for subnet, vals := range aggregators {
+		for pos, val := range vals {
+			refs[subnet] = append(refs[subnet],
+				schedule.AttesterRef{Node: val % n, Val: val, Subnet: subnet, Position: pos})
 		}
 	}
 	slots := make([]schedule.SlotPlan, numSlots)
 	for s := range slots {
 		sp := schedule.SlotPlan{Slot: s, Proposer: 0}
 		if s%k == 0 { // finality boundary carries the aggregators
-			sp.FinalityAggregators = aggregators
+			sp.FinalityAggregators = refs
 		}
 		slots[s] = sp
 	}
@@ -77,14 +86,28 @@ func decoupledFCAggAssignment(n, v, k int, subnets, aggregators [][]int, numSlot
 			N: n, V: v, AcSlotsPerFinalitySlot: k, FsSubnets: len(subnets), NumSlots: numSlots,
 		},
 		FinalitySubscribers: subnets,
+		FinalitySubnetOf:    subnetOf,
 		ValidatorsPerSubnet: vps,
 		Slots:               slots,
 	}
 }
 
-// assertFinalityAggregateCoverage: each aggregator publishes ONE distinct aggregate (the aggregator
-// rides Attester) on the global topic, reaching every node except itself, exactly once — the
-// aggregate twin, mirroring assertAggregateCoverage but read from the finality-boundary slot.
+// aggHostNodes is the distinct host-node set behind a subnet's aggregator refs — the aggregate
+// publishers (a node hosting two selected validators publishes ONE aggregate).
+func aggHostNodes(refs []schedule.AttesterRef) []int {
+	var out []int
+	for _, r := range refs {
+		if !slices.Contains(out, r.Node) {
+			out = append(out, r.Node)
+		}
+	}
+	return out
+}
+
+// assertFinalityAggregateCoverage: each aggregator HOST publishes ONE distinct aggregate (the
+// aggregator node rides Attester) on the global topic, reaching every node except itself, exactly
+// once — the aggregate twin, mirroring assertAggregateCoverage but read from the finality-boundary
+// slot's refs.
 func assertFinalityAggregateCoverage(t *testing.T, a *schedule.Assignment, rec *metrics.Recorder, fslot int) {
 	t.Helper()
 	sp := a.Slots[fslot*a.Params.AcSlotsPerFinalitySlot]
@@ -99,8 +122,8 @@ func assertFinalityAggregateCoverage(t *testing.T, a *schedule.Assignment, rec *
 		}
 		got[k][ar.Node]++
 	}
-	for subnet, aggs := range sp.FinalityAggregators {
-		for _, agg := range aggs {
+	for subnet, refs := range sp.FinalityAggregators {
+		for _, agg := range aggHostNodes(refs) {
 			recvd := got[aggKey{subnet, agg}]
 			for nd := range a.Params.N {
 				want := 1
@@ -118,14 +141,17 @@ func assertFinalityAggregateCoverage(t *testing.T, a *schedule.Assignment, rec *
 
 // fs_aggregators per subnet each publish one distinct, population-scaled aggregate on the global
 // topic; each reaches N−1, and its size matches FinalityAggregateSize(validators_per_subnet[subnet])
-// — i.e. the aggregator sized it by its subnet's voting population. Measured on a settled finality
+// — i.e. the aggregator sized it by its subnet's voting population. One aggregator per subnet is a
+// NON-member of the subnet it aggregates (vals 3 and 2 — hosts 3 and 2 sit on the opposite
+// partition), exercising the pre-join Subscribe path end-to-end. Measured on a settled finality
 // slot (1), so the aggregator's pre-join (at AC slot k−1+...) and cross-slot timer have run.
 func TestDecoupledFinalityAggregateCoverageAndSize(t *testing.T) {
 	if raceEnabled {
 		t.Skip("race detector overflows TSan's epoch on this sized synctest run")
 	}
 	synctest.Test(t, func(t *testing.T) {
-		a := decoupledFCAggAssignment(8, 8, 2, [][]int{{0, 2, 4, 6}, {1, 3, 5, 7}}, [][]int{{0, 2}, {1, 3}}, 5)
+		a := decoupledFCAggAssignment(8, 8, 2,
+			[][]int{{0, 2, 4, 6}, {1, 3, 5, 7}}, [][]int{{0, 3}, {1, 2}}, 5)
 		rec := metrics.NewRecorder()
 		dc := &driver.DecoupledParams{K: 2, FCVoteOffset: time.Second, FCAggFraction: 50}
 		s := buildDecoupledScenario(t, a, 4*time.Second, nil, rec, 4, dc)
@@ -171,9 +197,10 @@ func TestDecoupledFinalityAggregateCoverageAndSize(t *testing.T) {
 		// MakeFinalityAggregate produces for validators_per_subnet[subnet] (a wrong vps would differ).
 		mu.Lock()
 		defer mu.Unlock()
-		for subnet, aggs := range a.Slots[2].FinalityAggregators { // boundary slot for finality slot 1
-			for _, agg := range aggs {
-				want := len(validator.MakeFinalityAggregate(1, subnet, agg, a.ValidatorsPerSubnet[subnet]).Payload)
+		for subnet, refs := range a.Slots[2].FinalityAggregators { // boundary slot for finality slot 1
+			for _, agg := range aggHostNodes(refs) {
+				vps := a.ValidatorsPerSubnet[subnet]
+				want := len(validator.MakeFinalityAggregate(1, subnet, agg, vps).Payload)
 				if got := wireLen[aggKey{subnet, agg}]; got != want {
 					t.Fatalf("finality aggregate subnet %d agg %d wire size = %d bytes, want %d (vps=%d)",
 						subnet, agg, got, want, a.ValidatorsPerSubnet[subnet])
@@ -191,7 +218,8 @@ func TestDecoupledFinalityAggregatePublishInstant(t *testing.T) {
 		t.Skip("race detector overflows TSan's epoch on this sized synctest run")
 	}
 	synctest.Test(t, func(t *testing.T) {
-		a := decoupledFCAggAssignment(8, 8, 2, [][]int{{0, 2, 4, 6}, {1, 3, 5, 7}}, [][]int{{0, 2}, {1, 3}}, 5)
+		a := decoupledFCAggAssignment(8, 8, 2,
+			[][]int{{0, 2, 4, 6}, {1, 3, 5, 7}}, [][]int{{0, 3}, {1, 2}}, 5)
 		tr := &timeTracer{}
 		dc := &driver.DecoupledParams{K: 2, FCVoteOffset: time.Second, FCAggFraction: 50}
 		s := buildDecoupledScenario(t, a, 4*time.Second, nil, tr, 4, dc)
@@ -219,17 +247,19 @@ func TestDecoupledFinalityAggregatePublishInstant(t *testing.T) {
 	})
 }
 
-// An aggregator dials extra members of its subnet during the run (the previous-AC-slot pre-join);
-// a non-aggregator dials nothing during the run. Subnets of 6 with peersP=4 guarantee at least one
-// non-base subnet member to dial (a node has ≤4 base peers but 5 subnet mates).
+// A NON-member aggregator pre-joins the subnet it aggregates at the previous AC slot: it dials
+// extra members AND Subscribes the subnet's mesh (it generally has no connection to it at all),
+// so it holds the subnet's votes when its aggregate is due; a non-aggregator dials nothing during
+// the run. Subnets of 6 with peersP=4 guarantee at least one non-base subnet member to dial.
 func TestDecoupledFinalityAggregatePreJoin(t *testing.T) {
 	if raceEnabled {
 		t.Skip("race detector overflows TSan's epoch on this sized synctest run")
 	}
 	synctest.Test(t, func(t *testing.T) {
-		// 12 nodes, 2 subnets of 6; aggregators {0} and {1}. V=N ⇒ vps = subnet size.
+		// 12 nodes, 2 member subnets of 6; aggregator vals {1} and {2} — val 1 (host 1, an odd
+		// node) aggregates subnet 0, val 2 (host 2, even) aggregates subnet 1: both foreign.
 		subnets := [][]int{{0, 2, 4, 6, 8, 10}, {1, 3, 5, 7, 9, 11}}
-		a := decoupledFCAggAssignment(12, 12, 2, subnets, [][]int{{0}, {1}}, 5)
+		a := decoupledFCAggAssignment(12, 12, 2, subnets, [][]int{{1}, {2}}, 5)
 		rec := metrics.NewRecorder()
 		dc := &driver.DecoupledParams{K: 2, FCVoteOffset: time.Second, FCAggFraction: 50}
 		s := buildDecoupledScenario(t, a, 4*time.Second, nil, rec, 4, dc)
@@ -243,19 +273,33 @@ func TestDecoupledFinalityAggregatePreJoin(t *testing.T) {
 		t.Cleanup(cancel)
 		runStart := s.run(t, ctx, 5)
 
-		// Aggregator 0 pre-joined extra subnet-0 members during the run; node 2 (a non-aggregator
-		// member of subnet 0) dialed nothing during the run.
-		aggDials := recorders[0].after(runStart)
+		// Aggregator host 1 pre-joined extra subnet-0 members during the run; node 4 (a member
+		// of subnet 0, neither an aggregator nor a fan-out voter) dialed nothing during the run.
+		aggDials := recorders[1].after(runStart)
 		if len(aggDials) == 0 {
-			t.Fatal("aggregator 0 dialed no extra peers during the run — pre-join missing")
+			t.Fatal("aggregator 1 dialed no extra peers during the run — pre-join missing")
 		}
 		for _, peer := range aggDials {
-			if !slices.Contains(subnets[0], peer) || peer == 0 {
-				t.Fatalf("aggregator 0 pre-join dialed %d, want a subnet-0 member ≠ 0", peer)
+			if !slices.Contains(subnets[0], peer) {
+				t.Fatalf("aggregator 1 pre-join dialed %d, want a subnet-0 member", peer)
 			}
 		}
-		if d := recorders[2].after(runStart); len(d) != 0 {
-			t.Fatalf("non-aggregator 2 dialed %v during the run, want none", d)
+		if d := recorders[4].after(runStart); len(d) != 0 {
+			t.Fatalf("non-aggregator 4 dialed %v during the run, want none", d)
+		}
+
+		// The pre-join Subscribe collected the subnet's votes: host 1 (NOT a member of subnet 0)
+		// received every subnet-0 vote of finality slot 1 — that's the aggregator's whole job.
+		got := map[int]bool{}
+		for _, ar := range rec.Arrivals() {
+			if ar.ID.Kind == node.KindFinalityVote && ar.ID.Slot == 1 && ar.ID.Subnet == 0 && ar.Node == 1 {
+				got[ar.ID.Attester] = true
+			}
+		}
+		for val, subnet := range a.FinalitySubnetOf {
+			if subnet == 0 && !got[val] {
+				t.Fatalf("aggregator host 1 missing subnet-0 vote of val %d (got %v)", val, keys(got))
+			}
 		}
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"time"
 
@@ -56,23 +57,26 @@ type NodeRunner struct {
 }
 
 // finalityState is the per-(node, finality-slot) state. Unlike slotState (per AC slot), it spans k
-// AC slots — armed at a finality boundary, drained by its one-shot vote timer (and, M5, its
-// aggregate timer), and reaped at the finality slot's last AC slot. It is keyed in r.finals by the
-// finality slot index, so the per-AC-slot endSlot pruning of r.slots leaves it untouched.
+// AC slots — set up at the pre-join slot n·k−1 (the boundary itself for n=0), drained by its
+// one-shot vote and aggregation timers, and reaped at the finality slot's last AC slot. It is
+// keyed in r.finals by the finality slot index, so the per-AC-slot endSlot pruning of r.slots
+// leaves it untouched.
 type finalityState struct {
-	subnet    int         // this node's stable finality subnet
-	duties    []int       // validators this node hosts (one FinalityVote each)
-	voteTimer *time.Timer // fires at finalitySlotStart(n) + fcVoteOffset
-	voteOnce  sync.Once   // one FC vote burst per finality slot
+	duties     []schedule.AttestDuty // hosted validators × their drawn subnets (one vote each)
+	voteDialed []int                 // fan-out dials into non-member duty subnets (at the pre-join)
+	voteTimer  *time.Timer           // fires at finalitySlotStart(n) + fcVoteOffset
+	voteOnce   sync.Once             // one FC vote burst per finality slot
 
-	// Aggregator state (set at the pre-join slot n·k−1, or at the boundary for n=0). dialed = the
-	// extra subnet peers dialed at the pre-join, dropped after the aggregate publishes. aggVPS sizes
-	// the population-scaled aggregate.
-	isAgg    bool
-	aggVPS   int
-	dialed   []int
-	aggTimer *time.Timer // fires at finalitySlotStart(n) + fcAggFraction%·k·slotDur
-	aggOnce  sync.Once   // one aggregate per finality slot
+	// Aggregation state (set at the pre-join). aggSubnets = the subnets this node aggregates
+	// (validator-sampled from the ENTIRE set, so generally foreign); aggSubscribed = the topics it
+	// Subscribe'd for the duty (the foreign ones); aggDialed = the subnet peers dialed so those
+	// meshes have somewhere to graft. All of it is torn down at the aggregation deadline.
+	aggSubnets    []int
+	aggSubscribed []string
+	aggDialed     []int
+	aggTimer      *time.Timer // fires at finalitySlotStart(n) + fcAggFraction%·k·slotDur
+	aggOnce       sync.Once   // one aggregate burst per finality slot
+	dropOnce      sync.Once   // teardown: at the aggregation deadline, or reap as the fallback
 }
 
 // slotState is the per-(node, slot) coupling holder.
@@ -180,7 +184,8 @@ func (r *NodeRunner) Prepare() {
 	}
 	if r.decoupled {
 		// Every node downloads all AC votes and FC aggregates (global topics, like aggregates), and
-		// persistently meshes its one finality subnet (it votes there every finality slot). Columns
+		// persistently meshes its one finality subnet (the stable receiver core; its validators'
+		// votes ride their own drawn subnets, fanning out where the node isn't a member). Columns
 		// (subscribed above) gate the AC vote. Attestation/sync topics are not joined.
 		if err := r.nd.Subscribe(validator.AvailabilityVoteTopic); err != nil {
 			slog.Error("subscribe availability vote topic failed", "node", r.num, "err", err)
@@ -340,42 +345,40 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 	}
 }
 
-// armFinality drives the finality chain at each AC slot: the aggregator pre-join at the slot before
-// a boundary, and — at a boundary (slot % k == 0) — this node's per-validator vote burst plus, if it
-// is an aggregator, its aggregate. The boundary slot's slotStart IS finalitySlotStart(n), so the FC
-// timers are armed off it directly. State is get-or-create in r.finals (the pre-join may have
-// created it a slot earlier) and spans k AC slots.
+// armFinality drives the finality chain at each AC slot: the pre-join at the slot before a
+// boundary (vote fan-out warm-up + aggregator subscribe), and — at a boundary (slot % k == 0) —
+// this node's per-validator vote burst plus the aggregation deadline. The boundary slot's
+// slotStart IS finalitySlotStart(n), so the FC timers are armed off it directly. State lives in
+// r.finals (created by the pre-join; at n=0 the pre-join runs here, there being no previous slot)
+// and spans k AC slots.
 func (r *NodeRunner) armFinality(slot int, slotStart time.Time, view schedule.View) {
-	if (slot+1)%r.k == 0 { // the AC slot before a boundary: aggregator for finality slot (slot+1)/k
-		r.prejoinAggregator((slot+1)/r.k, view)
+	if (slot+1)%r.k == 0 { // the AC slot before a boundary: warm up finality slot (slot+1)/k
+		r.prejoinFinality((slot+1)/r.k, view)
 	}
 	if slot%r.k != 0 {
 		return
 	}
 	n := slot / r.k
-	subnet, member := view.FinalitySubnet()
-	if !member { // every node is a member, but guard a phase-off / partial assignment
-		return
+	if n == 0 {
+		r.prejoinFinality(0, view)
 	}
 	r.mu.Lock()
 	fs := r.finals[n]
-	if fs == nil {
-		fs = &finalityState{subnet: subnet}
-		r.finals[n] = fs
-	}
-	fs.duties = view.FinalityVoteDuties()
-	if _, isAgg := view.FinalityAggregator(n); isAgg && !fs.isAgg { // n=0 has no pre-join; set it here
-		fs.isAgg, fs.aggVPS = true, r.validatorsPerSubnet(subnet)
-	}
-	isAgg := fs.isAgg
 	r.mu.Unlock()
+	if fs == nil { // every node votes, but guard a phase-off / partial assignment
+		return
+	}
 	fs.voteTimer = time.AfterFunc(time.Until(slotStart.Add(r.fcVoteOffset)), func() {
 		r.emitFinalityVotes(n, fs)
 	})
-	if isAgg {
-		// fracDur = fcAggFraction% · k · slotDur (multiply before divide). A one-shot timer k/2 AC
-		// slots in the future — it fires independently of the per-AC-slot Run sleep, surviving the
-		// intervening endSlots because it lives in r.finals.
+	// The aggregation deadline publishes the aggregates and tears the pre-join state down (the
+	// foreign subscribes and both dial sets). fracDur = fcAggFraction% · k · slotDur (multiply
+	// before divide) — a one-shot timer k/2 AC slots in the future; it fires independently of the
+	// per-AC-slot Run sleep, surviving the intervening endSlots because it lives in r.finals.
+	// With no aggregation phase (fraction 0) the teardown falls back to reapFinality.
+	needsDeadline := len(fs.aggSubnets) > 0 ||
+		(r.fcAggFraction > 0 && len(fs.voteDialed)+len(fs.aggDialed) > 0)
+	if needsDeadline {
 		fracDur := time.Duration(r.fcAggFraction) * time.Duration(r.k) * r.slotDur / 100
 		fs.aggTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
 			r.emitFinalityAggregate(n, fs)
@@ -383,35 +386,81 @@ func (r *NodeRunner) armFinality(slot int, slotStart time.Time, view schedule.Vi
 	}
 }
 
-// prejoinAggregator dials a few extra (non-base) members of finality slot n's aggregator's subnet at
-// the previous AC slot, so it is well-meshed before the vote burst, and records them for drop after
-// publishing. Persistent membership already guarantees reception, so this is robustness + a faithful
-// encoding of the brief's "join at the previous slot"; it becomes load-bearing if membership is ever
-// made non-persistent. A no-op for non-aggregators (n=0 has no previous slot, so it never pre-joins).
-func (r *NodeRunner) prejoinAggregator(n int, view schedule.View) {
-	subnet, isAgg := view.FinalityAggregator(n)
-	if !isAgg {
+// prejoinFinality warms up finality slot n at the previous AC slot (the boundary itself for n=0),
+// so connections exist when the slot arrives and the vote burst pushes straight through:
+//
+//   - vote fan-out: for each duty subnet the node is NOT a member of (its validators' draws), it
+//     Joins the topic and dials 2 of the subnet's stable members — the attestation publish path,
+//     on the finality clock;
+//   - aggregation: for each subnet it aggregates (a validator sampled from the ENTIRE set lives
+//     here, so the node generally has no connection to the subnet at all), it dials 2 members and
+//     then Subscribes — a real mesh join, because collecting the subnet's votes is the duty. A
+//     stable member of the subnet skips the subscribe (Prepare already did it).
+//
+// Everything set up here is dropped at the aggregation deadline (or reap). A no-op when the node
+// is not a finality member (phase off / partial assignment).
+func (r *NodeRunner) prejoinFinality(n int, view schedule.View) {
+	own, member := view.FinalitySubnet()
+	if !member {
 		return
 	}
-	var dialed []int
-	for _, peer := range r.shuffledFinalitySubscribers(n, subnet) {
-		if len(dialed) >= 2 {
-			break
+	duties := view.FinalityVoteDuties()
+	aggSubnets := view.FinalityAggregations(n)
+
+	var voteDialed, aggDialed []int
+	picked := map[int]bool{}
+	dialTwo := func(subnet int, dialed *[]int) {
+		count := 0
+		for _, peer := range r.shuffledFinalitySubscribers(n, subnet) {
+			if count >= 2 {
+				break
+			}
+			if peer == r.num || r.base[peer] || picked[peer] { // only extra peers, so the drop is safe
+				continue
+			}
+			picked[peer] = true
+			*dialed = append(*dialed, peer)
+			count++
 		}
-		if peer == r.num || r.base[peer] { // only extra (non-base) peers, so the drop is safe
-			continue
-		}
-		dialed = append(dialed, peer)
 	}
-	r.nd.Dial(dialed)
+	var dutySubnets []int
+	for _, d := range duties {
+		if d.Subnet != own && !slices.Contains(dutySubnets, d.Subnet) {
+			dutySubnets = append(dutySubnets, d.Subnet)
+		}
+	}
+	for _, subnet := range dutySubnets {
+		dialTwo(subnet, &voteDialed)
+	}
+	var aggSubscribed []string
+	for _, subnet := range aggSubnets {
+		dialTwo(subnet, &aggDialed)
+		if subnet != own { // a stable member already subscribes (Prepare); it must not drop that
+			aggSubscribed = append(aggSubscribed, validator.FinalityVoteTopic(subnet))
+		}
+	}
+
+	// Register the state BEFORE the network ops: the previous finality slot's teardown (its
+	// aggregation deadline) can land on this very instant (k=2 at 50% puts it on the pre-join
+	// slot), and dropFinality spares whatever a live state lists — in either firing order the
+	// idempotent Join/Subscribe below then leaves this slot warmed up.
+	fs := &finalityState{duties: duties, voteDialed: voteDialed,
+		aggSubnets: aggSubnets, aggSubscribed: aggSubscribed, aggDialed: aggDialed}
 	r.mu.Lock()
-	fs := r.finals[n]
-	if fs == nil {
-		fs = &finalityState{subnet: subnet}
-		r.finals[n] = fs
-	}
-	fs.isAgg, fs.aggVPS, fs.dialed = true, r.validatorsPerSubnet(subnet), dialed
+	r.finals[n] = fs
 	r.mu.Unlock()
+
+	for _, subnet := range dutySubnets {
+		if err := r.nd.Join(validator.FinalityVoteTopic(subnet)); err != nil {
+			slog.Error("join finality duty subnet failed", "node", r.num, "subnet", subnet, "err", err)
+		}
+	}
+	r.nd.Dial(slices.Concat(voteDialed, aggDialed)) // synchronous: up before the boundary
+	for _, topic := range aggSubscribed {
+		if err := r.nd.Subscribe(topic); err != nil {
+			slog.Error("subscribe aggregation subnet failed", "node", r.num, "topic", topic, "err", err)
+		}
+	}
 }
 
 // shuffledFinalitySubscribers returns finality subnet's members in a seeded order (so the pre-join
@@ -425,8 +474,8 @@ func (r *NodeRunner) shuffledFinalitySubscribers(n, subnet int) []int {
 	return order
 }
 
-// validatorsPerSubnet is the voting population of a finality subnet (Σ over its member nodes,
-// uniform V→N), carried in schedule.json — it sizes the population-scaled aggregate. 0 if out of range.
+// validatorsPerSubnet is the voting population of a finality subnet (the per-validator draw's
+// count), carried in schedule.json — it sizes the population-scaled aggregate. 0 if out of range.
 func (r *NodeRunner) validatorsPerSubnet(subnet int) int {
 	if subnet < 0 || subnet >= len(r.sched.ValidatorsPerSubnet) {
 		return 0
@@ -434,59 +483,109 @@ func (r *NodeRunner) validatorsPerSubnet(subnet int) int {
 	return r.sched.ValidatorsPerSubnet[subnet]
 }
 
-// emitFinalityVotes publishes one finality vote per validator this node hosts, on its subnet, at
-// most once per finality slot. The vote is fixed-time and dissemination-only this cut (un-gated, no
-// fork-choice outcome), so OnPublish records no vote. The subnet is already subscribed in Prepare.
+// emitFinalityVotes publishes one finality vote per validator this node hosts, each on ITS
+// validator's drawn subnet, at most once per finality slot. The vote is fixed-time and
+// dissemination-only this cut (un-gated, no fork-choice outcome), so OnPublish records no vote.
+// The node's own subnet is subscribed in Prepare; foreign duty subnets were Joined + dialed at
+// the pre-join slot, so the non-member publish lands via gossipsub fan-out.
 func (r *NodeRunner) emitFinalityVotes(n int, fs *finalityState) {
 	fs.voteOnce.Do(func() {
 		at := time.Now()
-		topic := validator.FinalityVoteTopic(fs.subnet)
-		for _, val := range fs.duties {
-			msg := validator.MakeFinalityVote(n, fs.subnet, val, r.num)
-			r.tracer.OnPublish(metrics.FinalityVoteID(n, fs.subnet, val, r.num), false, at)
-			if err := r.nd.Publish(r.runCtx, topic, msg.Payload); err != nil {
-				slog.Error("publish finality vote failed", "node", r.num, "finality_slot", n, "val", val, "err", err)
+		for _, d := range fs.duties {
+			msg := validator.MakeFinalityVote(n, d.Subnet, d.Val, r.num)
+			r.tracer.OnPublish(metrics.FinalityVoteID(n, d.Subnet, d.Val, r.num), false, at)
+			err := r.nd.Publish(r.runCtx, validator.FinalityVoteTopic(d.Subnet), msg.Payload)
+			if err != nil {
+				slog.Error("publish finality vote failed",
+					"node", r.num, "finality_slot", n, "val", d.Val, "err", err)
 			}
 		}
 	})
 }
 
-// emitFinalityAggregate publishes this aggregator's one population-scaled aggregate on the global
-// topic, at most once per finality slot, then drops the pre-joined extra peers. The aggregate's size
-// derives from aggVPS (ValidatorsPerSubnet[subnet]), not from collected votes — this cut is
-// dissemination-only (the votes' fork-choice content is a planned extension), so it is fixed-time.
+// emitFinalityAggregate publishes one population-scaled aggregate per aggregated subnet on the
+// global topic, at most once per finality slot, then tears the slot's pre-join state down. The
+// aggregate's size derives from ValidatorsPerSubnet[subnet], not from collected votes — this cut
+// is dissemination-only (the votes' fork-choice content is a planned extension), so it is
+// fixed-time.
 func (r *NodeRunner) emitFinalityAggregate(n int, fs *finalityState) {
 	fs.aggOnce.Do(func() {
 		at := time.Now()
-		msg := validator.MakeFinalityAggregate(n, fs.subnet, r.num, fs.aggVPS)
-		r.tracer.OnPublish(metrics.FinalityAggregateID(n, fs.subnet, r.num), false, at)
-		if err := r.nd.Publish(r.runCtx, validator.FinalityAggregateTopic, msg.Payload); err != nil {
-			slog.Error("publish finality aggregate failed", "node", r.num, "finality_slot", n, "err", err)
+		for _, subnet := range fs.aggSubnets {
+			msg := validator.MakeFinalityAggregate(n, subnet, r.num, r.validatorsPerSubnet(subnet))
+			r.tracer.OnPublish(metrics.FinalityAggregateID(n, subnet, r.num), false, at)
+			if err := r.nd.Publish(r.runCtx, validator.FinalityAggregateTopic, msg.Payload); err != nil {
+				slog.Error("publish finality aggregate failed",
+					"node", r.num, "finality_slot", n, "subnet", subnet, "err", err)
+			}
 		}
-		r.nd.Disconnect(fs.dialed) // drop the pre-joined extra peers after publishing
+		r.dropFinality(fs)
+	})
+}
+
+// dropFinality tears down a finality slot's pre-join state: unsubscribes the aggregation-only
+// (foreign) subnets and disconnects both dial sets — sparing whatever another LIVE finality
+// state still lists. The sparing matters because the deadline can coincide with the next
+// finality slot's pre-join (k=2 at 50% lands exactly on it), and a node aggregating the same
+// subnet — or dialing the same peers — twice in a row must not lose what it just set up. Runs
+// at the aggregation deadline, after the aggregates publish; reapFinality is the fallback when
+// no deadline timer was armed.
+func (r *NodeRunner) dropFinality(fs *finalityState) {
+	fs.dropOnce.Do(func() {
+		keepTopic, keepPeer := map[string]bool{}, map[int]bool{}
+		r.mu.Lock()
+		for _, live := range r.finals {
+			if live == fs {
+				continue
+			}
+			for _, topic := range live.aggSubscribed {
+				keepTopic[topic] = true
+			}
+			for _, p := range slices.Concat(live.voteDialed, live.aggDialed) {
+				keepPeer[p] = true
+			}
+		}
+		r.mu.Unlock()
+		for _, topic := range fs.aggSubscribed {
+			if !keepTopic[topic] {
+				r.nd.Unsubscribe(topic)
+			}
+		}
+		var drop []int
+		for _, p := range slices.Concat(fs.voteDialed, fs.aggDialed) {
+			if !keepPeer[p] {
+				drop = append(drop, p)
+			}
+		}
+		r.nd.Disconnect(drop)
 	})
 }
 
 // reapFinality prunes finality state at the finality slot's last AC slot ((n+1)*k − 1, i.e. slot
-// where (slot+1)%k == 0). By then both the vote timer (fcVoteOffset in) and the aggregate timer
-// (fcAggFraction%·k slots in, < k) have fired, so the stops are defensive. This is the only place
-// r.finals is pruned — it deliberately outlives the per-AC-slot endSlot pruning of r.slots.
+// where (slot+1)%k == 0). By then both the vote timer (fcVoteOffset in) and the aggregation
+// deadline (fcAggFraction%·k slots in, < k) have fired, so the stops and the teardown are
+// defensive (the teardown is load-bearing only when no deadline timer was armed). This is the
+// only place r.finals is pruned — it deliberately outlives the per-AC-slot endSlot pruning of
+// r.slots.
 func (r *NodeRunner) reapFinality(slot int) {
 	if (slot+1)%r.k != 0 {
 		return
 	}
 	n := slot / r.k
 	r.mu.Lock()
-	if fs := r.finals[n]; fs != nil {
-		if fs.voteTimer != nil {
-			fs.voteTimer.Stop()
-		}
-		if fs.aggTimer != nil {
-			fs.aggTimer.Stop()
-		}
-		delete(r.finals, n)
-	}
+	fs := r.finals[n]
+	delete(r.finals, n)
 	r.mu.Unlock()
+	if fs == nil {
+		return
+	}
+	if fs.voteTimer != nil {
+		fs.voteTimer.Stop()
+	}
+	if fs.aggTimer != nil {
+		fs.aggTimer.Stop()
+	}
+	r.dropFinality(fs)
 }
 
 // publishBlock waits until when, records the publish, then publishes the block and (when the

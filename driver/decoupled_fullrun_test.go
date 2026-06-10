@@ -19,7 +19,9 @@ import (
 // (its own RNG — the test asserts against this assignment's own sets): N=16, V=32, ac_vote_size=8,
 // k=2, fs_subnets=2, fs_aggregators=2, num_columns=8. The full-custody backbone {0,1,2,3} proposes
 // and originates columns; every node custodies every column (so the AC gate is satisfiable). FC
-// subnets are an even partition; per-finality-slot aggregators are drawn from each subnet's members.
+// member subnets are an even node partition (the stable receiver core); each VALIDATOR draws its
+// voting subnet independently (finality_subnet_of), so nodes fan out where they aren't members;
+// per-finality-slot aggregators are validators drawn from the ENTIRE set.
 func sizedDecoupledAssignment(seed uint64) *schedule.Assignment {
 	const n, v, acVoteSize, k, fsSubnets, fsAgg, numColumns, numSlots = 16, 32, 8, 2, 2, 2, 8, 5
 	full := []int{0, 1, 2, 3}
@@ -31,13 +33,18 @@ func sizedDecoupledAssignment(seed uint64) *schedule.Assignment {
 	for c := range cols {
 		cols[c] = allNodes // everyone custodies every column ⇒ the gate is satisfiable for all voters
 	}
-	// FC subnets: even partition (node i → subnet i % fsSubnets); vps = Σ hosted validators.
+	// FC member subnets: even node partition (node i → subnet i % fsSubnets).
 	subnets := make([][]int, fsSubnets)
-	vps := make([]int, fsSubnets)
 	for i := range n {
-		s := i % fsSubnets
-		subnets[s] = append(subnets[s], i)
-		vps[s] += (v-1-i)/n + 1
+		subnets[i%fsSubnets] = append(subnets[i%fsSubnets], i)
+	}
+	// The validator partition: an independent uniform draw per validator; vps counts the draw.
+	subnetOf := make([]int, v)
+	vps := make([]int, fsSubnets)
+	voteRng := rand.New(rand.NewPCG(seed, 300))
+	for val := range subnetOf {
+		subnetOf[val] = voteRng.IntN(fsSubnets)
+		vps[subnetOf[val]]++
 	}
 
 	slots := make([]schedule.SlotPlan, numSlots)
@@ -47,16 +54,14 @@ func sizedDecoupledAssignment(seed uint64) *schedule.Assignment {
 		for pos, val := range voters {
 			sp.ACVoters = append(sp.ACVoters, schedule.AttesterRef{Node: val % n, Val: val, Position: pos})
 		}
-		if s%k == 0 { // finality boundary: draw fsAgg aggregators per subnet
+		if s%k == 0 { // finality boundary: draw fsAgg aggregator VALIDATORS per subnet, whole set
 			aggRng := rand.New(rand.NewPCG(seed, uint64(s/k)+200))
-			sp.FinalityAggregators = make([][]int, fsSubnets)
-			for i, members := range subnets {
-				picked := make([]int, fsAgg)
-				for j, p := range aggRng.Perm(len(members))[:fsAgg] {
-					picked[j] = members[p]
+			sp.FinalityAggregators = make([][]schedule.AttesterRef, fsSubnets)
+			for i := range fsSubnets {
+				for pos, val := range aggRng.Perm(v)[:fsAgg] {
+					sp.FinalityAggregators[i] = append(sp.FinalityAggregators[i],
+						schedule.AttesterRef{Node: val % n, Val: val, Subnet: i, Position: pos})
 				}
-				slices.Sort(picked)
-				sp.FinalityAggregators[i] = picked
 			}
 		}
 		slots[s] = sp
@@ -70,6 +75,7 @@ func sizedDecoupledAssignment(seed uint64) *schedule.Assignment {
 		FullCustody:         full,
 		ColumnSubscribers:   cols,
 		FinalitySubscribers: subnets,
+		FinalitySubnetOf:    subnetOf,
 		ValidatorsPerSubnet: vps,
 		Slots:               slots,
 	}
@@ -104,9 +110,24 @@ func TestDecoupledFullRunOutputs(t *testing.T) {
 		assertFinalityVoteCoverage(t, a, rec, 1)
 		assertFinalityAggregateCoverage(t, a, rec, 1)
 
-		// Coverage at the aggregation deadline: every subnet's votes reach its aggregators well
-		// within (aggregation_fraction − fc_vote_offset) = 12s − 1s of the vote.
-		for subnet, aggs := range a.Slots[2].FinalityAggregators {
+		// The seed must exercise the foreign-aggregator path (else the fixture degenerated):
+		// some fslot-1 aggregator's host is NOT a member of the subnet it aggregates.
+		foreign := false
+		for subnet, refs := range a.Slots[2].FinalityAggregators {
+			for _, r := range refs {
+				if !slices.Contains(a.FinalitySubscribersOf(subnet), r.Node) {
+					foreign = true
+				}
+			}
+		}
+		if !foreign {
+			t.Fatal("fixture degenerated: every fslot-1 aggregator host is a member of its subnet")
+		}
+
+		// Coverage at the aggregation deadline: every subnet's votes reach its aggregator hosts
+		// well within (aggregation_fraction − fc_vote_offset) = 12s − 1s of the vote.
+		for subnet, refs := range a.Slots[2].FinalityAggregators {
+			aggs := aggHostNodes(refs)
 			if got := rec.FinalityCoverageAtDeadline(1, subnet, aggs, 11*time.Second); got != 1.0 {
 				t.Fatalf("FinalityCoverageAtDeadline(fslot1, subnet %d) = %v, want 1.0", subnet, got)
 			}
