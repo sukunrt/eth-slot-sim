@@ -156,6 +156,29 @@ def test_subnet_topology_connects_every_sync_subnet_within_k():
         assert _connected(adj, subs), f"sync subnet {i} members not connected: {subs}"
 
 
+def test_subnet_topology_connects_every_finality_subnet_within_k():
+    # Decoupled runs ride the same biased graph: each finality subnet's members form one
+    # connected piece, on top of the column + global trees, so finality attestations flood
+    # within their subnet. Pins that decoupled runs get the same wiring as the other phases.
+    a = schedule.generate(
+        schedule.Params(
+            n=30, v=60, c=2, sc=4, subnets_per_node=2, subscribe_floor=10,
+            num_columns=8, custody_floor=4, full_custody_fraction=0.5,
+            column_backbone_floor=3, decoupled=True, ac_vote_size=8,
+            ac_slots_per_finality_slot=2, fs_subnets=4, fs_aggregators=2,
+            seed=1, num_slots=2,
+        ),
+        supers=list(range(6)),
+    )
+    topo = topology.generate_subnet_topology(num_nodes=30, k=12, seed=42, assignment=a)
+
+    adj = _adjacency(topo)
+    assert _connected(adj, range(30)), "block topic would partition"
+    assert a.finality_subscribers, "decoupled schedule must carry finality membership"
+    for i, subs in enumerate(a.finality_subscribers):
+        assert _connected(adj, subs), f"finality subnet {i} members not connected: {subs}"
+
+
 def test_subnet_topology_degrades_gracefully_for_small_n():
     # K far larger than N-1, plus a singleton and an empty subnet: no crash/spin, degree
     # capped at N-1, still connected.

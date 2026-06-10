@@ -1,6 +1,7 @@
 """Shadow + simnet run orchestration.
 
-Generates the schedule assignment (when the run has an attestation phase), the
+Generates the schedule assignment (when the config has an attestation block — present
+even with enabled: false for the column/sync/decoupled phases, which build on it), the
 topology and GML network, and one Shadow host per node. The per-slot block proposer
 (a supernode) lives in schedule.json; the attestation duties are computed in Go from
 schedule.json + flags. So Python sets up inputs and both backends read the same files.
@@ -31,9 +32,13 @@ from simctl.topology import (
 
 
 def _schedule_assignment(config: SimConfig) -> schedule.Assignment | None:
-    """The schedule assignment for this run, or None if the attestation phase is off. Block
-    proposers are drawn from the topology's supernode set (the same supernode_ids the topology
-    bandwidth uses, keyed by the topology seed), so only supernodes propose."""
+    """The schedule assignment for this run, or None if the config has no attestation block.
+    Presence of the block — not attestation.enabled — is the gate: the column/sync/decoupled
+    phases keep the block (enabled: false) because it supplies V and the deadline, and config
+    validation enforces that. Any assignment also switches _build_topology to the
+    subnet-biased graph, so every membership group it carries is wired as a connected piece.
+    Block proposers are drawn from the topology's supernode set (the same supernode_ids the
+    topology bandwidth uses, keyed by the topology seed), so only supernodes propose."""
     a = config.attestation
     if a is None:
         return None
@@ -304,9 +309,11 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
 def _build_topology(config: SimConfig, assignment: schedule.Assignment | None) -> Topology:
     tc = config.topology
     if assignment is not None:
-        # Attestation runs: one discv5-biased graph at target degree K (= tc.degree) where
-        # each subnet's subscribers are a connected piece, so attestations flood within the
-        # subnet and the block topic rides the same peers. (tc.type is ignored here.)
+        # Any scheduled run (attestation / columns / sync / decoupled): one discv5-biased
+        # graph at target degree K (= tc.degree) where every membership group the schedule
+        # carries — attestation subnets, column custodiers, sync subnets, finality subnets —
+        # is a connected piece, so each topic floods within its group and the block topic
+        # rides the same peers. tc.type only applies to block-only runs (no schedule).
         return generate_subnet_topology(
             num_nodes=tc.num_nodes,
             k=tc.degree,
