@@ -270,6 +270,14 @@ func (n *Node) batchVerifierFor(class string) *batchVerifier {
 	return v
 }
 
+// verifierFor returns topic's class queue, creating it on first use — the locked twin of
+// batchVerifierFor for callers outside n.mu (the partial manager's RPC handler).
+func (n *Node) verifierFor(topic string) *batchVerifier {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.batchVerifierFor(string(verifyClassFor(topic)))
+}
+
 // registerVerifyHook registers topic's validation-as-sleep hook once, three-way by the
 // topic's registry class: the column burst goes through the per-node P-server column
 // verifier; a batched flood goes through its class's single-server queue; the block (and

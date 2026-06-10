@@ -11,6 +11,7 @@ import (
 
 	"github.com/libp2p/go-libp2p-pubsub/partialmessages"
 	"github.com/libp2p/go-libp2p-pubsub/partialmessages/bitmap"
+	pubsub_pb "github.com/libp2p/go-libp2p-pubsub/pb"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"google.golang.org/protobuf/proto"
 
@@ -412,6 +413,124 @@ func (m *partialManager) publishActions(topic string, group int) partialmessages
 				}
 			}
 		}
+	}
+}
+
+// onIncomingRPC (extension hook) is the partial topics' entire receive path — no normal
+// gossipsub messages flow there, so no topic validator parks a goroutine per message.
+// Metadata first (so available/pendingWant is current before batches infer from them), then
+// data batches: malformed input errors out; genuinely-new positions park as validating and
+// enter the kind's class queue as ONE item whose Attestations length is the new-position count
+// — a 1000-vote batch costs base + 1000·perItem once, the batching win priced honestly in the
+// same M/D/1 model. The verifier callback (markValidated) promotes and fires the arrival.
+func (m *partialManager) onIncomingRPC(from peer.ID, peerStates map[peer.ID]partialPeerState,
+	rpc *pubsub_pb.PartialMessagesExtension) error {
+	topic := rpc.GetTopicID()
+	group := groupKeyFromID(rpc.GroupID)
+
+	var ctrl pb.ControlEnvelope
+	if len(rpc.PartsMetadata) > 0 {
+		if err := proto.Unmarshal(rpc.PartsMetadata, &ctrl); err != nil {
+			return fmt.Errorf("unmarshal control envelope: %w", err)
+		}
+	}
+	var dataEnv pb.BatchedAttestationEnvelope
+	if len(rpc.PartialMessage) > 0 {
+		if err := proto.Unmarshal(rpc.PartialMessage, &dataEnv); err != nil {
+			return fmt.Errorf("unmarshal data envelope: %w", err)
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, md := range ctrl.Metadatas {
+		g, err := m.getOrCreateGroup(topic, group)
+		if err != nil {
+			return err
+		}
+		b := g.bucket(md.AttestationData)
+		bps := b.peer(from, g.committeeSize)
+		bps.available.Or(md.Available) // Or truncates to our fixed width — remote can't grow it
+		bps.pendingWant.Or(md.Requests)
+		// A peer issuing metadata is by definition a gossip peer; marking it here also re-adds
+		// it to peerStates after a publish tick dropped it, so its want is served next tick.
+		if bitmap.Bitmap(md.Available).OnesCount() > 0 || bitmap.Bitmap(md.Requests).OnesCount() > 0 {
+			ps := peerStates[from]
+			ps.gossipPeer = true
+			peerStates[from] = ps
+		}
+	}
+
+	for _, batch := range dataEnv.Batches {
+		g, err := m.getOrCreateGroup(topic, group)
+		if err != nil {
+			return err
+		}
+		// Validate the whole batch before storing anything.
+		if len(batch.AttestorIndices) != len(batch.Signatures) {
+			return fmt.Errorf("attestor_indices=%d != signatures=%d",
+				len(batch.AttestorIndices), len(batch.Signatures))
+		}
+		positions := make([]int, len(batch.AttestorIndices))
+		for i, p := range batch.AttestorIndices {
+			if int(p) >= g.committeeSize {
+				return fmt.Errorf("attestor index %d >= committee size %d", p, g.committeeSize)
+			}
+			positions[i] = int(p)
+		}
+
+		b := g.bucket(batch.AttestationData)
+		bps := b.peer(from, g.committeeSize)
+		fresh := b.addReceived(positions, batch.Signatures)
+		for _, pos := range positions { // the sender holds what it sent
+			bps.available.Set(pos)
+		}
+		if len(fresh) > 0 {
+			data := b.data
+			m.node.verifierFor(topic).submit(
+				verificationItem{Slot: group, Topic: topic, Attestations: make([]any, len(fresh))},
+				func(verificationItem) { m.markValidated(topic, group, data, fresh) })
+		}
+	}
+	return nil
+}
+
+// markValidated (the verifier callback) promotes positions validating → validated and fires
+// one synthesized arrival per position — post-validation, the same moment classic's
+// validator-gated delivery implies — with the identity the resolver recovers from
+// (kind, subnet, group, position). OnReceive runs outside m.mu (the sink takes its own locks
+// and calls back into the Node).
+func (m *partialManager) markValidated(topic string, group int, data []byte, positions []int) {
+	at := time.Now()
+	m.mu.Lock()
+	var promoted []int
+	g := m.group(topic, group)
+	if g != nil {
+		if b, ok := g.buckets[string(data)]; ok {
+			for _, pos := range positions {
+				if _, ok := b.validating[pos]; !ok {
+					continue
+				}
+				delete(b.validating, pos)
+				b.validated[pos] = struct{}{}
+				promoted = append(promoted, pos)
+			}
+		}
+	}
+	m.mu.Unlock()
+
+	if m.node.OnReceive == nil || g == nil {
+		return
+	}
+	for _, pos := range promoted {
+		val, origin := m.node.Partial.Resolver.Identity(g.kind, g.subnet, group, pos)
+		m.node.OnReceive(Received{
+			Kind:   g.kind,
+			ID:     Identity{Slot: group, Subnet: g.subnet, Attester: val, Origin: origin},
+			Origin: origin,
+			At:     at,
+		})
 	}
 }
 
