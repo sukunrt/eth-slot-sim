@@ -19,10 +19,17 @@ import (
 // topic) in place of attestations, and — every K AC slots — finality votes + a population-scaled
 // aggregate; attestation/sync emit is suppressed. The AC-vote deadline and Δ_prep reuse the
 // existing due/prep. K/FCVoteOffset/FCAggFraction drive the finality chain (used by M4/M5).
+// Segregated switches the FC paths to per-AC-slot rounds (validator-segregation-spec.md): round
+// s % K's validators vote in slot s (FCVoteOffset now offsets into the AC slot) and per-slot
+// aggregators publish cell-scaled aggregates at RoundAggFraction% of the slot (FCAggFraction is
+// ignored). It must agree with the schedule's shape (Assignment.Segregated) — the binaries
+// assert that at startup.
 type DecoupledParams struct {
-	K             int           // ac_slots_per_finality_slot (a finality slot spans K AC slots)
-	FCVoteOffset  time.Duration // offset into the finality slot for the per-validator FC vote burst
-	FCAggFraction int           // finality_slot_aggregation_fraction (percent, 0 < f < 100)
+	K                int           // ac_slots_per_finality_slot (a finality slot spans K AC slots)
+	FCVoteOffset     time.Duration // offset into the finality slot (AC slot when segregated) for the FC vote burst
+	FCAggFraction    int           // finality_slot_aggregation_fraction (percent, 0 < f < 100; base mode)
+	Segregated       bool          // per-AC-slot finality rounds (replaces the per-fslot FC path)
+	RoundAggFraction int           // round_aggregation_fraction (% of the AC slot; segregated mode)
 }
 
 // NodeRunner is one node's stateful per-slot orchestrator. It owns the slot loop AND
@@ -46,21 +53,27 @@ type NodeRunner struct {
 	base      map[int]bool  // the node's long-lived peers (so we know which dials are extra)
 
 	// Decoupled finality-chain knobs (set when decoupled; consumed by the FC paths, M4/M5).
-	k             int           // ac_slots_per_finality_slot
-	fcVoteOffset  time.Duration // offset into the finality slot for the FC vote burst
-	fcAggFraction int           // % of the finality slot when FC aggregates publish
+	k                int           // ac_slots_per_finality_slot
+	fcVoteOffset     time.Duration // offset into the finality slot (AC slot when segregated) for the FC vote burst
+	fcAggFraction    int           // % of the finality slot when FC aggregates publish (base mode)
+	segregated       bool          // per-AC-slot finality rounds (validator segregation)
+	roundAggFraction int           // % of the AC slot when round aggregates publish (segregated)
 
 	runCtx context.Context // set at Run; used by emit/publish
 	mu     sync.Mutex
 	slots  map[int]*slotState
-	finals map[int]*finalityState // finality-slot-keyed state (decoupled; spans k AC slots)
+	// finals holds the decoupled finality state: keyed by finality slot in base mode (spans k
+	// AC slots), by AC slot under segregation (a round spans 2: pre-join at s−1, the rest in s).
+	finals map[int]*finalityState
 }
 
-// finalityState is the per-(node, finality-slot) state. Unlike slotState (per AC slot), it spans k
-// AC slots — set up at the pre-join slot n·k−1 (the boundary itself for n=0), drained by its
-// one-shot vote and aggregation timers, and reaped at the finality slot's last AC slot. It is
-// keyed in r.finals by the finality slot index, so the per-AC-slot endSlot pruning of r.slots
-// leaves it untouched.
+// finalityState is the per-(node, round) state of the finality chain. In base mode a round IS a
+// finality slot: unlike slotState (per AC slot), it spans k AC slots — set up at the pre-join
+// slot n·k−1 (the boundary itself for n=0), drained by its one-shot vote and aggregation
+// timers, and reaped at the finality slot's last AC slot — keyed in r.finals by the finality
+// slot index, so the per-AC-slot endSlot pruning of r.slots leaves it untouched. Under
+// segregation every AC slot is a round: set up at the previous slot, drained inside its own,
+// reaped at its endSlot, keyed by the AC slot.
 type finalityState struct {
 	duties     []schedule.AttestDuty // hosted validators × their drawn subnets (one vote each)
 	voteDialed []int                 // fan-out dials into non-member duty subnets (at the pre-join)
@@ -137,6 +150,7 @@ func NewRunner(num int, nd *node.Node, val *validator.Validator, sched *schedule
 	if dc != nil {
 		r.decoupled = true
 		r.k, r.fcVoteOffset, r.fcAggFraction = dc.K, dc.FCVoteOffset, dc.FCAggFraction
+		r.segregated, r.roundAggFraction = dc.Segregated, dc.RoundAggFraction
 		r.finals = make(map[int]*finalityState)
 	}
 	return r
@@ -350,8 +364,13 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 // this node's per-validator vote burst plus the aggregation deadline. The boundary slot's
 // slotStart IS finalitySlotStart(n), so the FC timers are armed off it directly. State lives in
 // r.finals (created by the pre-join; at n=0 the pre-join runs here, there being no previous slot)
-// and spans k AC slots.
+// and spans k AC slots. Under segregation it dispatches to armRound instead — every slot is a
+// round.
 func (r *NodeRunner) armFinality(slot int, slotStart time.Time, view schedule.View) {
+	if r.segregated {
+		r.armRound(slot, slotStart, view)
+		return
+	}
 	if (slot+1)%r.k == 0 { // the AC slot before a boundary: warm up finality slot (slot+1)/k
 		r.prejoinFinality((slot+1)/r.k, view)
 	}
@@ -386,8 +405,44 @@ func (r *NodeRunner) armFinality(slot int, slotStart time.Time, view schedule.Vi
 	}
 }
 
-// prejoinFinality warms up finality slot n at the previous AC slot (the boundary itself for n=0),
-// so connections exist when the slot arrives and the vote burst pushes straight through:
+// armRound drives the per-AC-slot finality round (validator segregation): every slot pre-joins
+// the NEXT slot's round (slot 0 also prepares itself, there being no previous slot), then arms
+// this round's vote burst at slotStart + fcVoteOffset and its aggregation deadline at
+// roundAggFraction% of the slot — both inside this AC slot, so the timers fire before this
+// slot's endSlot reaps the state. The per-slot pre-join overlaps the previous round's teardown
+// (its deadline) every slot; dropFinality's sparing covers that, exactly as it covers the base
+// k=2-at-50% coincidence.
+func (r *NodeRunner) armRound(slot int, slotStart time.Time, view schedule.View) {
+	if slot == 0 {
+		r.prejoinFinality(0, view)
+	}
+	if slot+1 < len(r.sched.Slots) { // nothing to warm past the last slot
+		r.prejoinFinality(slot+1, view)
+	}
+	r.mu.Lock()
+	fs := r.finals[slot]
+	r.mu.Unlock()
+	if fs == nil { // every node votes, but guard a phase-off / partial assignment
+		return
+	}
+	fs.voteTimer = time.AfterFunc(time.Until(slotStart.Add(r.fcVoteOffset)), func() {
+		r.emitFinalityVotes(slot, fs)
+	})
+	needsDeadline := len(fs.aggSubnets) > 0 ||
+		(r.roundAggFraction > 0 && len(fs.voteDialed)+len(fs.aggDialed) > 0)
+	if needsDeadline {
+		fracDur := time.Duration(r.roundAggFraction) * r.slotDur / 100
+		fs.aggTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
+			r.emitFinalityAggregate(slot, fs)
+		})
+	}
+}
+
+// prejoinFinality warms up round n at the previous AC slot, so connections exist when the slot
+// arrives and the vote burst pushes straight through. n is the finality slot in base mode (run
+// at AC slot n·k−1, or the boundary itself for n=0) and the AC slot itself under segregation
+// (run every slot for slot+1) — FinalityVoteDuties/FinalityAggregations interpret the key per
+// mode. The warm-up:
 //
 //   - vote fan-out: for each duty subnet the node is NOT a member of (its validators' draws), it
 //     Joins the topic and dials 2 of the subnet's stable members — the attestation publish path,
@@ -464,7 +519,8 @@ func (r *NodeRunner) prejoinFinality(n int, view schedule.View) {
 }
 
 // shuffledFinalitySubscribers returns finality subnet's members in a seeded order (so the pre-join
-// dials are reproducible across runs/backends), keyed by (seed, finality slot, subnet).
+// dials are reproducible across runs/backends), keyed by (seed, round key, subnet) — the round
+// key is the finality slot in base mode, the AC slot under segregation.
 func (r *NodeRunner) shuffledFinalitySubscribers(n, subnet int) []int {
 	subs := r.sched.FinalitySubscribersOf(subnet)
 	order := make([]int, len(subs))
@@ -474,13 +530,23 @@ func (r *NodeRunner) shuffledFinalitySubscribers(n, subnet int) []int {
 	return order
 }
 
-// validatorsPerSubnet is the voting population of a finality subnet (the per-validator draw's
-// count), carried in schedule.json — it sizes the population-scaled aggregate. 0 if out of range.
-func (r *NodeRunner) validatorsPerSubnet(subnet int) int {
-	if subnet < 0 || subnet >= len(r.sched.ValidatorsPerSubnet) {
+// validatorsPerCell is the voting population behind one aggregate, carried in schedule.json —
+// it sizes the population-scaled aggregate. Base mode: the subnet's whole per-validator draw
+// count (n, the finality slot, is unused). Segregated: the (round, subnet) cell of the two
+// independent draws, round = n % k (n is the AC slot). 0 if out of range.
+func (r *NodeRunner) validatorsPerCell(n, subnet int) int {
+	counts := r.sched.ValidatorsPerSubnet
+	if r.segregated {
+		round := n % r.k
+		if round < 0 || round >= len(r.sched.ValidatorsPerRoundSubnet) {
+			return 0
+		}
+		counts = r.sched.ValidatorsPerRoundSubnet[round]
+	}
+	if subnet < 0 || subnet >= len(counts) {
 		return 0
 	}
-	return r.sched.ValidatorsPerSubnet[subnet]
+	return counts[subnet]
 }
 
 // emitFinalityVotes publishes one finality vote per validator this node hosts, each on ITS
@@ -504,15 +570,16 @@ func (r *NodeRunner) emitFinalityVotes(n int, fs *finalityState) {
 }
 
 // emitFinalityAggregate publishes one population-scaled aggregate per aggregated subnet on the
-// global topic, at most once per finality slot, then tears the slot's pre-join state down. The
-// aggregate's size derives from ValidatorsPerSubnet[subnet], not from collected votes — this cut
-// is dissemination-only (the votes' fork-choice content is a planned extension), so it is
-// fixed-time.
+// global topic, at most once per round, then tears the round's pre-join state down. The
+// aggregate's size derives from the schedule's population counts (the subnet draw in base mode,
+// the (round, subnet) cell under segregation), not from collected votes — this cut is
+// dissemination-only (the votes' fork-choice content is a planned extension), so it is
+// fixed-time. n is the round key: the finality slot in base mode, the AC slot under segregation.
 func (r *NodeRunner) emitFinalityAggregate(n int, fs *finalityState) {
 	fs.aggOnce.Do(func() {
 		at := time.Now()
 		for _, subnet := range fs.aggSubnets {
-			msg := validator.MakeFinalityAggregate(n, subnet, r.num, r.validatorsPerSubnet(subnet))
+			msg := validator.MakeFinalityAggregate(n, subnet, r.num, r.validatorsPerCell(n, subnet))
 			r.tracer.OnPublish(metrics.FinalityAggregateID(n, subnet, r.num), false, at)
 			if err := r.nd.Publish(r.runCtx, validator.FinalityAggregateTopic, msg.Payload); err != nil {
 				slog.Error("publish finality aggregate failed",
@@ -561,20 +628,25 @@ func (r *NodeRunner) dropFinality(fs *finalityState) {
 	})
 }
 
-// reapFinality prunes finality state at the finality slot's last AC slot ((n+1)*k − 1, i.e. slot
-// where (slot+1)%k == 0). By then both the vote timer (fcVoteOffset in) and the aggregation
-// deadline (fcAggFraction%·k slots in, < k) have fired, so the stops and the teardown are
-// defensive (the teardown is load-bearing only when no deadline timer was armed). This is the
-// only place r.finals is pruned — it deliberately outlives the per-AC-slot endSlot pruning of
+// reapFinality prunes finality state at the round's last AC slot: in base mode the finality
+// slot's ((n+1)*k − 1, i.e. slot where (slot+1)%k == 0), under segregation every slot (a round
+// lives in its own slot; finals[slot+1], pre-joined this slot, survives — only finals[slot] is
+// deleted). By then both the vote timer (fcVoteOffset in) and the aggregation deadline (< the
+// round's end in both modes) have fired, so the stops and the teardown are defensive (the
+// teardown is load-bearing only when no deadline timer was armed). This is the only place
+// r.finals is pruned — in base mode it deliberately outlives the per-AC-slot endSlot pruning of
 // r.slots.
 func (r *NodeRunner) reapFinality(slot int) {
-	if (slot+1)%r.k != 0 {
-		return
+	key := slot
+	if !r.segregated {
+		if (slot+1)%r.k != 0 {
+			return
+		}
+		key = slot / r.k
 	}
-	n := slot / r.k
 	r.mu.Lock()
-	fs := r.finals[n]
-	delete(r.finals, n)
+	fs := r.finals[key]
+	delete(r.finals, key)
 	r.mu.Unlock()
 	if fs == nil {
 		return
