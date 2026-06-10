@@ -554,8 +554,7 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
             "shadow": _att_summary(shadow_ac),
             "simnet": _att_summary(simnet_ac),
         }
-        fin_subs = {i: set(m) for i, m in enumerate(schedule_data["finality_subscribers"])}
-        shadow_fv = check_arrivals.analyze_finality_votes(pubs, arrs, fin_subs)
+        shadow_fv = check_arrivals.analyze_finality_votes(pubs, arrs, schedule_data)
         simnet_fv = check_arrivals.analyze_finality_votes_csv(csv_path, schedule_data)
         comparison["finality_votes"] = {
             "expected": shadow_fv.expected,
