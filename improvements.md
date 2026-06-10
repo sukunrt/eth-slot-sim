@@ -90,6 +90,7 @@ decoupled-consensus-spec.md):
 | AC slots per finality slot | `AC_SLOTS_PER_FINALITY_SLOT`, "k" | `ac_slots_per_finality_slot` | `AcSlotsPerFinalitySlot`, `DecoupledParams.K`, `r.k` | — |
 | Availability-chain vote | "AC vote" | `ac_voters`, `ac_vote_size` | `KindACVote`, `ACVoteDuties`, `MakeACVote` | topic `availability_vote`, batch class `ac` |
 | Aggregation deadline fraction | `FINALITY_SLOT_AGGREGATION_FRACTION` | — | `FCAggFraction`, `fcAggFraction` | batch class `fcagg` |
+| Finality attestation (the per-validator finality-chain message) | "finality attestation" (canonical); "FC vote" / "finality vote" are aliases | — (per-validator, derived) | `KindFinalityVote`, `MakeFinalityVote`, `pb.FinalityVote` | "finality vote" (analysis output), batch class `fcvote` |
 | Attestation subnet membership | "subscribers" | `subnet_subscribers` | `SubnetSubscribers`, `Subscribers(s)` | `subscribers` (analysis param) |
 | Sync subnet membership | — | `sync_subscribers` | `SyncSubscribers` | — |
 
