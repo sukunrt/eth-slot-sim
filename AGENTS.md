@@ -80,6 +80,7 @@ go generate ./pb     # after editing .proto files
 ## Where to read more
 
 - `decoupled-consensus-spec.md` (implementation spec), `decoupled-consensus.md` (the brief),
+  `validator-segregation-spec.md` (per-AC-slot finality rounds, a delta on the decoupled spec),
   plus per-phase specs: `attestation-spec.md`, `data-columns-spec.md`,
   `sync-committee-spec.md`, `phase1-spec.md`.
 - `improvements.md` — maintainability backlog + **the naming glossary** (spec ↔
