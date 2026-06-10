@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package block;
+
+option go_package = "github.com/ethp2p/slot-sim/pb";
+
+// The partial-message transport's wire split (partial-attestation-spec.md §2): one committee
+// member's attestation is (attestation_data, position, signature); attestations sharing
+// attestation_data batch into one BatchedAttestation — the data sent once per batch, ~97 B
+// marginal per extra vote instead of a full classic message. The transport treats
+// attestation_data as opaque bytes: the bytes ARE the bucket key, so they must be built
+// deterministically (see validator.MakePartialAttData).
+
+// PartialAttData is the shared attestation_data: the vote + filler. Deterministically built
+// (all-ones filler) so every attester voting the same way produces byte-identical data.
+// voted_origin: the voted block's origin, the prior-head sentinel (max uint32), or 0 for
+// vote-free kinds (finality votes this cut). Receivers never need to parse it (identity comes
+// from (topic, group, position)); parsing for the vote is available for debugging.
+message PartialAttData {
+  uint32 slot         = 1; // the group key (slot / round key), for debuggability + uniqueness
+  uint32 subnet       = 2;
+  uint32 voted_origin = 3;
+  bytes  payload      = 4; // filler to attestation_data_size (default 128 ≈ real AttestationData)
+}
+
+// BatchedAttestation carries every held vote of one (attestation_data) bucket a peer is owed.
+message BatchedAttestation {
+  bytes           attestation_data = 1; // marshaled PartialAttData (opaque to the transport)
+  repeated uint32 attestor_indices = 2; // committee positions, ascending; < committee size
+  repeated bytes  signatures       = 3; // one per index, signature_size B filler each
+}
+
+// PartsMetadata is the gossip-layer advertisement for one bucket: fixed-width bitmaps over the
+// committee index space. requests is a NON-PERSISTENT IWANT — the receiver satisfies what it
+// can on its next tick and forgets the rest.
+message PartsMetadata {
+  uint32 slot             = 1; // redundant with attestation_data, for debuggability
+  bytes  attestation_data = 2;
+  bytes  available        = 3; // bitmap[committeeSize] — positions we hold (validated only)
+  bytes  requests         = 4; // bitmap[committeeSize] — positions we want; non-persistent
+}
+
+// ControlEnvelope is one (peer, tick)'s metadata payload (the extension's PartsMetadata field).
+message ControlEnvelope { repeated PartsMetadata metadatas = 1; }
+
+// BatchedAttestationEnvelope is one (peer, tick)'s data payload (the extension's
+// PartialMessage field).
+message BatchedAttestationEnvelope { repeated BatchedAttestation batches = 1; }

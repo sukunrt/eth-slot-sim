@@ -108,6 +108,8 @@ func (x *ACVote) GetPayload() []byte {
 // dissemination-only this cut (no fork-choice outcome measured): un-gated by data availability and
 // not block-coupled, so it carries no voted_origin. val is the identity (one vote per validator);
 // a node hosting m selected validators publishes m votes (k-multiplicity, like attestations).
+// Under validator segregation finality_slot carries the AC SLOT instead (round = s % k and
+// fslot = s / k are derivable) — a doc-level reinterpretation, no wire change.
 type FinalityVote struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	FinalitySlot  uint32                 `protobuf:"varint,1,opt,name=finality_slot,json=finalitySlot,proto3" json:"finality_slot,omitempty"`
@@ -190,6 +192,8 @@ func (x *FinalityVote) GetPayload() []byte {
 // scales with the subnet's voting population: base 328 B + a ceil(validators_per_subnet/8)
 // aggregation bitfield. origin carries the aggregator node, which both makes the aggregate
 // distinct (so gossipsub does not dedup them) and is the gossip origin for the loopback skip.
+// Under validator segregation finality_slot carries the AC SLOT (per-round aggregates, drawn
+// every slot, bitfield sized to the (round, subnet) cell) — no wire change.
 type FinalityAggregate struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	FinalitySlot  uint32                 `protobuf:"varint,1,opt,name=finality_slot,json=finalitySlot,proto3" json:"finality_slot,omitempty"`
