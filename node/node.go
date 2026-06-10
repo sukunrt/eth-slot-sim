@@ -128,7 +128,9 @@ func (n *Node) Start(ctx context.Context) error {
 		pubsub.WithMessageIdFn(MessageIDFunc),
 		pubsub.WithMessageSignaturePolicy(pubsub.StrictNoSign),
 		pubsub.WithNoAuthor(),
-		pubsub.WithPeerOutboundQueueSize(1000),
+		// 4096: the decoupled finality-attestation burst (~10k votes/subnet at one
+		// instant) overflowed 1000 — ~70 votes died at their publisher in the n1000 run.
+		pubsub.WithPeerOutboundQueueSize(4096),
 		pubsub.WithValidateQueueSize(600),
 		pubsub.WithMaxMessageSize(maxMessageSize),
 	}
