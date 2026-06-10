@@ -1,14 +1,18 @@
 package node
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"iter"
 	"log/slog"
+	"math/rand/v2"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p-pubsub/partialmessages"
 	"github.com/libp2p/go-libp2p-pubsub/partialmessages/bitmap"
 	pubsub_pb "github.com/libp2p/go-libp2p-pubsub/pb"
@@ -550,6 +554,128 @@ func (m *partialManager) onEmitGossip(topic string, groupID []byte,
 		ps.sendAvailableList = true
 		peerStates[p] = ps
 	}
+}
+
+// newExtension wires the manager as the gossipsub extension (pass to
+// pubsub.WithPartialMessagesExtension at Start). GroupTTL 10 heartbeats — the pubsub-side
+// state self-expires; the manager's own buckets are pruned by the runner (PrunePartial).
+func (m *partialManager) newExtension() *partialmessages.PartialMessagesExtension[partialPeerState] {
+	return &partialmessages.PartialMessagesExtension[partialPeerState]{
+		Logger:             m.logger,
+		OnEmitGossip:       m.onEmitGossip,
+		OnIncomingRPC:      m.onIncomingRPC,
+		GroupTTLByHeatbeat: 10,
+	}
+}
+
+// run is the tick loop: every PublishInterval, one PublishPartial per live (topic, group).
+// The initial offset is seeded (partialJitter) so staggering is reproducible across runs and
+// backends — the prior art's bare rand would break synctest determinism. Started by JoinTopics
+// under the node's receive context; Close cancels it.
+func (m *partialManager) run(ctx context.Context, ps *pubsub.PubSub) {
+	time.Sleep(partialJitter(m.node.Partial.Seed, m.node.Num, m.interval))
+	ticker := time.NewTicker(m.interval)
+	defer ticker.Stop()
+	for {
+		m.tick(ps)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// tick publishes every live (topic, group) once, in sorted order (map iteration order must
+// not leak into the send schedule — the determinism guard).
+func (m *partialManager) tick(ps *pubsub.PubSub) {
+	type liveGroup struct {
+		topic string
+		group int
+	}
+	m.mu.Lock()
+	var live []liveGroup
+	for topic, byGroup := range m.groups {
+		for group := range byGroup {
+			live = append(live, liveGroup{topic, group})
+		}
+	}
+	m.mu.Unlock()
+	slices.SortFunc(live, func(a, b liveGroup) int {
+		if c := strings.Compare(a.topic, b.topic); c != 0 {
+			return c
+		}
+		return a.group - b.group
+	})
+	for _, lg := range live {
+		err := pubsub.PublishPartial(ps, lg.topic, groupKeyBytes(lg.group),
+			m.publishActions(lg.topic, lg.group))
+		if err != nil {
+			m.logger.Error("publish partial", "topic", lg.topic, "group", lg.group, "err", err)
+		}
+	}
+}
+
+// fanoutPublish eagerly sends one batch to every current peer of topic — the non-member duty
+// publish. The extension's MeshPeers falls back to the fanout peer set, which the runner's
+// Join + dial-2 warmup feeds; eager-once, no manager state (a fanout publisher is not a member
+// and will not receive, so there is nothing to tick).
+func (m *partialManager) fanoutPublish(ps *pubsub.PubSub, topic string, group int,
+	positions []int, sigs [][]byte, data []byte) error {
+	idxs := make([]uint32, len(positions))
+	for i, pos := range positions {
+		idxs[i] = uint32(pos)
+	}
+	env := &pb.BatchedAttestationEnvelope{Batches: []*pb.BatchedAttestation{
+		{AttestationData: data, AttestorIndices: idxs, Signatures: sigs},
+	}}
+	enc, err := proto.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshal fanout envelope: %w", err)
+	}
+	actions := func(peerStates map[peer.ID]partialPeerState,
+		_ func(peer.ID) bool) iter.Seq2[peer.ID, partialmessages.PublishAction] {
+		return func(yield func(peer.ID, partialmessages.PublishAction) bool) {
+			for p := range peerStates {
+				if !yield(p, partialmessages.PublishAction{EncodedPartialMessage: enc}) {
+					return
+				}
+			}
+		}
+	}
+	return pubsub.PublishPartial(ps, topic, groupKeyBytes(group), actions)
+}
+
+// prune drops every topic's (kind, group) state — the runner-driven GC (a grace slot behind
+// the group's end, so late stragglers still count instead of re-creating buckets).
+func (m *partialManager) prune(kind Kind, group int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for topic, byGroup := range m.groups {
+		if g, ok := byGroup[group]; ok && g.kind == kind {
+			delete(byGroup, group)
+			if len(byGroup) == 0 {
+				delete(m.groups, topic)
+			}
+		}
+	}
+}
+
+// liveGroups counts (topic, group) states — a test accessor (bucket GC assertions).
+func (m *partialManager) liveGroups() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, byGroup := range m.groups {
+		n += len(byGroup)
+	}
+	return n
+}
+
+// partialJitter is the tick loop's seeded initial offset in [0, interval).
+func partialJitter(seed uint64, num int, interval time.Duration) time.Duration {
+	rng := rand.New(rand.NewPCG(seed, uint64(num)))
+	return time.Duration(rng.Int64N(int64(interval)))
 }
 
 // groupKeyBytes encodes a group key (slot / round key) as the extension's groupID.

@@ -92,6 +92,7 @@ type Node struct {
 	RPCLogger *slog.Logger
 
 	ps          *pubsub.PubSub
+	partial     *partialManager           // non-nil iff Partial is set (built at Start)
 	verifiers   map[string]*batchVerifier // flood class → its single-server queue (lazy; see batchClass)
 	colVerifier *columnVerifier
 
@@ -156,6 +157,10 @@ func (n *Node) Start(ctx context.Context) error {
 	if n.RPCLogger != nil {
 		opts = append(opts, pubsub.WithRPCLogger(n.RPCLogger))
 	}
+	if n.Partial != nil {
+		n.partial = newPartialManager(n)
+		opts = append(opts, pubsub.WithPartialMessagesExtension(n.partial.newExtension()))
+	}
 	ps, err := pubsub.NewGossipSub(ctx, n.Host, opts...)
 	if err != nil {
 		return err
@@ -181,6 +186,11 @@ func (n *Node) JoinTopics(ctx context.Context) error {
 	}
 	n.colVerifier = newColumnVerifier(n.ColVerifyParallelism, colService)
 
+	// The partial transport's tick loop, under the receive context so Close stops it.
+	if n.partial != nil {
+		n.wg.Go(func() { n.partial.run(n.rctx, n.ps) })
+	}
+
 	// The block topic: Join + Subscribe with the fixed verify hook, as Phase 1.
 	return n.Subscribe(validator.BlockTopic)
 }
@@ -193,15 +203,21 @@ func (n *Node) Join(topic string) error {
 	return n.joinLocked(topic)
 }
 
-// joinLocked joins topic and registers its verify hook; caller holds n.mu.
+// joinLocked joins topic and registers its verify hook; caller holds n.mu. A partial-kind
+// topic under the partial transport instead opts into partial messages and registers NO hook:
+// no normal gossipsub messages flow there (verification enters from the extension's RPC
+// handler), so a subscription's receive goroutine simply stays idle.
 func (n *Node) joinLocked(topic string) error {
 	if _, ok := n.topics[topic]; ok {
 		return nil
 	}
-	if err := n.registerVerifyHook(topic); err != nil {
+	var topicOpts []pubsub.TopicOpt
+	if _, _, ok := partialKindFor(topic); ok && n.partial != nil {
+		topicOpts = append(topicOpts, pubsub.RequestPartialMessages())
+	} else if err := n.registerVerifyHook(topic); err != nil {
 		return err
 	}
-	t, err := n.ps.Join(topic)
+	t, err := n.ps.Join(topic, topicOpts...)
 	if err != nil {
 		return err
 	}
@@ -398,6 +414,36 @@ func (n *Node) Disconnect(peers []int) {
 			slog.Error("disconnect failed", "node", n.Num, "peer", peerNum, "err", err)
 		}
 	}
+}
+
+// PublishLocalPartial stores one of this node's own votes for the partial transport,
+// validated immediately; the next tick pushes it to topic's mesh. The member-duty publish.
+func (n *Node) PublishLocalPartial(topic string, group, position int, sig, data []byte) {
+	n.partial.publishLocal(topic, group, position, sig, data)
+}
+
+// FanoutPartial eagerly sends one batch of this node's votes to every current peer of topic —
+// the non-member duty publish (no tick-loop membership for foreign topics). The topic must be
+// joined and its subscribers dialed (the runner's warmup) so the fanout has somewhere to land.
+func (n *Node) FanoutPartial(topic string, group int, positions []int, sigs [][]byte, data []byte) error {
+	return n.partial.fanoutPublish(n.ps, topic, group, positions, sigs, data)
+}
+
+// PrunePartial drops the partial transport's (kind, group) buckets on every topic of the kind
+// — the runner-driven GC, called one slot after the group ends. A no-op when classic.
+func (n *Node) PrunePartial(kind Kind, group int) {
+	if n.partial != nil {
+		n.partial.prune(kind, group)
+	}
+}
+
+// LivePartialGroups counts the partial transport's live (topic, group) states — for tests
+// asserting the bucket GC. 0 when classic.
+func (n *Node) LivePartialGroups() int {
+	if n.partial == nil {
+		return 0
+	}
+	return n.partial.liveGroups()
 }
 
 // Publish sends payload on the named (already-joined) topic.

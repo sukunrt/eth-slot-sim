@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/libp2p/go-libp2p-pubsub/partialmessages/bitmap"
+	pubsub_pb "github.com/libp2p/go-libp2p-pubsub/pb"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"google.golang.org/protobuf/proto"
 
@@ -424,4 +426,127 @@ func TestOnEmitGossipDisableFlag(t *testing.T) {
 	if peers[peer.ID("p0")].gossipPeer {
 		t.Fatal("DisableMetadataGossip must suppress gossip-peer marking")
 	}
+}
+
+// PrunePartial is the runner-driven GC: it drops exactly the named (kind, group)'s state on
+// every topic of the kind, leaving other groups and the other kind untouched.
+func TestPrunePartialClearsGroups(t *testing.T) {
+	m := newTestPartialManager(t)
+	m.node.partial = m
+	m.publishLocal(attTopic, 1, 0, []byte("s"), []byte("d"))
+	m.publishLocal(validator.AttestationTopic(2), 1, 0, []byte("s"), []byte("d"))
+	m.publishLocal(attTopic, 2, 0, []byte("s"), []byte("d"))
+	m.publishLocal(validator.FinalityVoteTopic(0), 1, 0, []byte("s"), []byte("d"))
+	if got := m.node.LivePartialGroups(); got != 4 {
+		t.Fatalf("live groups = %d, want 4", got)
+	}
+	m.node.PrunePartial(KindAttestation, 1) // both attestation topics' group 1
+	if got := m.node.LivePartialGroups(); got != 2 {
+		t.Fatalf("live groups after prune = %d, want 2", got)
+	}
+	if m.group(attTopic, 2) == nil || m.group(validator.FinalityVoteTopic(0), 1) == nil {
+		t.Fatal("prune dropped an unrelated group")
+	}
+	m.node.PrunePartial(KindAttestation, 2)
+	m.node.PrunePartial(KindFinalityVote, 1)
+	if got := m.node.LivePartialGroups(); got != 0 {
+		t.Fatalf("live groups after full prune = %d, want 0", got)
+	}
+	m.node.PrunePartial(KindAttestation, 9) // absent group: no-op
+}
+
+// The tick loop's initial jitter is seeded by (seed, node num) — identical inputs give the
+// identical offset, the cross-run determinism guard (the prior art used a bare rand).
+func TestPartialJitterSeeded(t *testing.T) {
+	a := partialJitter(7, 3, 20*time.Millisecond)
+	if b := partialJitter(7, 3, 20*time.Millisecond); a != b {
+		t.Fatalf("same (seed, num) gave different jitter: %v vs %v", a, b)
+	}
+	if a < 0 || a >= 20*time.Millisecond {
+		t.Fatalf("jitter %v outside [0, interval)", a)
+	}
+	if b := partialJitter(7, 4, 20*time.Millisecond); a == b {
+		t.Fatal("different nodes share the same jitter (suspicious for a 20ms range)")
+	}
+}
+
+// deliver hands one manager's tick output for `to` over to the receiving manager as an
+// incoming RPC — the wire conversation, without gossipsub.
+func deliver(t *testing.T, from *partialManager, fromID peer.ID, topic string, group int,
+	fromPeers map[peer.ID]partialPeerState, to *partialManager, toPeers map[peer.ID]partialPeerState,
+	toID peer.ID) bool {
+	t.Helper()
+	sent := false
+	for p, action := range from.publishActions(topic, group)(fromPeers, acceptsPartial) {
+		if p != toID {
+			continue
+		}
+		rpc := &pubsub_pb.PartialMessagesExtension{TopicID: &topic, GroupID: groupKeyBytes(group)}
+		rpc.PartsMetadata = action.EncodedPartsMetadata
+		rpc.PartialMessage = action.EncodedPartialMessage
+		if err := to.onIncomingRPC(fromID, toPeers, rpc); err != nil {
+			t.Fatalf("deliver: %v", err)
+		}
+		sent = true
+	}
+	return sent
+}
+
+// The metadata-gossip conversation end to end (the partial topics' only non-mesh recovery —
+// they never enter mcache): A's heartbeat advertises Available to gossip peer B; B's next tick
+// answers with a Request; A's next tick serves the data; B verifies and fires the arrival.
+// With DisableMetadataGossip nothing is ever advertised.
+func TestPartialGossipConversation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		mA, mB := newTestPartialManager(t), newTestPartialManager(t)
+		idA, idB := peer.ID("A"), peer.ID("B")
+		sink := &recvSink{}
+		mB.node.OnReceive = sink.add
+
+		data := []byte("d")
+		mA.publishLocal(attTopic, 1, 4, []byte("sig4"), data)
+		// B must know the group exists to tick for it (gossipsub's EmitGossip would create it;
+		// here B has heard A's metadata below, which creates it on receipt).
+
+		// Heartbeat at A: B becomes a gossip peer, primed for one Available advertisement.
+		peersA := map[peer.ID]partialPeerState{idB: {}}
+		mA.onEmitGossip(attTopic, groupKeyBytes(1), []peer.ID{idB}, peersA)
+
+		// Tick A → B: metadata only (B asked for nothing yet).
+		peersB := map[peer.ID]partialPeerState{}
+		if !deliver(t, mA, idA, attTopic, 1, peersA, mB, peersB, idB) {
+			t.Fatal("A's tick sent nothing to B")
+		}
+		if mB.group(attTopic, 1) == nil {
+			t.Fatal("A's metadata did not create B's group state")
+		}
+
+		// Tick B → A: a Request for position 4 (B advertises nothing — it holds nothing).
+		peersB[idA] = partialPeerState{gossipPeer: true}
+		if !deliver(t, mB, idB, attTopic, 1, peersB, mA, peersA, idA) {
+			t.Fatal("B's tick sent no request to A")
+		}
+
+		// Tick A → B: the data batch B asked for; B's verifier promotes it.
+		if !deliver(t, mA, idA, attTopic, 1, peersA, mB, peersB, idB) {
+			t.Fatal("A's tick did not serve B's request")
+		}
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+		recs := sink.all()
+		if len(recs) != 1 || recs[0].ID.Attester != 4 {
+			t.Fatalf("B's arrivals = %+v, want exactly position 4", recs)
+		}
+
+		// The no-gossip variant: the heartbeat is inert, so nothing is ever advertised.
+		mC := newTestPartialManager(t)
+		mC.disableGossip = true
+		mC.publishLocal(attTopic, 1, 4, []byte("sig4"), data)
+		peersC := map[peer.ID]partialPeerState{idB: {}}
+		mC.onEmitGossip(attTopic, groupKeyBytes(1), []peer.ID{idB}, peersC)
+		out := runPublishActions(t, mC, attTopic, 1, peersC, declinesPartial)
+		if len(out) != 0 {
+			t.Fatalf("no-gossip variant still emitted %d actions", len(out))
+		}
+	})
 }
