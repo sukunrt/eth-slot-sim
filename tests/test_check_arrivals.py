@@ -765,10 +765,12 @@ def test_analyze_ac_votes_csv_detects_missing_and_leak(tmp_path):
 
 # --- finality votes (kind=8, per finality-subnet, distinct per (subnet, val)) ----------
 #
-# Each node emits ONE finality vote per validator it hosts on its subnet (the validator rides the
-# attester field, its host rides origin). It must reach exactly finality_subscribers(subnet) \
-# {host} — missing/leaked/duplicate all fail. The finality slot rides the slot field.
-# Dissemination-only: no vote bool / no fraction column. V>N ⇒ a host emits several votes (val%N).
+# Each node emits ONE finality vote per validator it hosts, on THAT VALIDATOR'S drawn subnet
+# (finality_subnet_of; the validator rides the attester field, its host rides origin). It must
+# reach exactly finality_subscribers(subnet) ∪ that finality slot's aggregator HOSTS for the
+# subnet (subscribed from the pre-join through the aggregation deadline — collecting the votes is
+# their job, so they are REQUIRED) \ {host} — missing/leaked/duplicate all fail. The finality slot
+# rides the slot field. Dissemination-only: no vote bool / no fraction column.
 
 
 def _fvpub(fslot, subnet, val, origin, t_ms):
@@ -785,64 +787,99 @@ def _fvarr(node, fslot, subnet, val, origin, t_ms):
     )
 
 
+def _decoupled_fc(n, v, finality_subscribers, finality_subnet_of, k=1, num_slots=1, fc_aggs=None):
+    """fc_aggs (indexed by subnet, VALIDATOR ids, hosts val % n) ride every boundary slot."""
+    slots = []
+    for s in range(num_slots):
+        sp = {"slot": s, "committees": [], "subnet_of": [], "proposer": 0}
+        if fc_aggs is not None and s % k == 0:
+            sp["finality_aggregators"] = [
+                [{"node": val % n, "val": val, "subnet": sub, "position": p}
+                 for p, val in enumerate(vals)]
+                for sub, vals in enumerate(fc_aggs)
+            ]
+        slots.append(sp)
+    return {
+        "params": {"n": n, "v": v, "ac_slots_per_finality_slot": k},
+        "subnet_subscribers": [],
+        "finality_subscribers": finality_subscribers,
+        "finality_subnet_of": finality_subnet_of,
+        "slots": slots,
+    }
+
+
 def test_finality_vote_full_coverage_ok():
     # subnet 0 members {1,2,3}; val 5 hosted by node 1 publishes, reaches {2,3}.
-    subs = {0: {1, 2, 3}}
+    data = _decoupled_fc(4, 8, [[1, 2, 3], [0]], [1, 1, 1, 1, 1, 0, 1, 1])
     lines = [_fvpub(0, 0, 5, 1, 0), _fvarr(2, 0, 0, 5, 1, 200), _fvarr(3, 0, 0, 5, 1, 250)]
     pubs, arrs = ca.parse_events(lines)
-    res = ca.analyze_finality_votes(pubs, arrs, subs)
+    res = ca.analyze_finality_votes(pubs, arrs, data)
     assert res.expected == 2 and res.arrivals == 2 and res.published == 1
     assert res.missing == [] and res.leaked == [] and res.duplicates == []
     assert res.ok
 
 
 def test_finality_vote_detects_missing():
-    subs = {0: {1, 2, 3}}
+    data = _decoupled_fc(4, 8, [[1, 2, 3], [0]], [1, 1, 1, 1, 1, 0, 1, 1])
     lines = [_fvpub(0, 0, 5, 1, 0), _fvarr(2, 0, 0, 5, 1, 200)]  # member 3 missing
     pubs, arrs = ca.parse_events(lines)
-    res = ca.analyze_finality_votes(pubs, arrs, subs)
+    res = ca.analyze_finality_votes(pubs, arrs, data)
     assert res.missing == [(3, 0, 0, 5)]
     assert not res.ok
 
 
 def test_finality_vote_detects_leak():
-    # node 9 is not a member of subnet 0 — receiving the vote is a leak.
-    subs = {0: {1, 2, 3}}
-    lines = [_fvpub(0, 0, 5, 1, 0), _fvarr(2, 0, 0, 5, 1, 200), _fvarr(3, 0, 0, 5, 1, 200), _fvarr(9, 0, 0, 5, 1, 200)]
+    # node 9 is neither a member of subnet 0 nor one of its aggregator hosts — a leak.
+    data = _decoupled_fc(4, 8, [[1, 2, 3], [0]], [1, 1, 1, 1, 1, 0, 1, 1])
+    lines = [
+        _fvpub(0, 0, 5, 1, 0), _fvarr(2, 0, 0, 5, 1, 200),
+        _fvarr(3, 0, 0, 5, 1, 200), _fvarr(9, 0, 0, 5, 1, 200),
+    ]
     pubs, arrs = ca.parse_events(lines)
-    res = ca.analyze_finality_votes(pubs, arrs, subs)
+    res = ca.analyze_finality_votes(pubs, arrs, data)
     assert res.leaked == [(9, 0, 0, 5)]
     assert not res.ok
 
 
 def test_finality_vote_per_validator_multiplicity():
-    # node 1 hosts val 1 and val 5 on subnet 0 {1,2,3}; each vote reaches {2,3} -> 2 distinct votes.
-    subs = {0: {1, 2, 3}}
+    # node 1 hosts val 1 and val 5, both drawn onto subnet 0 {1,2,3}; each vote reaches {2,3}.
+    data = _decoupled_fc(4, 8, [[1, 2, 3], [0]], [1, 0, 1, 1, 1, 0, 1, 1])
     lines = [
         _fvpub(0, 0, 1, 1, 0), _fvpub(0, 0, 5, 1, 0),
         _fvarr(2, 0, 0, 1, 1, 200), _fvarr(3, 0, 0, 1, 1, 200),
         _fvarr(2, 0, 0, 5, 1, 210), _fvarr(3, 0, 0, 5, 1, 210),
     ]
     pubs, arrs = ca.parse_events(lines)
-    res = ca.analyze_finality_votes(pubs, arrs, subs)
+    res = ca.analyze_finality_votes(pubs, arrs, data)
     assert res.published == 2 and res.expected == 4 and res.arrivals == 4
     assert res.ok
 
 
-def _decoupled_fc(n, v, finality_subscribers, k=1, num_slots=1):
-    return {
-        "params": {"n": n, "v": v, "ac_slots_per_finality_slot": k},
-        "subnet_subscribers": [],
-        "finality_subscribers": finality_subscribers,
-        "slots": [{"slot": s, "committees": [], "subnet_of": [], "proposer": 0}
-                  for s in range(num_slots)],
-    }
+def test_finality_vote_aggregator_host_required_not_leaked():
+    # fslot 0's subnet-0 aggregator is val 0, hosted by node 0 — NOT a member of subnet 0
+    # {1,2,3}. It is an expected AND required receiver of the slot's subnet-0 votes: its arrival
+    # is not a leak, and its absence is a miss.
+    data = _decoupled_fc(4, 8, [[1, 2, 3], [0]], [1, 1, 1, 1, 1, 0, 1, 1], fc_aggs=[[0], []])
+    lines = [
+        _fvpub(0, 0, 5, 1, 0), _fvarr(2, 0, 0, 5, 1, 200),
+        _fvarr(3, 0, 0, 5, 1, 200), _fvarr(0, 0, 0, 5, 1, 220),
+    ]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_finality_votes(pubs, arrs, data)
+    assert res.expected == 3 and res.arrivals == 3
+    assert res.missing == [] and res.leaked == []
+    assert res.ok
+    # Drop the aggregator-host arrival: the vote never reached its collector — a miss.
+    pubs, arrs = ca.parse_events(lines[:-1])
+    res = ca.analyze_finality_votes(pubs, arrs, data)
+    assert res.missing == [(0, 0, 0, 5)]
+    assert not res.ok
 
 
 def test_analyze_finality_votes_csv_coverage_ok(tmp_path):
-    # 4 nodes, V=4 (val==node), subnet 0 {0,2}, subnet 1 {1,3}. Each member's one vote reaches its
-    # subnet mate. fslot 0 (k=1). Expected = 2 subnets × 1 mate each = 4 (2 votes × 1).
-    data = _decoupled_fc(4, 4, [[0, 2], [1, 3]])
+    # 4 nodes, V=4 (val==node), subnet 0 {0,2}, subnet 1 {1,3}; each val drew its host's own
+    # subnet. Each vote reaches its subnet mate. fslot 0 (k=1). Expected = 2 subnets × 2 votes × 1.
+    data = _decoupled_fc(4, 4, [[0, 2], [1, 3]], [0, 1, 0, 1])
     csv_path = tmp_path / "simnet_arrivals.csv"
     csv_path.write_text(
         "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
@@ -859,9 +896,9 @@ def test_analyze_finality_votes_csv_coverage_ok(tmp_path):
 
 def test_analyze_finality_votes_csv_with_validator_counts(tmp_path):
     # The Dist seam: validator_counts [2,1,1] ⇒ node0 hosts vals {0,1}, node1 {2}, node2 {3}
-    # (contiguous ids, NOT val % N). Subnet 0 {0,1}: node0's two votes reach node1, node1's
-    # vote reaches node0. Subnet 1 {2} has no mates ⇒ val 3 expects 0 arrivals.
-    data = _decoupled_fc(3, 4, [[0, 1], [2]])
+    # (contiguous ids, NOT val % N). Vals 0,1,2 drew subnet 0 {0,1}: node0's two votes reach
+    # node1, node1's vote reaches node0. Val 3 drew subnet 1 {2}, its own host ⇒ 0 arrivals.
+    data = _decoupled_fc(3, 4, [[0, 1], [2]], [0, 0, 0, 1])
     data["validator_counts"] = [2, 1, 1]
     csv_path = tmp_path / "simnet_arrivals.csv"
     csv_path.write_text(
@@ -881,9 +918,45 @@ def test_analyze_finality_votes_csv_with_validator_counts(tmp_path):
     assert not res.ok
 
 
+def test_analyze_finality_votes_csv_fanout_and_aggregator_host(tmp_path):
+    # Vals 0,1,2 drew subnet 0 {0,2}; val 1's host (node 1) is NOT a member ⇒ its fan-out vote
+    # is expected at BOTH members. The subnet-0 aggregator val is 3, hosted by node 3 — also not
+    # a member — so node 3 is an expected AND required receiver of every subnet-0 vote. Val 3
+    # drew subnet 1 {1,3}: its vote reaches member 1 (host 3 excluded).
+    data = _decoupled_fc(4, 4, [[0, 2], [1, 3]], [0, 0, 0, 1], fc_aggs=[[3], []])
+    csv_path = tmp_path / "simnet_arrivals.csv"
+    csv_path.write_text(
+        "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
+        "2,0,8,0,0,40,false\n"  # val 0 (host 0, member): mate 2
+        "3,0,8,0,0,45,false\n"  # ... and aggregator host 3 (not a member; required, not a leak)
+        "0,0,8,0,1,40,false\n"  # val 1's fan-out vote: member 0
+        "2,0,8,0,1,40,false\n"  # ... member 2
+        "3,0,8,0,1,45,false\n"  # ... aggregator host 3
+        "0,0,8,0,2,40,false\n"  # val 2 (host 2, member): mate 0
+        "3,0,8,0,2,45,false\n"  # ... and aggregator host 3
+        "1,0,8,1,3,40,false\n"  # val 3 (host 3): member 1
+    )
+    res = ca.analyze_finality_votes_csv(csv_path, data)
+    assert res.expected == 8 and res.arrivals == 8 and res.published == 4
+    assert res.missing == [] and res.leaked == [] and res.duplicates == []
+    assert res.ok
+    # Without the aggregator-host arrivals, each subnet-0 vote is missing at node 3.
+    csv_path.write_text(
+        "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
+        "2,0,8,0,0,40,false\n"
+        "0,0,8,0,1,40,false\n"
+        "2,0,8,0,1,40,false\n"
+        "0,0,8,0,2,40,false\n"
+        "1,0,8,1,3,40,false\n"
+    )
+    res = ca.analyze_finality_votes_csv(csv_path, data)
+    assert res.missing == [(3, 0, 0, 0), (3, 0, 0, 1), (3, 0, 0, 2)]
+    assert not res.ok
+
+
 def test_analyze_finality_votes_csv_detects_missing_and_leak(tmp_path):
-    # subnet 0 {1,2,3}, V=N=4 so vals 1,2,3 host on subnet 0; node 0 alone on subnet 1.
-    data = _decoupled_fc(4, 4, [[1, 2, 3], [0]])
+    # subnet 0 {1,2,3}, V=N=4; vals 1,2,3 drew subnet 0, val 0 subnet 1.
+    data = _decoupled_fc(4, 4, [[1, 2, 3], [0]], [1, 0, 0, 0])
     csv_path = tmp_path / "a.csv"
     csv_path.write_text(
         "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
@@ -909,12 +982,13 @@ def test_load_finality_subscribers_none_without_decoupled(tmp_path):
     assert ca.load_finality_subscribers(tmp_path) is None
 
 
-# --- finality aggregates (kind=9, global topic, distinct per aggregator) ---------------
+# --- finality aggregates (kind=9, global topic, distinct per aggregator host) ----------
 #
-# Each finality-subnet aggregator publishes ONE distinct aggregate (the aggregator rides attester,
-# origin -1) on the global topic; it must reach every node EXCEPT that aggregator, exactly once —
-# the aggregate twin. finality_aggregators rides the finality-BOUNDARY AC slot (slot % k == 0),
-# indexed by subnet; the finality slot = slot // k rides the arrival's slot field.
+# Each finality-subnet aggregator HOST publishes ONE distinct aggregate (the host node rides
+# attester, origin -1) on the global topic; it must reach every node EXCEPT that host, exactly
+# once — the aggregate twin. finality_aggregators rides the finality-BOUNDARY AC slot
+# (slot % k == 0) as per-subnet VALIDATOR refs; two refs sharing a host dedupe to one aggregate.
+# The finality slot = slot // k rides the arrival's slot field.
 
 
 def _faarr(node, fslot, subnet, aggregator, t_ms):
@@ -932,20 +1006,29 @@ def _fapub(fslot, subnet, aggregator, t_ms):
 
 
 def _decoupled_fc_agg(n, finality_aggregators, k=2, num_slots=None):
-    # finality_aggregators (indexed by subnet) rides boundary slot 0 (k·0); finality slot 0.
+    # finality_aggregators (indexed by subnet, VALIDATOR ids; v=n so val==host) rides boundary
+    # slot 0 (k·0) as refs; finality slot 0.
     num_slots = num_slots if num_slots is not None else k
     slots = []
     for s in range(num_slots):
         sp = {"slot": s, "committees": [], "subnet_of": [], "proposer": 0}
         if s % k == 0:
-            sp["finality_aggregators"] = finality_aggregators
+            sp["finality_aggregators"] = _fc_agg_refs(n, finality_aggregators)
         slots.append(sp)
     return {
         "params": {"n": n, "v": n, "ac_slots_per_finality_slot": k},
         "subnet_subscribers": [],
         "finality_subscribers": [list(range(n))],
+        "finality_subnet_of": [0] * n,
         "slots": slots,
     }
+
+
+def _fc_agg_refs(n, finality_aggregators):
+    return [
+        [{"node": val % n, "val": val, "subnet": sub, "position": p} for p, val in enumerate(vals)]
+        for sub, vals in enumerate(finality_aggregators)
+    ]
 
 
 def test_finality_aggregate_full_coverage_ok():
@@ -957,6 +1040,16 @@ def test_finality_aggregate_full_coverage_ok():
     pubs, arrs = ca.parse_events(lines)
     res = ca.analyze_finality_aggregates(pubs, arrs, data)
     assert res.expected == 6 and res.arrivals == 6 and res.published == 2
+    assert res.ok
+
+
+def test_finality_aggregate_dedupes_shared_host():
+    # Two selected validators on one host (vals 0 and 4 → node 0 at N=4) yield ONE aggregate.
+    data = _decoupled_fc_agg(4, [[0, 4]], k=2)
+    lines = [_fapub(0, 0, 0, 800)] + [_faarr(node, 0, 0, 0, 900) for node in (1, 2, 3)]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_finality_aggregates(pubs, arrs, data)
+    assert res.published == 1 and res.expected == 3 and res.arrivals == 3
     assert res.ok
 
 
@@ -997,7 +1090,7 @@ def test_finality_aggregate_finality_slot_from_boundary():
     # Boundary slot 2 (k=2) carries the aggregators ⇒ finality slot 1; the arrival's slot is 1.
     data = _decoupled_fc_agg(4, [[0]], k=2, num_slots=3)
     data["slots"][0].pop("finality_aggregators")  # only the slot-2 boundary has them
-    data["slots"][2]["finality_aggregators"] = [[0]]
+    data["slots"][2]["finality_aggregators"] = _fc_agg_refs(4, [[0]])
     lines = [_faarr(node, 1, 0, 0, 900) for node in (1, 2, 3)]
     pubs, arrs = ca.parse_events(lines)
     res = ca.analyze_finality_aggregates(pubs, arrs, data)
