@@ -67,6 +67,43 @@ blocks+columns+AC votes) is mild through n2000 (e.g. n2000 blocks p50 1.0 s on s
    (regulars 0%) in the first n500 runs, invariant to the other knobs.
    `TestFloodBeyondTopicValidatorConcurrency` (exactly 1025/1500 delivered pre-fix).
 
+## Validator segregation at n4000 (the fix for the boundary collapse)
+
+`configs/decoupled_n4000_seg.yaml` = the base rung + `validator_segregation: true`
+(k=10 per-AC-slot finality rounds: round s % k votes in slot s, ~41k votes/slot spread
+over 40 subnets ≈ 1k/subnet/slot, round aggregates at 67% of the AC slot). Run on the
+20k outbound queue (base ran on 10k — minor confound for the drop comparison).
+Artifact: `results/ladder/n4000-seg.analysis.json`.
+
+| n4000 | base | segregated |
+|---|---|---|
+| fraction voted block | 0.850 | **1.000** |
+| slot-0 block p99 | 10.7 s | **1.43 s** |
+| finality attestations p50 / p90 / p99 | 331 ms / 1.53 s / 12.3 s | 178 ms / 280 ms / **489 ms** |
+| finality attestations p100 | 77.8 s | 11.8 s |
+| FA loss | 1.31% | **0.021%** |
+| publisher drops | 709 | 12 |
+| vote coverage @ aggregation deadline | — | ≥0.980 every slot×subnet (1.000 nearly everywhere after slot 0) |
+
+The boundary collapse disappears: spreading the burst restores the AC gate (voted
+1.000), block delivery is healthy on every slot, and each round's votes reach their
+aggregators with margin inside the per-round deadline (~8 s at 67%). The first round
+(slot 0, mesh still warming + block+columns) is the only soft spot: a few subnets at
+0.98–0.997 coverage.
+
+Why segregation and not transport priorities: the base-n4000 collapse is a priority
+inversion (one 128 KiB block queued behind ~410k 226 B votes in FIFO per-peer queues at
+the 25 Mbit edge). Topic/stream priorities would protect the block path without
+segregation, but gossipsub multiplexes all topics FIFO over one stream per peer — no QoS
+lever exists today, so segregation is the practical fix. It also buys what priorities
+would not: publisher-side relief (a ~1000-key host emits ~100 votes/slot instead of
+~1000 at one instant) and smooth aggregator load (1k/subnet/slot vs 10k spikes).
+
+Remaining trace-level items: 0.02% missing (scattered), 12 publisher drops, and 7 023
+"leaked" arrivals all at ONE cell (node 58, slot 17, subnet 9) — an aggregator-host
+subscribe-window edge (over-delivery into a round it wasn't an expected receiver for);
+worth a look at the round subscribe/unsubscribe timing.
+
 ## Open items (no further simulations without explicit go-ahead)
 
 - **n4000 findings to dig into**: which mechanism gates the 0.850 voted fraction (block
