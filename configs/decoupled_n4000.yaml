@@ -24,7 +24,7 @@ attestation:
 
 data_columns:
   enabled: true            # columns gate the AC vote (the "availability" chain)
-  num_columns: 8
+  num_columns: 128         # mainnet column universe; custody_floor 8 ⇒ sparse column subnets
   blobs: 6
   custody_floor: 8
   full_custody_fraction: 0.5
