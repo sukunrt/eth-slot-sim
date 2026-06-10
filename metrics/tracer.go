@@ -73,14 +73,17 @@ func ACVoteID(slot, val, origin int) MsgID {
 }
 
 // FinalityVoteID is the MsgID for the finality-chain vote by validator val on subnet in
-// finality slot fslot (riding Slot), published by origin.
+// finality slot fslot (riding Slot), published by origin. Under validator segregation the
+// fslot argument carries the AC slot — per-slot keys are distinct by construction, so the
+// MsgID shape (and the CSV/slog schema) is unchanged.
 func FinalityVoteID(fslot, subnet, val, origin int) MsgID {
 	return MsgID{node.KindFinalityVote,
 		node.Identity{Slot: fslot, Subnet: subnet, Attester: val, Origin: origin}}
 }
 
 // FinalityAggregateID is the MsgID for the one distinct aggregate published by aggregator (a
-// node) for finality subnet's subcommittee in finality slot fslot, on the global topic.
+// node) for finality subnet's subcommittee in finality slot fslot, on the global topic. Under
+// validator segregation the fslot argument carries the AC slot (one aggregate burst per round).
 func FinalityAggregateID(fslot, subnet, aggregator int) MsgID {
 	return MsgID{node.KindFinalityAggregate,
 		node.Identity{Slot: fslot, Subnet: subnet, Attester: aggregator, Origin: -1}}
@@ -263,6 +266,9 @@ func (r *Recorder) CustodyCompleteRate(slot int, custody map[int][]int, due time
 // publisher), the share that reached the aggregator by the aggregation deadline `due`. It answers
 // "how much of the subnet's vote does each aggregate capture?" — the aggregators come from the
 // schedule (the Recorder lacks membership), so they're passed in. 0 if the subnet had no votes.
+// Under validator segregation, call it per AC slot (fslot carries the AC slot; the slot's own
+// aggregator hosts and the round's deadline) — the denominator is the actual published count,
+// so the round's cell size is implicit.
 func (r *Recorder) FinalityCoverageAtDeadline(fslot, subnet int, aggregators []int, due time.Duration) float64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()

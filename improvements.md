@@ -92,6 +92,9 @@ decoupled-consensus-spec.md):
 | Availability-chain vote | "AC vote" | `ac_voters`, `ac_vote_size` | `KindACVote`, `ACVoteDuties`, `MakeACVote` | topic `availability_vote`, batch class `ac` |
 | Aggregation deadline fraction | `FINALITY_SLOT_AGGREGATION_FRACTION` | — | `FCAggFraction`, `fcAggFraction` | batch class `fcagg` |
 | Finality attestation (the per-validator finality-chain message) | "finality attestation" (canonical); "FC vote" / "finality vote" are aliases | — (per-validator, derived) | `KindFinalityVote`, `MakeFinalityVote`, `pb.FinalityVote` | "finality vote" (analysis output), batch class `fcvote` |
+| Validator segregation (per-AC-slot finality rounds) | "validator segregation", "round" | `validator_segregation` (config), `finality_round_of` | `Segregated()` (schedule), `DecoupledParams.Segregated`, `FinalityRoundOf` | `-fc-segregated` (flag), `fc_segregated` (simnet params) |
+| Round aggregation deadline fraction | `round_aggregation_fraction` | — (config-only) | `RoundAggFraction`, `roundAggFraction` | `-fc-round-agg-fraction` (flag), `fc_round_agg_fraction` (simnet params) |
+| (Round, subnet) cell counts | "cell" | `validators_per_round_subnet` | `ValidatorsPerRoundSubnet`, `validatorsPerCell` | — |
 | Attestation subnet membership | "subscribers" | `subnet_subscribers` | `SubnetSubscribers`, `Subscribers(s)` | `subscribers` (analysis param) |
 | Sync subnet membership | — | `sync_subscribers` | `SyncSubscribers` | — |
 | Validator distribution (the Dist seam) | "validator distribution", "skew" | `validator_counts` | `ValidatorCounts` | `dist`/`counts` (schedule.Params), skewed-validators-spec.md |
