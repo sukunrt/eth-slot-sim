@@ -172,3 +172,76 @@ func TestPublishUnjoinedTopic(t *testing.T) {
 		}
 	})
 }
+
+// Unsubscribe is the inverse of Subscribe: the node leaves the topic's mesh and stops
+// receiving, but the topic stays joined so it can still fan-out publish there (the finality
+// aggregator's post-publish drop). Idempotent; a never-subscribed topic is a no-op.
+func TestNodeUnsubscribe(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		nw, err := netsim.New(netsim.Config{N: 3, P: 2, Seed: 1, MinLatency: 5 * time.Millisecond, MaxLatency: 5 * time.Millisecond})
+		if err != nil {
+			t.Fatalf("netsim: %v", err)
+		}
+		t.Cleanup(nw.Close)
+
+		nodes := buildNodes(nw, 3)
+		got := make(chan node.Received, 8)
+		nodes[1].OnReceive = func(r node.Received) { got <- r }
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		bringUp(t, ctx, nodes, nw)
+		defer func() {
+			for _, nd := range nodes {
+				nd.Close()
+			}
+		}()
+
+		// Nodes 1 and 2 subscribe a finality subnet; node 0 is a fan-out publisher (Join only).
+		topic := validator.FinalityVoteTopic(3)
+		for _, nd := range nodes[1:] {
+			if err := nd.Subscribe(topic); err != nil {
+				t.Fatalf("subscribe %d: %v", nd.Num, err)
+			}
+		}
+		if err := nodes[0].Join(topic); err != nil {
+			t.Fatalf("join: %v", err)
+		}
+		time.Sleep(time.Second) // mesh forms
+
+		publish := func(val int) {
+			t.Helper()
+			msg := validator.MakeFinalityVote(0, 3, val, 0)
+			if err := nodes[0].Publish(ctx, topic, msg.Payload); err != nil {
+				t.Fatalf("publish: %v", err)
+			}
+		}
+		publish(7)
+		r := <-got
+		if r.Kind != node.KindFinalityVote {
+			t.Fatalf("kind = %d, want KindFinalityVote", r.Kind)
+		}
+
+		// After Unsubscribe (twice — idempotent), node 1 receives nothing further.
+		nodes[1].Unsubscribe(topic)
+		nodes[1].Unsubscribe(topic)
+		nodes[1].Unsubscribe("/eth2/never/subscribed") // no-op
+		time.Sleep(time.Second)                        // the leave propagates
+		publish(8)
+		time.Sleep(time.Second)
+		select {
+		case r := <-got:
+			t.Fatalf("received %+v after Unsubscribe", r.ID)
+		default:
+		}
+
+		// The topic stays joined: node 1 can still publish, and subscriber 2 receives it.
+		got2 := make(chan node.Received, 8)
+		nodes[2].OnReceive = func(r node.Received) { got2 <- r }
+		msg := validator.MakeFinalityVote(0, 3, 9, 1)
+		if err := nodes[1].Publish(ctx, topic, msg.Payload); err != nil {
+			t.Fatalf("publish after unsubscribe: %v", err)
+		}
+		<-got2
+	})
+}

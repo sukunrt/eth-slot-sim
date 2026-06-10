@@ -217,6 +217,19 @@ func (n *Node) Subscribe(topic string) error {
 	return nil
 }
 
+// Unsubscribe leaves topic's mesh and stops receiving — the inverse of Subscribe (the
+// finality aggregator's drop after its aggregate publishes). The topic stays joined, so
+// the node can still fan-out publish on it. Idempotent; a never-subscribed topic is a no-op.
+func (n *Node) Unsubscribe(topic string) {
+	n.mu.Lock()
+	sub, ok := n.subs[topic]
+	delete(n.subs, topic)
+	n.mu.Unlock()
+	if ok {
+		sub.Cancel() // the receive goroutine exits on the cancelled subscription
+	}
+}
+
 // batchVerifierFor returns the batched verifier for a flood class, creating it (and starting its
 // run loop) on first use, so a node spins up only the queues it actually joins. All classes use the
 // same validation-as-sleep knobs. Caller holds n.mu.
