@@ -116,8 +116,11 @@ validator_distribution:
 - **VRF/committee realism falls out for free**: AC voters and committee members are drawn
   uniformly over validator ids, so a node's duty probability becomes proportional to its
   hosted count — exactly the real-world behavior — with no further changes.
-- **vps / aggregate size**: `validators_per_subnet` (and so `FinalityAggregateSize`)
-  varies across subnets with skew; formula unchanged, only inputs.
+- **vps / aggregate size**: with the node-partitioned subnets of the current cut, skew
+  makes `validators_per_subnet` lumpy (a 1000-key node dumps all its votes on one subnet).
+  That cut is being replaced: validator→subnet becomes an independent random draw with
+  fanout publish — see finality-subnet-assignment.md (do it together with this spec's
+  consumer changes).
 - **Proposer selection (open, out of scope)**: proposers cycle over supernodes today; in
   reality proposer probability ∝ hosted validators. With `on_supernodes: true` the two are
   roughly consistent; weighting the proposer draw by counts is a separate follow-up.
