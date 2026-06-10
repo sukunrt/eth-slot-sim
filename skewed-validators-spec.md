@@ -64,27 +64,26 @@ not of one phase):
 
 ```yaml
 validator_distribution:
-  type: uniform | mixture | pareto | explicit   # default uniform = status quo
-  # mixture (the realistic one): two tiers, operators + solo
-  operator_fraction: 0.1      # fraction of nodes that are operators
-  operator_share: 0.8         # fraction of V hosted by operators
-  on_supernodes: true         # operators drawn from the supernode set (stake ~ hardware)
-  # pareto: counts ~ Pareto(alpha), normalized to V
-  alpha: 1.2
+  type: uniform | tiered | explicit   # default uniform = status quo
+  # tiered (the realistic one): tier by the node class the topology already has
+  regular: {min: 1, max: 3}               # uniform over {1,2,3}
+  super: {min: 1, max: 1000, mean: 200}   # heavy-tailed, calibrated to the mean (below)
   # explicit: counts file or inline list (escape hatch for experiments)
   counts: [...]
-  min_per_node: 1             # floor; see §6
-  seed: 7                     # independent of topology seed
+  seed: 7                             # independent of topology seed
 ```
 
 - **uniform** — status quo, emits the uniform counts explicitly (one code path).
-- **mixture** — the realistic shape: `operator_fraction` of nodes hold `operator_share`
-  of V (within-tier split uniform or log-normal; start uniform-within-tier, it is one
-  knob fewer). `on_supernodes: true` draws operator nodes from `supernode_ids(...)`,
-  modeling stake-concentration on well-provisioned nodes; `false` decorrelates for
-  stress tests (big bursts from 25 Mbit nodes — the n1000 loss mode, amplified).
-- **pareto** — single-knob heavy tail when we want a continuum rather than two tiers.
-- **explicit** — hand-written counts for targeted experiments.
+- **tiered** — the realistic shape, keyed off `supernode_ids(...)` (no new node classes):
+  regular nodes draw uniformly from `[regular.min, regular.max]` (solo stakers, 1–3 keys);
+  supernodes draw from a heavy-tailed distribution on `[super.min, super.max]` with the
+  given mean — log-normal with σ as an implementation default, μ solved numerically so the
+  truncated mean hits `super.mean`, rejection-sampled into range. At
+  `super_node_fraction: 0.5` and the defaults above, E[V] ≈ (2 + 200)/2 · N ≈ 100N.
+  **V is emergent in this mode**: schedule.json's `params.v` := Σ counts, and
+  `attestation.validators` is ignored (warn when set and different). Go and the analyzer
+  already read V from schedule.json, so nothing downstream changes.
+- **explicit** — hand-written counts for targeted experiments (V := Σ counts here too).
 
 ## 5. Touchpoints (the whole diff)
 
@@ -103,15 +102,16 @@ validator_distribution:
 
 ## 6. Constraints and interactions
 
-- **Σ counts = V**, counts ≥ `min_per_node`. Default floor 1: data-columns custody and the
+- **V := Σ counts** in tiered/explicit modes (uniform keeps the configured V). Counts ≥ 1
+  everywhere (`regular.min`/`super.min` ≥ 1, validated): data-columns custody and the
   "every node validates ⇒ uniform custody" assumption stay intact, and `fs` membership
-  semantics (every node votes on its subnet) keep a non-empty duty everywhere. Floor 0 is
-  allowed only when data_columns is off (validated).
-- **Queue sizing**: the finality burst from an operator node is `counts[node]` messages at
-  one instant. At mixture defaults (10% of 4 000 nodes hosting 80% of 400k ⇒ 800/node),
-  fine; at harsher skew a single node can exceed the 4 096 outbound queue again. The spec
-  deliberately does NOT auto-scale queues — overflow under skew is a *finding*, not a bug.
-  Surface `counts.max` in the run banner so it is visible per run.
+  semantics (every node votes on its subnet) keep a non-empty duty everywhere. Count 0 is
+  allowed only in explicit mode with data_columns off (validated).
+- **Queue sizing**: the finality burst from a node is `counts[node]` messages at one
+  instant — up to `super.max` (1 000) from a single supernode, under the 4 096 outbound
+  queue but 10× today's uniform 100. The spec deliberately does NOT auto-scale queues —
+  overflow under skew is a *finding*, not a bug. Surface `counts.max` in the run banner
+  so it is visible per run.
 - **VRF/committee realism falls out for free**: AC voters and committee members are drawn
   uniformly over validator ids, so a node's duty probability becomes proportional to its
   hosted count — exactly the real-world behavior — with no further changes.
