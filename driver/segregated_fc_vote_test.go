@@ -61,16 +61,21 @@ func segregatedFCAssignment(
 
 // svExpectedReceivers is the expected receiver set of validator val's round vote in AC slot
 // `slot`: the stable members of its drawn subnet ∪ THAT SLOT's aggregator host nodes for the
-// subnet, minus the publishing host when it is in the set.
+// subnet ∪ the NEXT slot's aggregator hosts — those pre-join (Subscribe) at beginSlot(slot),
+// before the vote publishes at +fc_vote_offset, so they hear the current round's tail by
+// construction (the per-slot cadence's inherent overlap; in base mode the next pre-join always
+// lands after the votes). Minus the publishing host when it is in the set.
 func svExpectedReceivers(a *schedule.Assignment, slot, val int) map[int]bool {
 	subnet := a.FinalitySubnetOf[val]
 	want := map[int]bool{}
 	for _, nd := range a.FinalitySubscribersOf(subnet) {
 		want[nd] = true
 	}
-	if refs := a.Slots[slot].FinalityAggregators; refs != nil {
-		for _, r := range refs[subnet] {
-			want[r.Node] = true
+	for s := slot; s <= slot+1 && s < len(a.Slots); s++ {
+		if refs := a.Slots[s].FinalityAggregators; refs != nil {
+			for _, r := range refs[subnet] {
+				want[r.Node] = true
+			}
 		}
 	}
 	delete(want, val%a.Params.N)
