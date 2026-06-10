@@ -245,3 +245,64 @@ func TestNodeUnsubscribe(t *testing.T) {
 		<-got2
 	})
 }
+
+// A multi-key host's burst must not serialize through its OWN verify queue: gossipsub
+// validates locally published messages too, and without a self-skip each Publish in an
+// emit loop blocks one batch cycle — a 738-key host trickled its finality attestations
+// out over 738 windows (the 37s tail in the n100 ladder run). A node never re-verifies
+// a signature it just produced, so own publishes bypass the hook; the receive side
+// still pays its batched cost.
+func TestPublishBurstNotSelfVerified(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		nw, err := netsim.New(netsim.Config{N: 2, P: 1, Seed: 1, MinLatency: 5 * time.Millisecond, MaxLatency: 5 * time.Millisecond})
+		if err != nil {
+			t.Fatalf("netsim: %v", err)
+		}
+		t.Cleanup(nw.Close)
+
+		nodes := buildNodes(nw, 2)
+		const window = 500 * time.Millisecond
+		for _, nd := range nodes {
+			nd.AttestVerifyDelay = func() time.Duration { return 10 * time.Millisecond }
+			nd.AttestBatchWindow = window
+		}
+		got := make(chan node.Received, 64)
+		nodes[1].OnReceive = func(r node.Received) { got <- r }
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		bringUp(t, ctx, nodes, nw)
+		defer func() {
+			for _, nd := range nodes {
+				nd.Close()
+			}
+		}()
+		topic := validator.FinalityVoteTopic(0)
+		for _, nd := range nodes {
+			if err := nd.Subscribe(topic); err != nil {
+				t.Fatalf("subscribe %d: %v", nd.Num, err)
+			}
+		}
+		time.Sleep(time.Second) // settle the subnet mesh
+
+		const burst = 8
+		start := time.Now()
+		for v := range burst {
+			msg := validator.MakeFinalityVote(0, 0, v, 0)
+			if err := nodes[0].Publish(ctx, topic, msg.Payload); err != nil {
+				t.Fatalf("publish %d: %v", v, err)
+			}
+		}
+		if elapsed := time.Since(start); elapsed >= window {
+			t.Fatalf("burst publish loop took %v — serialized through the publisher's own "+
+				"verify queue (want < one %v window)", elapsed, window)
+		}
+
+		// The whole burst lands within ~one receive-side batch cycle (+ slack), not one
+		// cycle per vote.
+		time.Sleep(2*window + time.Second)
+		if n := len(got); n != burst {
+			t.Fatalf("receiver got %d/%d votes within 2 windows — burst still trickling", n, burst)
+		}
+	})
+}

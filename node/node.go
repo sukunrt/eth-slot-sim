@@ -282,6 +282,17 @@ func (n *Node) registerVerifyHook(topic string) error {
 			return pubsub.ValidationAccept
 		}
 	}
+	// Own publishes bypass the hook: a node never re-verifies a signature it just
+	// produced, and gossipsub validates LOCAL messages too — without this skip,
+	// Publish blocks one batch cycle per message and a multi-key host's burst
+	// serializes (one finality attestation per window; the n100 37s tail).
+	self, verify := n.Host.ID(), hook
+	hook = func(ctx context.Context, pid peer.ID, msg *pubsub.Message) pubsub.ValidationResult {
+		if pid == self {
+			return pubsub.ValidationAccept
+		}
+		return verify(ctx, pid, msg)
+	}
 	if err := n.ps.RegisterTopicValidator(topic, hook); err != nil {
 		return err
 	}
