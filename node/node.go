@@ -81,6 +81,11 @@ type Node struct {
 	ColVerifyService     func() time.Duration
 	ColVerifyParallelism int
 
+	// Partial switches the attestation-class floods (standard attestations + finality votes)
+	// to the gossipsub partial-messages transport (partial-attestation-spec.md). Nil ⇒ classic.
+	// Set before Start; the Resolver before JoinTopics.
+	Partial *PartialOpts
+
 	// RPCLogger, when non-nil, enables gossipsub's built-in debug RPC logger (every
 	// RPC sent/received, with topics + data length) — a diagnostic for how many block
 	// copies a node sources via mesh push vs gossip IWANT pull. Off by default.

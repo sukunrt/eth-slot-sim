@@ -2,6 +2,7 @@ package node
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -45,6 +46,10 @@ type descriptor struct {
 	prefix string      // topic prefix (per-subnet topic families)
 	class  verifyClass // never "" (validated at init)
 	decode func(data []byte) (obj any, id Identity, origin int, err error)
+	// partial marks the kinds the partial-message transport can carry (the attestation-class
+	// floods; partial-attestation-spec.md). Static capability only — whether a run USES the
+	// transport is per-node (Node.Partial), since the registry is process-global.
+	partial bool
 }
 
 // decodeAs builds a descriptor's decode func from one per-kind identity extractor. The
@@ -75,6 +80,7 @@ var registry = []descriptor{
 			return Identity{int(b.Slot), -1, -1, int(b.Origin)}
 		})},
 	{kind: KindAttestation, prefix: validator.AttestationTopicPrefix, class: vcConsensus,
+		partial: true,
 		decode: decodeAs(func(a *pb.Attestation) Identity {
 			return Identity{int(a.Slot), int(a.Subnet), int(a.Val), int(a.Origin)}
 		})},
@@ -105,6 +111,7 @@ var registry = []descriptor{
 		})},
 	// The finality slot rides Slot for both finality kinds.
 	{kind: KindFinalityVote, prefix: validator.FinalityVoteTopicPrefix, class: vcFCVote,
+		partial: true,
 		decode: decodeAs(func(v *pb.FinalityVote) Identity {
 			return Identity{int(v.FinalitySlot), int(v.Subnet), int(v.Val), int(v.Origin)}
 		})},
@@ -175,4 +182,23 @@ func verifyClassFor(topic string) verifyClass {
 		return d.class
 	}
 	return vcFixed
+}
+
+// partialKindFor resolves a topic to its partial-kind facts: (kind, subnet, true) for the two
+// partial-capable per-subnet families, ok=false for everything else (which stays classic). The
+// subnet is the integer between the family prefix and the /ssz_snappy suffix.
+func partialKindFor(topic string) (Kind, int, bool) {
+	d := descriptorFor(topic)
+	if d == nil || !d.partial {
+		return 0, 0, false
+	}
+	s, ok := strings.CutSuffix(strings.TrimPrefix(topic, d.prefix), "/ssz_snappy")
+	if !ok {
+		return 0, 0, false
+	}
+	subnet, err := strconv.Atoi(s)
+	if err != nil || subnet < 0 {
+		return 0, 0, false
+	}
+	return d.kind, subnet, true
 }

@@ -79,3 +79,29 @@ func TestExactTopicBeatsPrefix(t *testing.T) {
 		t.Fatalf("unknown topic resolved to %+v, want nil", d)
 	}
 }
+
+// partialKindFor resolves a topic to its partial-kind facts — only the two partial-capable
+// prefix families match (partial-attestation-spec.md §0: everything else stays classic), and
+// the subnet parses out of the topic name.
+func TestPartialKindFor(t *testing.T) {
+	if kind, subnet, ok := partialKindFor(validator.AttestationTopic(7)); !ok ||
+		kind != KindAttestation || subnet != 7 {
+		t.Fatalf("attestation topic = (%d, %d, %v), want (KindAttestation, 7, true)", kind, subnet, ok)
+	}
+	if kind, subnet, ok := partialKindFor(validator.FinalityVoteTopic(3)); !ok ||
+		kind != KindFinalityVote || subnet != 3 {
+		t.Fatalf("finality topic = (%d, %d, %v), want (KindFinalityVote, 3, true)", kind, subnet, ok)
+	}
+	for _, topic := range []string{
+		validator.BlockTopic,
+		validator.AggregateTopic,
+		validator.ColumnTopic(2),                  // a non-partial prefix family
+		validator.AvailabilityVoteTopic,           // AC votes stay classic (locked)
+		validator.AttestationTopicPrefix + "x/ssz_snappy", // malformed subnet
+		"/unknown/topic",
+	} {
+		if _, _, ok := partialKindFor(topic); ok {
+			t.Errorf("partialKindFor(%q) matched, want no match", topic)
+		}
+	}
+}
