@@ -129,10 +129,12 @@ func (n *Node) Start(ctx context.Context) error {
 		pubsub.WithMessageIdFn(MessageIDFunc),
 		pubsub.WithMessageSignaturePolicy(pubsub.StrictNoSign),
 		pubsub.WithNoAuthor(),
-		// 10k: the decoupled finality-attestation burst (~10k votes/subnet at one
-		// instant) overflowed 1000 (~70 votes died at their publisher in the early n1000
-		// run) and a multi-key host's own burst can exceed 4096 under tiered skew.
-		pubsub.WithPeerOutboundQueueSize(10000),
+		// 20k: per-peer, drop-on-overflow. At the burst instant a multi-key supernode
+		// pushes its own fan-out burst PLUS the whole re-forwarded flood through each
+		// peer queue; at 10k the n2000 run lost 55 votes at their publisher (every copy
+		// of a vote hit a full queue — contiguous validator-id runs at big hosts). The
+		// wire models bandwidth; queues should buffer, not silently drop.
+		pubsub.WithPeerOutboundQueueSize(20000),
 		// 20k: the inbound validate queue is ONE global queue per node, and aggregator
 		// hosts subscribe several finality subnets at once — at 4096, k simultaneous
 		// ~10k-vote bursts dropped 11% of finality attestations in the n500 run, hitting
