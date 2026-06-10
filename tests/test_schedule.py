@@ -330,9 +330,11 @@ def test_sync_same_seed_identical_seed_plus_one_differs():
 # --- decoupled-consensus membership (availability + finality chains) -----------
 #
 # Decoupled mode (p.decoupled) replaces committees + sync with: a per-slot flat AC-voter
-# draw (ac_vote_size validators, one global topic), a node-partition into fs_subnets
-# finality subnets (every node on exactly one), and per-finality-slot fc_aggregators on
-# the boundary AC slot. Data columns are required (they gate the AC vote).
+# draw (ac_vote_size validators, one global topic), a VALIDATOR partition into fs_subnets
+# finality subnets (finality_subnet_of[v], an independent uniform draw per validator), a
+# stable node-partition receiver core (finality_subscribers), and per-finality-slot
+# fc_aggregators — validators sampled from the ENTIRE set — on the boundary AC slot.
+# Data columns are required (they gate the AC vote).
 
 
 def _decoupled_params(**kw):
@@ -360,15 +362,30 @@ def test_finality_subscribers_partition_all_nodes():
         assert all(0 <= node < 16 for node in subs)
 
 
-def test_validators_per_subnet_sums_to_v():
+def test_finality_subnet_of_partitions_validators():
+    a = schedule.generate(_decoupled_params(), supers=_DECOUPLED_SUPERS)
+    assert a.finality_subnet_of is not None
+    # One independent uniform draw per validator — V entries, each a subnet id.
+    assert len(a.finality_subnet_of) == 32
+    assert all(0 <= s < 2 for s in a.finality_subnet_of)
+    assert a.to_dict()["finality_subnet_of"] == a.finality_subnet_of
+
+
+def test_finality_subnet_of_under_tiered_covers_emergent_v():
+    a = schedule.generate(_decoupled_params(dist="tiered"), supers=_DECOUPLED_SUPERS)
+    assert len(a.finality_subnet_of) == a.params.v  # V is emergent (Σ counts)
+    assert all(0 <= s < 2 for s in a.finality_subnet_of)
+
+
+def test_validators_per_subnet_counts_the_draw():
     a = schedule.generate(_decoupled_params(), supers=_DECOUPLED_SUPERS)
     assert a.validators_per_subnet is not None
     assert len(a.validators_per_subnet) == 2
     assert sum(a.validators_per_subnet) == 32  # every validator votes on exactly one subnet
-    # Each subnet's count = Σ over member nodes of validators that node hosts (uniform v % N).
-    for subnet, members in enumerate(a.finality_subscribers):
-        want = sum((32 - 1 - node) // 16 + 1 for node in members)
-        assert a.validators_per_subnet[subnet] == want
+    # The per-subnet counts ARE the draw's counts — decoupled from member-node hosting.
+    want = Counter(a.finality_subnet_of)
+    for subnet, count in enumerate(a.validators_per_subnet):
+        assert count == want[subnet]
 
 
 def test_ac_voters_size_and_fresh_per_slot():
@@ -393,12 +410,31 @@ def test_fc_aggregators_on_boundary_only_and_clamped():
             assert sp.finality_aggregators is not None
             assert len(sp.finality_aggregators) == 2  # fs_subnets
             for subnet, aggs in enumerate(sp.finality_aggregators):
-                members = a.finality_subscribers[subnet]
-                assert len(aggs) == min(2, len(members))  # fs_aggregators, clamped
-                assert aggs == sorted(set(aggs))
-                assert set(aggs) <= set(members)
+                # fs_aggregators VALIDATORS per subnet, sampled from the whole set (clamped to V).
+                assert len(aggs) == min(2, 32)
+                vals = [r.val for r in aggs]
+                assert len(set(vals)) == len(vals)
+                for pos, r in enumerate(aggs):
+                    assert 0 <= r.val < 32
+                    assert r.node == r.val % 16  # the host node carries the duty
+                    assert r.subnet == subnet and r.position == pos
         else:
             assert sp.finality_aggregators is None  # only the boundary slot carries them
+
+
+def test_fc_aggregators_sampled_from_entire_validator_set():
+    # Aggregator validators are unrelated to subnet membership: with the fixed seed, some
+    # sampled validator's host node must fall outside its subnet's stable member set.
+    a = schedule.generate(_decoupled_params(num_slots=8), supers=_DECOUPLED_SUPERS)
+    outside = [
+        r
+        for sp in a.slots
+        if sp.finality_aggregators is not None
+        for subnet, aggs in enumerate(sp.finality_aggregators)
+        for r in aggs
+        if r.node not in a.finality_subscribers[subnet]
+    ]
+    assert outside, "aggregators look member-drawn; they must come from the entire validator set"
 
 
 def test_decoupled_requires_columns():
@@ -427,6 +463,7 @@ def test_decoupled_off_keeps_schedule_json_unchanged():
     # decoupled=False ⇒ no decoupled keys in schedule.json (back-compat).
     d = schedule.generate(schedule.Params(n=8, v=16, c=2, sc=4, num_slots=1), supers=[0, 1]).to_dict()
     assert "finality_subscribers" not in d and "validators_per_subnet" not in d
+    assert "finality_subnet_of" not in d
     assert all("ac_voters" not in s and "finality_aggregators" not in s for s in d["slots"])
     assert "ac_vote_size" not in d["params"]
 
@@ -496,9 +533,13 @@ def test_tiered_refs_use_contiguous_ranges():
     for sp in a.slots:
         for r in sp.ac_voters:
             assert starts[r.node] <= r.val < starts[r.node + 1]
-    # validators_per_subnet sums counts over members (and Σ over subnets = V).
-    for subnet, members in enumerate(a.finality_subscribers):
-        assert a.validators_per_subnet[subnet] == sum(counts[m] for m in members)
+        for aggs in sp.finality_aggregators or []:
+            for r in aggs:
+                assert starts[r.node] <= r.val < starts[r.node + 1]
+    # validators_per_subnet counts the per-validator draw (and Σ over subnets = V).
+    want = Counter(a.finality_subnet_of)
+    for subnet, count in enumerate(a.validators_per_subnet):
+        assert count == want[subnet]
     assert sum(a.validators_per_subnet) == a.params.v
 
 

@@ -52,9 +52,10 @@ class Params:
     sync_target_aggregators: int = 16  # TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE; clamped to members
     # Decoupled-consensus phase (decoupled ⇒ on; replaces committees + sync, needs data columns for
     # the AC gate). ac_vote_size validators vote on the availability chain each slot (one global
-    # topic); a finality slot spans ac_slots_per_finality_slot AC slots; fs_subnets node-partitioned
-    # finality subnets (every node on one); fs_aggregators per subnet per finality slot. See
-    # decoupled-consensus-spec.md.
+    # topic); a finality slot spans ac_slots_per_finality_slot AC slots; fs_subnets finality subnets
+    # partition the VALIDATOR set (finality_subnet_of, one uniform draw per validator), with a
+    # stable node-partition receiver core (finality_subscribers); fs_aggregators validators per
+    # subnet per finality slot, sampled from the entire set. See decoupled-consensus-spec.md.
     decoupled: bool = False
     ac_vote_size: int = 0
     ac_slots_per_finality_slot: int = 0
@@ -95,9 +96,11 @@ class SlotPlan:
     # ac_voters = the VRF-selected validators voting on the availability chain this slot — a flat set
     # (no committees/subnets; one global topic). None when the decoupled phase is off.
     ac_voters: list[AttesterRef] | None = None
-    # finality_aggregators[i] = aggregator node ids on finality subnet i for this finality slot;
-    # set only on a finality-boundary slot (slot % k == 0), None otherwise.
-    finality_aggregators: list[list[int]] | None = None
+    # finality_aggregators[i] = the aggregator refs for finality subnet i this finality slot —
+    # fs_aggregators VALIDATORS sampled from the entire set (unrelated to subnet membership or
+    # hosting); the host node carries the duty. Set only on a finality-boundary slot
+    # (slot % k == 0), None otherwise.
+    finality_aggregators: list[list[AttesterRef]] | None = None
 
 
 @dataclass
@@ -113,10 +116,13 @@ class Assignment:
     # subnet i (stable; each member on exactly one subnet) — the subnet's mesh and coverage set.
     sync_subscribers: list[list[int]] | None = None
     # Decoupled-consensus membership (None when off). finality_subscribers[i] = the member nodes on
-    # finality subnet i — a partition of ALL N nodes (every node on exactly one). validators_per_subnet[i]
-    # = the validators voting on subnet i (Σ over its member nodes, uniform v % N), for the scaled
-    # aggregate size and coverage count.
+    # finality subnet i — a partition of ALL N nodes (every node on exactly one), the subnet's
+    # stable mesh/receiver core. finality_subnet_of[v] = the subnet validator v votes on (an
+    # independent uniform draw per validator — subnets partition the VALIDATOR set, decoupled from
+    # where keys live). validators_per_subnet[i] = that draw's per-subnet counts (~V/S ± binomial
+    # noise), for the scaled aggregate size and coverage count.
     finality_subscribers: list[list[int]] | None = None
+    finality_subnet_of: list[int] | None = None
     validators_per_subnet: list[int] | None = None
     # validator_counts[node] = hosted-validator count (the Dist seam; None under uniform — a
     # uniform schedule.json is byte-identical to before). Ids are contiguous by node.
@@ -157,6 +163,7 @@ class Assignment:
             d["params"]["fs_subnets"] = self.params.fs_subnets
             d["params"]["fs_aggregators"] = self.params.fs_aggregators
             d["finality_subscribers"] = self.finality_subscribers
+            d["finality_subnet_of"] = self.finality_subnet_of
             d["validators_per_subnet"] = self.validators_per_subnet
         # The Dist seam: present only under tiered/explicit (back-compat: a uniform
         # schedule.json is unchanged; absent ⇒ consumers fall back to v % N).
@@ -182,7 +189,9 @@ def _slot_dict(s: SlotPlan) -> dict:
     if s.ac_voters is not None:  # only when the decoupled phase is on
         d["ac_voters"] = [_ref_dict(r) for r in s.ac_voters]
     if s.finality_aggregators is not None:  # only on a finality-boundary slot
-        d["finality_aggregators"] = s.finality_aggregators
+        d["finality_aggregators"] = [
+            [_ref_dict(r) for r in aggs] for aggs in s.finality_aggregators
+        ]
     return d
 
 
@@ -250,6 +259,7 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
         sync_subscribers = _sync_subscribers(p)
 
     finality_subscribers: list[list[int]] | None = None
+    finality_subnet_of: list[int] | None = None
     validators_per_subnet: list[int] | None = None
     if p.decoupled:
         if p.num_columns <= 0:
@@ -259,18 +269,22 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
         if p.fs_subnets > p.n:
             raise ValueError(f"fs_subnets ({p.fs_subnets}) > N ({p.n})")
         finality_subscribers = _finality_subscribers(p)
-        validators_per_subnet = _validators_per_subnet(p, finality_subscribers, counts)
+        finality_subnet_of = _finality_subnet_of(p)  # after the Dist draw, so V is known
+        validators_per_subnet = [0] * p.fs_subnets
+        for s in finality_subnet_of:
+            validators_per_subnet[s] += 1
 
     slots = [
         _slot_plan(p, slot, subscribers, proposer_pool[slot % len(proposer_pool)],
-                   node_of, sync_subscribers, finality_subscribers)
+                   node_of, sync_subscribers)
         for slot in range(p.num_slots)
     ]
     return Assignment(
         params=p, subnet_subscribers=subscribers, slots=slots,
         column_subscribers=column_subscribers, full_custody=full_custody,
         sync_subscribers=sync_subscribers, finality_subscribers=finality_subscribers,
-        validators_per_subnet=validators_per_subnet, validator_counts=counts,
+        finality_subnet_of=finality_subnet_of, validators_per_subnet=validators_per_subnet,
+        validator_counts=counts,
     )
 
 
@@ -414,10 +428,10 @@ def _sync_subscribers(p: Params) -> list[list[int]]:
 
 
 def _finality_subscribers(p: Params) -> list[list[int]]:
-    """finality_subscribers[i] = the member nodes on finality subnet i. Assign every node to one
+    """finality_subscribers[i] = the member nodes on finality subnet i — the subnet's STABLE
+    mesh/receiver core, not who votes there (that's _finality_subnet_of). Assign every node to one
     subnet by a stable random draw (seeded) — a partition of ALL N nodes (each on exactly one), not
-    a sample. Sizes need not be exactly even; coverage stays exact (it reads these sets). Stable for
-    the run — both the subnet's mesh and its per-subnet coverage set."""
+    a sample. Sizes need not be exactly even; coverage stays exact (it reads these sets)."""
     rng = _rng(p.seed, 9)
     subs: list[list[int]] = [[] for _ in range(p.fs_subnets)]
     for node in range(p.n):
@@ -425,15 +439,14 @@ def _finality_subscribers(p: Params) -> list[list[int]]:
     return [sorted(s) for s in subs]
 
 
-def _validators_per_subnet(
-    p: Params, finality_subscribers: list[list[int]], counts: list[int] | None
-) -> list[int]:
-    """validators_per_subnet[i] = the validators voting on subnet i = Σ over its member nodes of
-    the validators that node hosts: counts[node] (the Dist seam) or, uniform, the v with
-    v % N == node — (V - 1 - node) // N + 1 of them."""
-    if counts is not None:
-        return [sum(counts[node] for node in members) for members in finality_subscribers]
-    return [sum((p.v - 1 - node) // p.n + 1 for node in members) for members in finality_subscribers]
+def _finality_subnet_of(p: Params) -> list[int]:
+    """finality_subnet_of[v] = the finality subnet validator v votes on — an independent seeded
+    uniform draw per validator, so subnets partition the VALIDATOR set (~V/S ± binomial noise)
+    regardless of where keys live. Drawn once here (the one-plan principle: Go never re-derives
+    it). Stream 12: 11 is taken by the dist_seed-keyed count draw, and seed == dist_seed must
+    not alias the two."""
+    rng = _rng(p.seed, 12)
+    return [rng.randrange(p.fs_subnets) for _ in range(p.v)]
 
 
 def _slot_plan(
@@ -443,7 +456,6 @@ def _slot_plan(
     proposer: int,
     node_of: Callable[[int], int],
     sync_subscribers: list[list[int]] | None = None,
-    finality_subscribers: list[list[int]] | None = None,
 ) -> SlotPlan:
     committees: list[list[AttesterRef]] = []
     subnet_of: list[int] = []
@@ -477,8 +489,8 @@ def _slot_plan(
     # Decoupled consensus: a flat per-slot AC-voter draw (ac_vote_size validators, one global topic),
     # plus per-finality-slot aggregators on the finality-boundary slot (slot % k == 0).
     ac_voters: list[AttesterRef] | None = None
-    finality_aggregators: list[list[int]] | None = None
-    if finality_subscribers is not None:
+    finality_aggregators: list[list[AttesterRef]] | None = None
+    if p.decoupled:
         voters = _rng(p.seed, 8, slot).sample(range(p.v), p.ac_vote_size)
         ac_voters = [
             AttesterRef(node=node_of(v), val=v, subnet=0, position=pos)  # subnet unused (global)
@@ -486,10 +498,16 @@ def _slot_plan(
         ]
         if slot % p.ac_slots_per_finality_slot == 0:  # a finality-slot boundary
             fslot = slot // p.ac_slots_per_finality_slot
+            # Per subnet, fs_aggregators VALIDATORS from the ENTIRE set — unrelated to subnet
+            # membership or hosting. The host node carries the duty (it pre-joins the subnet's
+            # mesh at AC slot n·k−1, generally as a non-member).
             agg_rng = _rng(p.seed, 10, fslot)
             finality_aggregators = [
-                sorted(agg_rng.sample(members, min(p.fs_aggregators, len(members))))
-                for members in finality_subscribers
+                [
+                    AttesterRef(node=node_of(v), val=v, subnet=subnet, position=pos)
+                    for pos, v in enumerate(agg_rng.sample(range(p.v), min(p.fs_aggregators, p.v)))
+                ]
+                for subnet in range(p.fs_subnets)
             ]
     return SlotPlan(
         slot=slot, committees=committees, subnet_of=subnet_of, aggregators=aggregators,

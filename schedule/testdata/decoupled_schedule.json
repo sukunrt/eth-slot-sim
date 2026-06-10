@@ -51,15 +51,46 @@
       ],
       "finality_aggregators": [
         [
-          8,
-          9
+          {
+            "node": 11,
+            "val": 11,
+            "subnet": 0,
+            "position": 0
+          },
+          {
+            "node": 0,
+            "val": 12,
+            "subnet": 0,
+            "position": 1
+          }
         ],
         [
-          5,
-          7
+          {
+            "node": 9,
+            "val": 9,
+            "subnet": 1,
+            "position": 0
+          },
+          {
+            "node": 5,
+            "val": 17,
+            "subnet": 1,
+            "position": 1
+          }
         ],
         [
-          0
+          {
+            "node": 10,
+            "val": 22,
+            "subnet": 2,
+            "position": 0
+          },
+          {
+            "node": 5,
+            "val": 5,
+            "subnet": 2,
+            "position": 1
+          }
         ]
       ]
     },
@@ -130,15 +161,46 @@
       ],
       "finality_aggregators": [
         [
-          2,
-          11
+          {
+            "node": 1,
+            "val": 1,
+            "subnet": 0,
+            "position": 0
+          },
+          {
+            "node": 0,
+            "val": 12,
+            "subnet": 0,
+            "position": 1
+          }
         ],
         [
-          1,
-          6
+          {
+            "node": 1,
+            "val": 1,
+            "subnet": 1,
+            "position": 0
+          },
+          {
+            "node": 3,
+            "val": 15,
+            "subnet": 1,
+            "position": 1
+          }
         ],
         [
-          0
+          {
+            "node": 2,
+            "val": 2,
+            "subnet": 2,
+            "position": 0
+          },
+          {
+            "node": 5,
+            "val": 5,
+            "subnet": 2,
+            "position": 1
+          }
         ]
       ]
     },
@@ -261,9 +323,35 @@
       0
     ]
   ],
-  "validators_per_subnet": [
-    10,
-    12,
+  "finality_subnet_of": [
+    2,
+    0,
+    0,
+    1,
+    1,
+    2,
+    2,
+    1,
+    2,
+    1,
+    2,
+    1,
+    1,
+    0,
+    0,
+    2,
+    1,
+    0,
+    0,
+    2,
+    2,
+    1,
+    2,
     2
+  ],
+  "validators_per_subnet": [
+    6,
+    8,
+    10
   ]
 }
