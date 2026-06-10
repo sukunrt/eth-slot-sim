@@ -550,3 +550,51 @@ func TestPartialGossipConversation(t *testing.T) {
 		}
 	})
 }
+
+// A sealed group (the flood's window closed — e.g. the finality aggregation deadline) serves
+// and advertises nothing — a late mesh joiner gets no backlog push, classic's no-mcache-replay
+// behavior — but still accepts and counts incoming stragglers until the prune.
+func TestSealPartialStopsServingKeepsCounting(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := newTestPartialManager(t)
+		m.node.partial = m
+		sink := &recvSink{}
+		m.node.OnReceive = sink.add
+
+		m.publishLocal(attTopic, 1, 0, []byte("s"), []byte("d"))
+		m.node.SealPartial(KindAttestation, 1)
+
+		// No actions to anyone: neither data to a fresh mesh peer nor metadata to gossip peers.
+		if out := runPublishActions(t, m, attTopic, 1, makePeers(2, false), acceptsPartial); len(out) != 0 {
+			t.Fatalf("sealed group pushed %d actions to mesh peers", len(out))
+		}
+		if out := runPublishActions(t, m, attTopic, 1, makePeers(2, true), acceptsPartial); len(out) != 0 {
+			t.Fatalf("sealed group gossiped %d actions", len(out))
+		}
+
+		// An incoming straggler still verifies and counts.
+		batch := &pb.BatchedAttestation{AttestationData: []byte("d"),
+			AttestorIndices: []uint32{3}, Signatures: [][]byte{[]byte("s3")}}
+		peers := map[peer.ID]partialPeerState{peer.ID("p1"): {}}
+		if err := m.onIncomingRPC(peer.ID("p1"), peers, rpcWith(t, attTopic, 1, batch)); err != nil {
+			t.Fatalf("straggler into sealed group: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+		synctest.Wait()
+		if recs := sink.all(); len(recs) != 1 || recs[0].ID.Attester != 3 {
+			t.Fatalf("straggler arrivals = %+v, want exactly position 3", recs)
+		}
+
+		// The prune still ends the group for good (and floors stale recreations).
+		m.node.PrunePartial(KindAttestation, 1)
+		if got := m.node.LivePartialGroups(); got != 0 {
+			t.Fatalf("live groups after prune = %d, want 0", got)
+		}
+		if err := m.onIncomingRPC(peer.ID("p1"), peers, rpcWith(t, attTopic, 1, batch)); err != nil {
+			t.Fatalf("stale RPC after prune: %v", err)
+		}
+		if got := m.node.LivePartialGroups(); got != 0 {
+			t.Fatal("stale RPC resurrected a pruned group")
+		}
+	})
+}

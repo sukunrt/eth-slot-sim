@@ -130,6 +130,11 @@ type partialGroup struct {
 	subnet        int
 	committeeSize int
 	buckets       map[string]*partialBucket // string(attestation_data) → bucket
+	// sealed: the flood's window closed (the runner's aggregation deadline). A sealed group
+	// serves and advertises nothing — a late mesh joiner gets no backlog push, matching
+	// classic's no-mcache-replay behavior — but still accepts and counts stragglers until the
+	// prune.
+	sealed bool
 }
 
 // bucket returns (creating as needed) the bucket for data. Caller holds the manager lock.
@@ -163,6 +168,10 @@ type partialManager struct {
 
 	mu     sync.Mutex
 	groups map[string]map[int]*partialGroup // topic → group key → state
+	// floor is the per-kind pruned watermark: group keys are time-ordered (slots / round
+	// keys), so a pruned group must STAY pruned — a straggler RPC in flight across the prune
+	// instant must not resurrect a bucket nothing will ever GC again.
+	floor map[Kind]int
 }
 
 // newPartialManager resolves the option defaults (20ms tick, 2·D forward cap, 10-request cap)
@@ -180,6 +189,7 @@ func newPartialManager(n *Node) *partialManager {
 		maxIWant:      o.MaxIWantPerPosition,
 		disableGossip: o.DisableMetadataGossip,
 		groups:        make(map[string]map[int]*partialGroup),
+		floor:         make(map[Kind]int),
 	}
 	if m.interval <= 0 {
 		m.interval = 20 * time.Millisecond
@@ -352,7 +362,7 @@ func (m *partialManager) publishActions(topic string, group int) partialmessages
 			defer m.mu.Unlock()
 
 			g := m.group(topic, group)
-			if g == nil || len(g.buckets) == 0 {
+			if g == nil || g.sealed || len(g.buckets) == 0 {
 				return
 			}
 
@@ -431,6 +441,10 @@ func (m *partialManager) onIncomingRPC(from peer.ID, peerStates map[peer.ID]part
 	rpc *pubsub_pb.PartialMessagesExtension) error {
 	topic := rpc.GetTopicID()
 	group := groupKeyFromID(rpc.GroupID)
+	kind, _, ok := partialKindFor(topic)
+	if !ok {
+		return fmt.Errorf("topic %q is not a partial kind", topic)
+	}
 
 	var ctrl pb.ControlEnvelope
 	if len(rpc.PartsMetadata) > 0 {
@@ -447,6 +461,12 @@ func (m *partialManager) onIncomingRPC(from peer.ID, peerStates map[peer.ID]part
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// A straggler for a pruned (reaped) group: not a protocol error, just stale — drop it
+	// rather than resurrect a bucket nothing will GC again.
+	if fl, ok := m.floor[kind]; ok && group <= fl {
+		return nil
+	}
 
 	for _, md := range ctrl.Metadatas {
 		g, err := m.getOrCreateGroup(topic, group)
@@ -646,17 +666,37 @@ func (m *partialManager) fanoutPublish(ps *pubsub.PubSub, topic string, group in
 	return pubsub.PublishPartial(ps, topic, groupKeyBytes(group), actions)
 }
 
-// prune drops every topic's (kind, group) state — the runner-driven GC (a grace slot behind
-// the group's end, so late stragglers still count instead of re-creating buckets).
+// seal marks every topic's kind-groups with key <= group as sealed (monotone, like prune, over
+// the time-ordered keys). Receiving continues; serving stops.
+func (m *partialManager) seal(kind Kind, group int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, byGroup := range m.groups {
+		for key, g := range byGroup {
+			if g.kind == kind && key <= group {
+				g.sealed = true
+			}
+		}
+	}
+}
+
+// prune drops every topic's kind-groups with key <= group and raises the kind's pruned floor —
+// the runner-driven GC (called a grace slot behind the group's end, so late stragglers still
+// count instead of re-creating buckets; anything later than that is dropped by the floor).
 func (m *partialManager) prune(kind Kind, group int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if fl, ok := m.floor[kind]; !ok || group > fl {
+		m.floor[kind] = group
+	}
 	for topic, byGroup := range m.groups {
-		if g, ok := byGroup[group]; ok && g.kind == kind {
-			delete(byGroup, group)
-			if len(byGroup) == 0 {
-				delete(m.groups, topic)
+		for key, g := range byGroup {
+			if g.kind == kind && key <= group {
+				delete(byGroup, key)
 			}
+		}
+		if len(byGroup) == 0 {
+			delete(m.groups, topic)
 		}
 	}
 }

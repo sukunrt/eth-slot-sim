@@ -64,6 +64,12 @@ type Config struct {
 	// attestations). The AC-vote deadline reuses AttestationDue; columns gate it.
 	Decoupled *DecoupledParams
 
+	// Partial transport (optional; nil ⇒ classic). Switches the attestation-class floods
+	// (attestations, and finality votes when Decoupled) to the gossipsub partial-messages
+	// extension on the same schedule — a transport, not a phase: it requires Attest or
+	// Decoupled. See partial-attestation-spec.md.
+	Partial *PartialParams
+
 	// Data-columns phase (optional; active when Schedule.NumColumns > 0). The proposer bursts
 	// one DataColumnSidecar per column subnet at t=0; each node verifies columns through a
 	// width-P semaphore, P sized from its full-custody role.
@@ -96,6 +102,11 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 	if cfg.Schedule != nil {
 		proposers = cfg.Schedule.ProposerSchedule()
 	}
+	// One read-only resolver serves the whole fleet (NewRunner enforces the phase requirement).
+	var resolver node.PartialResolver
+	if cfg.Partial != nil {
+		resolver = NewPartialResolver(cfg.Schedule)
+	}
 	// The committee drives attestations (when cfg.Attest) and/or columns (NumColumns > 0); the
 	// runner's attest flag gates attestation emission, so a committee can disseminate columns
 	// without emitting attestations. Block-only runs pass a nil Schedule.
@@ -121,6 +132,9 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 				nd.ColVerifyParallelism = cfg.ColVerifyParallelismReg
 			}
 		}
+		if cfg.Partial != nil {
+			nd.Partial = partialOpts(cfg.Partial, cfg.Seed, resolver)
+		}
 		// Decoupled consensus replaces attestations + sync, so force both emit flags off when it's on
 		// (the runner's mutual-exclusion invariant: a slot emits an AC vote OR an attestation, never both).
 		attest, sync := cfg.Attest, cfg.Sync
@@ -128,7 +142,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 			attest, sync = false, false
 		}
 		r := NewRunner(i, nd, val, cfg.Schedule, attest, sync, tracer, cfg.SlotDuration, cfg.AttestationDue,
-			cfg.AggregateDue, cfg.Prep, cfg.Seed, nw.Peers(i), cfg.Decoupled)
+			cfg.AggregateDue, cfg.Prep, cfg.Seed, nw.Peers(i), cfg.Decoupled, cfg.Partial)
 		r.Attach()
 		d.nodes[i] = nd
 		d.runners[i] = r

@@ -59,6 +59,12 @@ type NodeRunner struct {
 	segregated       bool          // per-AC-slot finality rounds (validator segregation)
 	roundAggFraction int           // % of the AC slot when round aggregates publish (segregated)
 
+	// Partial transport (partial-attestation-spec.md; off ⇒ classic). The emit paths swap
+	// Publish for manager calls; everything else (timing, coupling, warmup, OnPublish) stays.
+	partial     bool
+	attDataSize int // marshaled attestation_data bytes per bucket
+	sigSize     int // signature filler bytes per vote
+
 	runCtx context.Context // set at Run; used by emit/publish
 	mu     sync.Mutex
 	slots  map[int]*slotState
@@ -76,6 +82,7 @@ type NodeRunner struct {
 // reaped at its endSlot, keyed by the AC slot.
 type finalityState struct {
 	duties     []schedule.AttestDuty // hosted validators × their drawn subnets (one vote each)
+	ownSubnet  int                   // this node's stable finality subnet (the partial member/fanout split)
 	voteDialed []int                 // fan-out dials into non-member duty subnets (at the pre-join)
 	voteTimer  *time.Timer           // fires at finalitySlotStart(n) + fcVoteOffset
 	voteOnce   sync.Once             // one FC vote burst per finality slot
@@ -90,15 +97,17 @@ type finalityState struct {
 	aggTimer      *time.Timer // fires at finalitySlotStart(n) + fcAggFraction%·k·slotDur
 	aggOnce       sync.Once   // one aggregate burst per finality slot
 	dropOnce      sync.Once   // teardown: at the aggregation deadline, or reap as the fallback
+	sealTimer     *time.Timer // partial transport: seals the round's buckets at the deadline
 }
 
 // slotState is the per-(node, slot) coupling holder.
 type slotState struct {
-	deadline time.Time
-	duties   []schedule.AttestDuty
-	dialed   []int // extra peers dialed this slot, dropped at slot end
-	timer    *time.Timer
-	emitOnce sync.Once
+	deadline   time.Time
+	duties     []schedule.AttestDuty
+	subscribed map[int]bool // the node's stable subnets (the partial member/fanout split)
+	dialed     []int        // extra peers dialed this slot, dropped at slot end
+	timer      *time.Timer
+	emitOnce   sync.Once
 
 	seen       bool
 	seenAt     time.Time
@@ -134,10 +143,12 @@ type slotState struct {
 // member nodes only; it arms the shared deadline timer alongside attest. aggDue 0 disables the
 // aggregate phase. dc (nil ⇒ off) turns on the decoupled-consensus phase, which suppresses
 // attestation/sync emit (the AC vote replaces attestations). basePeers is the node's long-lived
-// peer set (so per-slot subnet dials it adds on top can be dropped).
+// peer set (so per-slot subnet dials it adds on top can be dropped). pp (nil ⇒ classic)
+// switches the attestation-class floods to the partial transport — a transport, not a phase,
+// so it needs attest or dc on, and the node's Partial options set.
 func NewRunner(num int, nd *node.Node, val *validator.Validator, sched *schedule.Assignment, attest, sync bool,
 	tracer metrics.Tracer, slotDur, due, aggDue, prep time.Duration, seed uint64, basePeers []int,
-	dc *DecoupledParams) *NodeRunner {
+	dc *DecoupledParams, pp *PartialParams) *NodeRunner {
 	base := make(map[int]bool, len(basePeers))
 	for _, p := range basePeers {
 		base[p] = true
@@ -152,6 +163,15 @@ func NewRunner(num int, nd *node.Node, val *validator.Validator, sched *schedule
 		r.k, r.fcVoteOffset, r.fcAggFraction = dc.K, dc.FCVoteOffset, dc.FCAggFraction
 		r.segregated, r.roundAggFraction = dc.Segregated, dc.RoundAggFraction
 		r.finals = make(map[int]*finalityState)
+	}
+	if pp != nil {
+		if !attest && dc == nil {
+			panic("driver: the partial transport requires the attestation phase or decoupled consensus")
+		}
+		if nd.Partial == nil {
+			panic("driver: partial transport on but Node.Partial unset")
+		}
+		r.partial, r.attDataSize, r.sigSize = true, pp.dataSize(), pp.sigSize()
 	}
 	return r
 }
@@ -246,6 +266,7 @@ func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 			for _, s := range view.SubscribedSubnets() {
 				subscribed[s] = true
 			}
+			ss.subscribed = subscribed // emit's partial branch splits member vs fanout on it
 			needDial := map[int]bool{}
 			for _, d := range ss.duties {
 				if !subscribed[d.Subnet] {
@@ -354,6 +375,10 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 	r.mu.Lock()
 	delete(r.slots, slot)
 	r.mu.Unlock()
+	// Partial-bucket GC, one slot behind (the grace slot keeps late stragglers countable).
+	if r.partial && r.attest && slot > 0 {
+		r.nd.PrunePartial(node.KindAttestation, slot-1)
+	}
 	if r.decoupled {
 		r.reapFinality(slot)
 	}
@@ -403,6 +428,16 @@ func (r *NodeRunner) armFinality(slot int, slotStart time.Time, view schedule.Vi
 			r.emitFinalityAggregate(n, fs)
 		})
 	}
+	// Partial transport: the aggregation deadline is the vote flood's semantic end — seal the
+	// round's buckets on EVERY node then, so the next round's pre-joined aggregators (fresh
+	// mesh members) get no backlog push classic would never deliver. Stragglers still count
+	// until the reap prunes.
+	if r.partial && r.fcAggFraction > 0 {
+		fracDur := time.Duration(r.fcAggFraction) * time.Duration(r.k) * r.slotDur / 100
+		fs.sealTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
+			r.nd.SealPartial(node.KindFinalityVote, n)
+		})
+	}
 }
 
 // armRound drives the per-AC-slot finality round (validator segregation): every slot pre-joins
@@ -434,6 +469,13 @@ func (r *NodeRunner) armRound(slot int, slotStart time.Time, view schedule.View)
 		fracDur := time.Duration(r.roundAggFraction) * r.slotDur / 100
 		fs.aggTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
 			r.emitFinalityAggregate(slot, fs)
+		})
+	}
+	// Partial transport: seal the round's buckets at the per-slot deadline (see armFinality).
+	if r.partial && r.roundAggFraction > 0 {
+		fracDur := time.Duration(r.roundAggFraction) * r.slotDur / 100
+		fs.sealTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
+			r.nd.SealPartial(node.KindFinalityVote, slot)
 		})
 	}
 }
@@ -499,7 +541,7 @@ func (r *NodeRunner) prejoinFinality(n int, view schedule.View) {
 	// aggregation deadline) can land on this very instant (k=2 at 50% puts it on the pre-join
 	// slot), and dropFinality spares whatever a live state lists — in either firing order the
 	// idempotent Join/Subscribe below then leaves this slot warmed up.
-	fs := &finalityState{duties: duties, voteDialed: voteDialed,
+	fs := &finalityState{duties: duties, ownSubnet: own, voteDialed: voteDialed,
 		aggSubnets: aggSubnets, aggSubscribed: aggSubscribed, aggDialed: aggDialed}
 	r.mu.Lock()
 	r.finals[n] = fs
@@ -557,6 +599,10 @@ func (r *NodeRunner) validatorsPerCell(n, subnet int) int {
 func (r *NodeRunner) emitFinalityVotes(n int, fs *finalityState) {
 	fs.voteOnce.Do(func() {
 		at := time.Now()
+		if r.partial {
+			r.emitFinalityVotesPartial(n, fs, at)
+			return
+		}
 		for _, d := range fs.duties {
 			msg := validator.MakeFinalityVote(n, d.Subnet, d.Val, r.num)
 			r.tracer.OnPublish(metrics.FinalityVoteID(n, d.Subnet, d.Val, r.num), false, at)
@@ -567,6 +613,36 @@ func (r *NodeRunner) emitFinalityVotes(n int, fs *finalityState) {
 			}
 		}
 	})
+}
+
+// emitFinalityVotesPartial is the FC burst's partial twin: the own-subnet duties publishLocal
+// (the stable membership Prepare subscribed); foreign duty subnets — pre-joined + dialed by
+// prejoinFinality — get one eager fanout batch each. Finality votes are vote-free this cut, so
+// each (subnet, group) has exactly one bucket (voted_origin 0). The group key is n, exactly
+// what FinalityVoteID rides — fslot in base mode, the AC slot under segregation.
+func (r *NodeRunner) emitFinalityVotesPartial(n int, fs *finalityState, at time.Time) {
+	sig := validator.MakePartialSignature(r.sigSize)
+	fanout := map[int][]int{} // foreign duty subnet → positions
+	for _, d := range fs.duties {
+		r.tracer.OnPublish(metrics.FinalityVoteID(n, d.Subnet, d.Val, r.num), false, at)
+		if d.Subnet == fs.ownSubnet {
+			data := validator.MakePartialAttData(n, d.Subnet, 0, r.attDataSize)
+			r.nd.PublishLocalPartial(validator.FinalityVoteTopic(d.Subnet), n, d.Position, sig, data)
+			continue
+		}
+		fanout[d.Subnet] = append(fanout[d.Subnet], d.Position)
+	}
+	for subnet, positions := range fanout {
+		data := validator.MakePartialAttData(n, subnet, 0, r.attDataSize)
+		sigs := make([][]byte, len(positions))
+		for i := range sigs {
+			sigs[i] = sig
+		}
+		if err := r.nd.FanoutPartial(validator.FinalityVoteTopic(subnet), n, positions, sigs, data); err != nil {
+			slog.Error("partial finality fanout failed",
+				"node", r.num, "finality_slot", n, "subnet", subnet, "err", err)
+		}
+	}
 }
 
 // emitFinalityAggregate publishes one population-scaled aggregate per aggregated subnet on the
@@ -648,6 +724,9 @@ func (r *NodeRunner) reapFinality(slot int) {
 	fs := r.finals[key]
 	delete(r.finals, key)
 	r.mu.Unlock()
+	if r.partial { // the reaped round's partial buckets go with it (vote burst long settled)
+		r.nd.PrunePartial(node.KindFinalityVote, key)
+	}
 	if fs == nil {
 		return
 	}
@@ -656,6 +735,9 @@ func (r *NodeRunner) reapFinality(slot int) {
 	}
 	if fs.aggTimer != nil {
 		fs.aggTimer.Stop()
+	}
+	if fs.sealTimer != nil {
+		fs.sealTimer.Stop()
 	}
 	r.dropFinality(fs)
 }
@@ -862,6 +944,10 @@ func (r *NodeRunner) emit(slot int, ss *slotState, votedOrigin int) {
 	ss.emitOnce.Do(func() {
 		at := time.Now()
 		votedBlock := votedOrigin >= 0
+		if r.partial {
+			r.emitPartial(slot, ss, votedOrigin, votedBlock, at)
+			return
+		}
 		for _, d := range ss.duties {
 			topic := validator.AttestationTopic(d.Subnet)
 			if err := r.nd.Join(topic); err != nil {
@@ -875,6 +961,36 @@ func (r *NodeRunner) emit(slot int, ss *slotState, votedOrigin int) {
 			}
 		}
 	})
+}
+
+// emitPartial is emit's partial-transport twin: identical instants and OnPublish records, but
+// the votes enter the partial manager — publishLocal on subscribed duty subnets (the tick loop
+// pushes them to the mesh) and ONE eager fanout batch per non-member duty subnet (beginSlot's
+// Join + dial-2 warmup already gave the fanout somewhere to land). All of one emit's duties
+// share votedOrigin, so each subnet has exactly one vote bucket here; the fork against other
+// nodes' differing votes lives in the attestation_data bytes.
+func (r *NodeRunner) emitPartial(slot int, ss *slotState, votedOrigin int, votedBlock bool, at time.Time) {
+	sig := validator.MakePartialSignature(r.sigSize)
+	fanout := map[int][]int{} // non-member duty subnet → positions
+	for _, d := range ss.duties {
+		r.tracer.OnPublish(metrics.AttestID(slot, d.Subnet, d.Val, r.num), votedBlock, at)
+		if ss.subscribed[d.Subnet] {
+			data := validator.MakePartialAttData(slot, d.Subnet, votedOrigin, r.attDataSize)
+			r.nd.PublishLocalPartial(validator.AttestationTopic(d.Subnet), slot, d.Position, sig, data)
+			continue
+		}
+		fanout[d.Subnet] = append(fanout[d.Subnet], d.Position)
+	}
+	for subnet, positions := range fanout {
+		data := validator.MakePartialAttData(slot, subnet, votedOrigin, r.attDataSize)
+		sigs := make([][]byte, len(positions))
+		for i := range sigs {
+			sigs[i] = sig
+		}
+		if err := r.nd.FanoutPartial(validator.AttestationTopic(subnet), slot, positions, sigs, data); err != nil {
+			slog.Error("partial fanout failed", "node", r.num, "slot", slot, "subnet", subnet, "err", err)
+		}
+	}
 }
 
 // emitACVote publishes one AC vote per duty on the single global availability-vote topic, at most

@@ -429,8 +429,20 @@ func (n *Node) FanoutPartial(topic string, group int, positions []int, sigs [][]
 	return n.partial.fanoutPublish(n.ps, topic, group, positions, sigs, data)
 }
 
-// PrunePartial drops the partial transport's (kind, group) buckets on every topic of the kind
-// — the runner-driven GC, called one slot after the group ends. A no-op when classic.
+// SealPartial closes the serving window of the partial transport's kind-groups with key <=
+// group: ticks stop pushing and advertising them (a late mesh joiner gets no backlog, matching
+// classic's no-mcache-replay), but stragglers still verify and count until the prune. The
+// runner calls it at the flood's semantic end (the finality aggregation deadline). A no-op
+// when classic.
+func (n *Node) SealPartial(kind Kind, group int) {
+	if n.partial != nil {
+		n.partial.seal(kind, group)
+	}
+}
+
+// PrunePartial drops the partial transport's kind-groups with key <= group on every topic —
+// the runner-driven GC, called one slot after the group ends; the pruned floor keeps stale
+// stragglers from resurrecting them. A no-op when classic.
 func (n *Node) PrunePartial(kind Kind, group int) {
 	if n.partial != nil {
 		n.partial.prune(kind, group)
