@@ -99,17 +99,19 @@ class DecoupledConsensusConfig(BaseModel):
     replaces attestations and sync with: a global flood of ac_vote_size VRF-selected validator votes
     on the availability chain each slot (block→vote coupled + data-availability gated, like
     attestations); and, every ac_slots_per_finality_slot (k) AC slots, a finality vote per validator
-    on one of fs_subnets node-partitioned subnets, then fs_aggregators per subnet publish a
-    population-scaled aggregate at finality_slot_aggregation_fraction% of the finality slot. Reuses
-    the attestation deadline + data columns (the AC gate). See decoupled-consensus-spec.md."""
+    on ITS drawn subnet (finality_subnet_of partitions the validator set over fs_subnets; hosts fan
+    out where they aren't members), then fs_aggregators validators per subnet — sampled from the
+    whole set — have their host publish a population-scaled aggregate at
+    finality_slot_aggregation_fraction% of the finality slot. Reuses the attestation deadline + data
+    columns (the AC gate). See decoupled-consensus-spec.md."""
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
     ac_vote_size: int = 512  # VRF-selected validators voting on the AC each slot (one global topic); ≤ V
     ac_slots_per_finality_slot: int = 10  # k: a finality slot spans k AC slots
-    fs_subnets: int = 40  # finality subnets, node-partitioned (every node on one); ≤ N
-    fs_aggregators: int = 16  # aggregators per finality subnet per finality slot (clamped to members)
+    fs_subnets: int = 40  # finality subnets, validator-partitioned (stable node receiver core); ≤ N
+    fs_aggregators: int = 16  # aggregator validators per subnet per finality slot (whole-set)
     finality_slot_aggregation_fraction: int = 50  # % of the finality slot when aggregates publish
     fc_vote_offset_ms: int = 1000  # offset into the finality slot for the per-validator vote burst
 

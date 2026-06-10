@@ -34,8 +34,8 @@ decoupled_consensus:
   enabled: true
   ac_vote_size: 8                        # VRF-selected validators voting on the AC each slot (global topic)
   ac_slots_per_finality_slot: 2          # k
-  fs_subnets: 2                          # finality subnets, node-partitioned (every node on one)
-  fs_aggregators: 2                      # aggregators per finality subnet per finality slot
+  fs_subnets: 2                          # finality subnets, validator-partitioned (stable node receiver core)
+  fs_aggregators: 2                      # aggregator validators per subnet per finality slot (whole-set sample)
   finality_slot_aggregation_fraction: 50 # % of the finality slot when aggregates publish
   fc_vote_offset_ms: 1000                # offset into the finality slot for the vote burst
 

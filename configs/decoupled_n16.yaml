@@ -1,7 +1,7 @@
 # Decoupled consensus, small end-to-end example (the §10 shape, M6 sizing).
 # Two chains on one fleet: the availability chain (block + data-column burst + a global flood of
 # ac_vote_size VRF-selected validator votes, DA-gated) and the finality chain (every k AC slots,
-# a per-validator vote on one of fs_subnets node-partitioned subnets, then fs_aggregators per subnet
+# a per-validator vote on one of fs_subnets validator-partitioned subnets, then fs_aggregators per subnet
 # publish a population-scaled aggregate on a global topic at finality_slot_aggregation_fraction%).
 # Attestations + sync are off (the AC vote stands in for the attestation). Data columns gate the AC
 # vote. Measure a settled finality slot (1); the run spans k + k/2 + settle AC slots.
@@ -39,8 +39,8 @@ decoupled_consensus:
   enabled: true
   ac_vote_size: 8                        # VRF-selected validators voting on the AC each slot (global topic)
   ac_slots_per_finality_slot: 2          # k
-  fs_subnets: 2                          # finality subnets, node-partitioned (every node on one)
-  fs_aggregators: 2                      # aggregators per finality subnet per finality slot
+  fs_subnets: 2                          # finality subnets, validator-partitioned (stable node receiver core)
+  fs_aggregators: 2                      # aggregator validators per subnet per finality slot (whole-set sample)
   finality_slot_aggregation_fraction: 50 # % of the finality slot when aggregates publish
   fc_vote_offset_ms: 1000                # offset into the finality slot for the vote burst
 

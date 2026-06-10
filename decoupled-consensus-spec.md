@@ -10,10 +10,12 @@ the same node fleet.
   today's column-gated attestations.
 - **Finality chain (FC)** — every `k` AC slots (`AC_SLOTS_PER_FINALITY_SLOT`, default 10) **all**
   validators vote for the finalized tip. Voting is partitioned into `fs_subnets` (40) subnets by
-  **node** (each node → one subnet, all its validators vote there → ~`V/fs_subnets` ≈ 25 000
-  votes/subnet at mainnet); then `fs_aggregators` (16) per subnet publish one `FinalityAggregate`
-  (size **scales** with the subnet's voting population) on **one global topic** at
-  `FINALITY_SLOT_AGGREGATION_FRACTION` (50 %) of the finality slot.
+  **validator** (`finality_subnet_of[v]`, one independent uniform draw per validator →
+  ~`V/fs_subnets` ≈ 25 000 votes/subnet at mainnet regardless of where keys live; a node publishes
+  on its validators' subnets, fanning out where it isn't a member); then `fs_aggregators` (16)
+  validators per subnet — sampled from the **entire** set — have their host node publish one
+  `FinalityAggregate` (size **scales** with the subnet's voting population) on **one global
+  topic** at `FINALITY_SLOT_AGGREGATION_FRACTION` (50 %) of the finality slot.
 
 The whole feature is **opt-in** (`decoupled_consensus.enabled`). When on, the existing
 attestation/aggregate **and** sync phases are **disabled entirely** — the AC vote stands in for the
@@ -87,8 +89,8 @@ thing we measure* (the AC and FC loads share one CPU per node).
 |---|---|---|---|
 | `ac_vote_size` | VRF-selected validators voting on the AC each slot (global topic) | 512 | 8 |
 | `ac_slots_per_finality_slot` = `k` | AC slots per finality slot | 10 | 2 |
-| `fs_subnets` | finality subnets (node-partitioned) | 40 | 2 |
-| `fs_aggregators` | aggregators per FC subnet → aggregates | 16 | 2 |
+| `fs_subnets` | finality subnets (validator-partitioned; stable node receiver core) | 40 | 2 |
+| `fs_aggregators` | aggregator validators per FC subnet (whole-set sample) → aggregates | 16 | 2 |
 | `finality_slot_aggregation_fraction` | % of the finality slot when aggregators publish | 50 | 50 |
 | `fc_vote_offset_ms` | offset into the finality slot when validators emit the FC vote | 1000 | 1000 |
 
@@ -97,7 +99,7 @@ Reused from the existing phases (no new knob): `V` (`attestation.validators`), t
 topology / `num_slots` / `slot_duration` / `block_size` globals.
 
 **Constraints (asserted at generation):** `ac_vote_size ≤ V`; `fs_subnets ≤ N`; `fs_aggregators`
-clamped to a subnet's member-node count; `V ≥ N` (inherited from data-columns — every node validates
+clamped to `V`; `V ≥ N` (inherited from data-columns — every node validates
 ⇒ uniform custody 8 and a non-empty FC vote set per node); `topology.super_node_fraction > 0`
 (columns need full-custody supernodes). `0 < finality_slot_aggregation_fraction < 100`;
 `fc_vote_offset_ms < finality_slot_aggregation_fraction% · k · slot_duration` (votes precede the
@@ -147,32 +149,38 @@ bucketed by block/column arrival — the same metric the column gate exists to p
 
 ---
 
-## 4. Finality chain — node-partitioned subnets, per-validator votes, scaled aggregates
+## 4. Finality chain — validator-partitioned subnets, fan-out votes, scaled aggregates
 
-### 4a. Subnet membership — node-based, every node a member of one subnet
+### 4a. Subnet assignment — per-validator draw + a stable node receiver core
 
-Each node is assigned **one** of `fs_subnets` subnets by a stable seeded draw (`_rng(seed, 9)`,
-slot-independent). Mirrors `sync_subscribers`, but **every** node is a member (not a subset) and
-each is on **exactly one** subnet. **All** validators on a node vote on **that node's** subnet, so a
-subnet's voting population is `Σ` validators over its member nodes ≈ `V/fs_subnets` (≈25 000 at
-mainnet; under uniform `V/N`).
+Two independent draws, two roles:
 
-- **`fs_subscribers[i]`** = the **member nodes** of subnet `i` — the subnet's mesh **and** the
-  **expected receiver set** for coverage (§9). Pre-stored as a node-set map (like `sync_subscribers`).
-- Every node **persistently subscribes** its subnet at bring-up (`Prepare`) and **never leaves** —
-  the mesh is always warm, the relay fabric is stable for the run (like sync members).
-- **`validators_per_subnet[i]`** = `Σ |nodeVals[node]|` over `node ∈ fs_subscribers[i]` — carried
-  for the aggregate size model (§7) and the coverage count (§9). Under the **uniform** `V/N`
-  distribution it is ≈`V/fs_subnets`; the `Dist` seam (§13) lets skew vary it per subnet later.
+- **`finality_subnet_of[v]`** = the subnet validator `v` votes on — an **independent seeded
+  uniform draw per validator** (`_rng(seed, 12)`, slot-independent), so subnets partition the
+  **validator set** like attestation committees: ≈`V/fs_subnets` votes/subnet (± binomial noise)
+  **regardless of where keys live** — a 1000-key supernode's votes spread over ~all subnets, not
+  one. Rides `schedule.json` as a plain array of `V` small ints (~1–3 MB at `V`=400k).
+- **`fs_subscribers[i]`** = the **member nodes** of subnet `i` — a stable node partition
+  (`_rng(seed, 9)`): the subnet's mesh/receiver core **and** the base of the **expected receiver
+  set** for coverage (§9). Every node **persistently subscribes** its one subnet at bring-up
+  (`Prepare`) and never leaves — the relay fabric is stable for the run.
+- **`validators_per_subnet[i]`** = the draw's per-subnet counts (`Σ [finality_subnet_of[v] == i]`)
+  — carried for the aggregate size model (§7) and the coverage count (§9); decoupled from
+  member-node hosting (skew no longer lumps it — see skewed-validators-spec §6).
 
-### 4b. The votes — per-validator, fixed-time, dissemination-only
+### 4b. The votes — per-validator, fixed-time, fan-out where not a member
 
 At `finalitySlotStart(n) + fc_vote_offset_ms` (a **fixed** instant, ≈1 s into the finality slot —
 **no block coupling**, no DA gate), every node emits **one** `FinalityVote` **per validator it
-hosts** on its subnet `i`. Per subnet that is ≈`V/fs_subnets` messages — the large flood the feature
-exists to measure. Each vote is keyed by `(finality_slot, subnet, val, origin)`; coverage per vote
-is `fs_subscribers[i] \ {publisher}`. The vote carries no measured fork-choice outcome (§0) — it is
-sized filler (§7), and we record only **when** it arrives and **whether the subnet is covered**.
+hosts**, each on **its validator's** drawn subnet. Per subnet that is ≈`V/fs_subnets` messages —
+the large flood the feature exists to measure. Where the node is **not** a member, it publishes by
+**gossipsub fan-out** exactly like non-decoupled attestations (att-subnet.md): at the previous AC
+slot (`n·k−1`) it Joins the topic and dials 2 of the subnet's stable members, so the burst pushes
+straight through; the dials drop at the aggregation deadline. Each vote is keyed by
+`(finality_slot, subnet, val, origin)`; coverage per vote is `fs_subscribers[i]` ∪ the slot's
+aggregator hosts for `i`, minus the publisher when it is in that set. The vote carries no measured
+fork-choice outcome (§0) — it is sized filler (§7), and we record only **when** it arrives and
+**whether the subnet is covered**.
 
 **Content is a planned extension (not this cut).** A later cut gives the finality vote *content* — a
 measured fork-choice **target** (which finalized tip each validator votes), unlocking
@@ -182,24 +190,26 @@ the AC chain state each node has seen by `fc_vote_offset`). `pb.FinalityVote` re
 dissemination-only; **nothing below changes when content lands** except the recorded per-vote
 outcome — a clean seam, like the custody **skew** (§13).
 
-### 4c. The aggregators — 16/subnet, previous-AC-slot pre-join, scaled aggregate
+### 4c. The aggregators — 16 validators/subnet from the whole set, pre-join Subscribe
 
-Per finality slot `n`, a seeded draw (`_rng(seed, 10, n)`) of `fs_aggregators` (16) **member nodes**
-of each subnet are aggregators: each collects its subnet's votes and publishes **one**
-`FinalityAggregate` on the **global** `FinalityAggregateTopic` at the aggregation deadline. With
-`fs_subnets · fs_aggregators` = 640 aggregates at mainnet, **every node downloads all of them**
-(coverage `N − 1` each). Each aggregate's **size scales** with `validators_per_subnet[i]` (the
-aggregation bitfield, §7) — ≈3.4 KB at 25 000/subnet, ≈2.2 MB of global aggregate traffic per
-finality slot.
+Per finality slot `n`, a seeded draw (`_rng(seed, 10, n)`) samples `fs_aggregators` (16)
+**validators from the ENTIRE validator set** per subnet — unrelated to which subnet they vote on,
+unrelated to subnet membership, unrelated to where their node sits (stored as `(val, node)` refs;
+the **host node carries the duty**, and two selected validators on one host dedupe to one
+aggregate). Each host collects the subnet's votes and publishes **one** `FinalityAggregate` on the
+**global** `FinalityAggregateTopic` at the aggregation deadline. With `fs_subnets ·
+fs_aggregators` = 640 aggregates at mainnet, **every node downloads all of them** (coverage
+`N − 1` each). Each aggregate's **size scales** with `validators_per_subnet[i]` (the aggregation
+bitfield, §7) — ≈3.4 KB at 25 000/subnet, ≈2.2 MB of global aggregate traffic per finality slot.
 
-**Pre-join (the load-bearing timing detail).** An aggregator for finality slot `n` must have been in
-its subnet mesh **long enough to collect every vote** of slot `n`. It is **already** a persistent
-member (4a), and additionally — to model the brief's "join the subnet at the previous slot start" —
-it **dials a few extra subnet peers at the start of the previous AC slot** (`n·k − 1`), giving it a
-full AC slot (~12 s) of extra connectivity before the `fc_vote_offset` burst, and **drops those
-extra peers after publishing** the aggregate. (Persistent membership already guarantees reception;
-the extra dial is robustness + the faithful encoding of the pre-join, and it becomes load-bearing if
-membership is ever made non-persistent.)
+**Pre-join (the load-bearing timing detail).** An aggregator host for finality slot `n` generally
+has **no connection to subnet `i` at all** — so at the start of the previous AC slot (`n·k − 1`;
+the boundary itself for `n=0`) it **dials 2 of the subnet's stable members and Subscribes** (a
+real mesh join, not fan-out), giving it a full AC slot (~12 s) of mesh formation before the
+`fc_vote_offset` burst. It collects the subnet's votes through the slot, publishes its aggregate
+at the deadline, then **Unsubscribes and drops the dials** (it stays only if it is independently a
+stable member; a teardown spares whatever the next finality slot's pre-join — which can land on
+the very same instant — still needs).
 
 ### FC slot timeline (`k`=10, slot=12 s ⇒ finality slot = 120 s)
 
@@ -207,12 +217,12 @@ membership is ever made non-persistent.)
  AC slot:  n·k−1        n·k                 …                 n·k + k/2            (n+1)·k
             |            |==================finality slot n=====================|
  pre-join   ▲                                                                      next finality slot
- (agg dials │  ▲ fc_vote_offset (~1 s):                       ▲ aggregation_fraction (50% ⇒ +60 s):
-  extra     │  │ every validator emits one                    │ each of 16 aggregators/subnet
-  peers)    │  │ FinalityVote on its node's subnet            │ publishes one FinalityAggregate
-            │  │ (≈V/fs_subnets per subnet)                   │ (scaled size) on the global topic
-            │  └─── votes disseminate within each subnet ─────┘   → aggregates flood globally
-            └─ agg already a persistent member; extra dial here       (agg drops extra peers after)
+ (voters    │  ▲ fc_vote_offset (~1 s):                       ▲ aggregation_fraction (50% ⇒ +60 s):
+  Join+dial │  │ every validator's vote rides ITS             │ each aggregator host publishes one
+  foreign   │  │ drawn subnet (fan-out where the              │ FinalityAggregate (scaled size) on
+  subnets;  │  │ host isn't a member;                         │ the global topic, then Unsubscribes
+  agg hosts │  │ ≈V/fs_subnets per subnet)                    │ + drops the pre-join dials
+  Subscribe)│  └─── votes disseminate within each subnet ─────┘   → aggregates flood globally
 ```
 
 Meanwhile the AC fires a block + `ac_vote_size` votes **every** AC slot across the whole window.
@@ -267,25 +277,28 @@ a finality boundary and pruned after the aggregate drains.
 - At `beginSlot(s)`, if `s % k == 0` (a finality boundary, `n = s/k`): build `finals[n]`, arm a
   one-shot timer at `finalitySlotStart(n) + fc_vote_offset_ms` → `emitFinalityVotes(n)`, and arm the
   aggregate timer (6c).
-- `emitFinalityVotes(n)`: for **every** validator `v` the node hosts (`view.FinalityVoteDuties()` =
-  the node's `nodeVals`), publish `MakeFinalityVote(n, subnet, v, self)` on
-  `FinalityVoteTopic(subnet)` (`subnet = FinalitySubnet()`), record `FinalityVoteID(n, subnet, v,
-  self)`. No coupling, no gate — a fixed-time burst.
+- `emitFinalityVotes(n)`: for **every** duty `(v, subnet)` the node hosts
+  (`view.FinalityVoteDuties()` pairs its `nodeVals` with `finality_subnet_of`), publish
+  `MakeFinalityVote(n, subnet, v, self)` on `FinalityVoteTopic(subnet)`, record
+  `FinalityVoteID(n, subnet, v, self)`. No coupling, no gate — a fixed-time burst. Non-member duty
+  subnets were Joined + dialed at the pre-join slot, so the publish lands via fan-out.
 
 ### 6c. FC aggregate — fixed-deadline global flood, an aggregate twin
 
-- At `beginSlot(s)` for a finality boundary `n = s/k`, set `fcAgg = view.FinalityAggregator(n)` (is
-  this node an aggregator, and for which subnet — its own); arm a one-shot timer at
-  `finalitySlotStart(n) + aggregation_fraction% · k · slotDur` → `emitFinalityAggregate(n)`.
 - **Pre-join:** at `beginSlot(s)` where `(s+1) % k == 0` (the AC slot before finality slot
-  `n=(s+1)/k`), if `view.FinalityAggregator(n)` is an aggregator, **dial extra peers** of its subnet
-  (mirrors the attestation per-slot dial, `runner.go:beginSlot`), recorded for drop at slot end.
+  `n=(s+1)/k`; the boundary itself for `n=0`), for each subnet in `view.FinalityAggregations(n)`,
+  **dial 2 members and Subscribe** it (the host is generally not a member); also Join + dial each
+  non-member vote-duty subnet (mirrors the attestation per-slot dial, `runner.go:beginSlot`). All
+  recorded for teardown at the aggregation deadline.
+- At the boundary, arm a one-shot timer at `finalitySlotStart(n) + aggregation_fraction% · k ·
+  slotDur` → `emitFinalityAggregate(n)`.
 - The aggregator **collects** votes into `finals[n]` from `onReceive`'s `KindFinalityVote` case
   across the AC slots of the finality slot, until the aggregate deadline.
 - `emitFinalityAggregate(n)`: publish **one** `MakeFinalityAggregate(n, subnet, self,
-  validators_per_subnet[subnet])` on the global `FinalityAggregateTopic`, record
-  `FinalityAggregateID(n, subnet, self)`. Mirrors `emitAggregate`; `aggEmitOnce` guards it. Drop the
-  pre-joined extra peers after publishing.
+  validators_per_subnet[subnet])` per aggregated subnet on the global `FinalityAggregateTopic`,
+  record `FinalityAggregateID(n, subnet, self)`. Mirrors `emitAggregate`; `aggOnce` guards it.
+  Then Unsubscribe the foreign subnets and drop the pre-join dials (sparing what the next finality
+  slot's pre-join, possibly this same instant, still lists).
 
 ---
 
@@ -302,7 +315,7 @@ message ACVote {                 // → 240 B (block_hash 32 + BLS sig 96 + sele
 }                                // NOTE: no subnet field — one global topic
 message FinalityVote {           // → 226 B (att data 128 + sig 96 + validator id 2)
   uint32 finality_slot = 1;
-  uint32 subnet        = 2;      // 0..fs_subnets-1 (this node's stable subnet)
+  uint32 subnet        = 2;      // 0..fs_subnets-1 (the validator's drawn subnet)
   uint32 val           = 3;      // global validator index — the identity (one vote/validator)
   uint32 origin        = 4;      // publishing member node (gossip origin)
   bytes  payload       = 5;      // random filler to 226 B; dissemination-only (no voted_origin)
@@ -371,7 +384,8 @@ get their own.
     aggregation-deadline publish instant) — *when the finalized aggregate is everywhere*.
 - **`analysis/check_arrivals.py`:** `analyze_ac_votes` (global `N−1` coverage + dedup + CDF +
   fraction-voted-block, mirroring `analyze_aggregates` + the voted-block column);
-  `analyze_finality_votes` (per-subnet coverage of `fs_subscribers[i] \ {publisher}`, no-leak,
+  `analyze_finality_votes` (per-vote coverage of `fs_subscribers[i]` ∪ the slot's aggregator
+  hosts, minus the publisher when in the set — aggregator hosts are REQUIRED receivers; no-leak,
   missing, dup, CDF, coverage-at-deadline, mirroring `analyze_attestations`);
   `analyze_finality_aggregates` (global `N−1` coverage + dedup + CDF, mirroring `analyze_aggregates`).
   A `load_finality_subscribers` loader reads `finality_subscribers` from `schedule.json`. Kinds
@@ -389,8 +403,8 @@ decoupled_consensus:
   enabled: true
   ac_vote_size: 512                      # VRF-selected validators voting on the AC each slot (tests: 8); ≤ V
   ac_slots_per_finality_slot: 10         # k (tests: 2)
-  fs_subnets: 40                         # finality subnets, node-partitioned (tests: 2); ≤ N
-  fs_aggregators: 16                     # aggregators per FC subnet (tests: 2; clamped to members)
+  fs_subnets: 40                         # finality subnets, validator-partitioned (tests: 2); ≤ N
+  fs_aggregators: 16                     # aggregator validators per FC subnet, whole-set sample (tests: 2)
   finality_slot_aggregation_fraction: 50 # % of the finality slot when aggregates publish
   fc_vote_offset_ms: 1000                # offset into the finality slot for the FC vote burst
 
@@ -430,27 +444,31 @@ verifier inequality (`node/verifier_test.go`), and the `raceEnabled` skip for si
    publish→decode→arrival on their topics; size unit tests (240 B / 226 B / `328+⌈vps/8⌉`, non-zero
    filler) and topic formats. *(mirror `validator/attestation_test.go`, `driver/columnonly_test.go`.)*
 2. **Schedule membership.** `simctl/schedule.py` emits per-slot `ac_voters`, stable
-   `finality_subscribers` (node-partitioned), per-finality-slot `fc_aggregators`, and
-   `validators_per_subnet`; `schedule.View` exposes `ACVoteDuties`/`FinalitySubnet`/
-   `FinalityVoteDuties`/`FinalitySubscribersOf`/`FinalityAggregator`. Assert: `|ac_voters[slot]| =
-   ac_vote_size`, voters ⊆ V, fresh per slot; every node in exactly one FC subnet, subnets ≈ even;
-   `Σ validators_per_subnet = V`; aggregators ⊆ subnet members, count clamped; the `ac_vote_size ≤ V`
-   / `fs_subnets ≤ N` guards fire; **same-seed-identical / seed+1-differs.** Go in
-   `schedule/schedule_test.go`, Python in `tests/test_schedule.py`. *(mirror the sync/column membership tests.)*
+   `finality_subscribers` (the node receiver core), the per-validator `finality_subnet_of`,
+   per-finality-slot `fc_aggregators` (whole-set validator refs), and `validators_per_subnet`;
+   `schedule.View` exposes `ACVoteDuties`/`FinalitySubnet`/`FinalityVoteDuties` ((val, subnet)
+   pairs)/`FinalitySubscribersOf`/`FinalityAggregations`. Assert: `|ac_voters[slot]| =
+   ac_vote_size`, voters ⊆ V, fresh per slot; every node in exactly one FC subnet; every validator
+   one subnet, `validators_per_subnet` = the draw's counts, `Σ = V`; aggregator refs from the
+   whole set, count clamped to V; the `ac_vote_size ≤ V` / `fs_subnets ≤ N` guards fire;
+   **same-seed-identical / seed+1-differs.** Go in `schedule/schedule_test.go`, Python in
+   `tests/test_schedule.py`. *(mirror the sync/column membership tests.)*
 3. **AC vote — global coverage + the DA-gated flip.** Each selected validator publishes one AC vote
    on the global topic; **every other node receives it once** (`N−1`, no-leak). Then the
    **column-gated forced flip**: suppress the block (or drop one custody column) to one voter past
    the deadline → its AC vote votes **prior**, the others **block**; `fraction_voted_block ==
    (voters−1)/voters`. *(mirror `driver/coupling_network_test.go` + `column_gate_test.go`; reuses the
    existing gate verbatim.)*
-4. **FC vote — per-subnet coverage + per-validator multiplicity.** At `fc_vote_offset`, every node
-   emits one vote **per hosted validator** on its subnet; every other member of subnet `i` receives
-   each exactly once; **no non-member receives**; a node with `m` validators emits `m` votes.
+4. **FC vote — per-subnet coverage, multiplicity, fan-out.** At `fc_vote_offset`, every node emits
+   one vote **per hosted validator**, each on **its validator's** drawn subnet (a node with keys on
+   2 subnets votes on both; a non-member vote rides the fan-out); each vote reaches exactly the
+   subnet's members ∪ the slot's aggregator hosts, minus the publisher when in the set.
    `got == want` set-equality both directions. *(mirror `assertCoverageNoLeakage` / `sync_coverage_test.go`.)*
-5. **FC aggregate — scaled size, global coverage, pre-join, deadline.** `fs_aggregators`/subnet emit
+5. **FC aggregate — scaled size, global coverage, pre-join, deadline.** The aggregator hosts emit
    distinct aggregates on the global topic at `slotStart(n) + aggregation_fraction%·k·slotDur`; each
-   reaches `N−1`; size `== 328+⌈vps/8⌉`; assert the aggregator **dialed its extra subnet peers at AC
-   slot `n·k−1`** and dropped them after publishing. *(mirror `aggregate_test.go` + the per-slot dial.)*
+   reaches `N−1`; size `== 328+⌈vps/8⌉`; assert a **non-member** aggregator host **dialed + Subscribed
+   the subnet at AC slot `n·k−1`**, held its votes, and dropped it all after publishing.
+   *(mirror `aggregate_test.go` + the per-slot dial.)*
 6. **Full run + metrics.** A sized run (≥ `k+ k/2 +` settle AC slots) writes the AC block + AC-vote
    CDFs + `fraction_voted_block`, the per-subnet FC-vote CDF + coverage-at-deadline, and the global
    FC-aggregate CDF; Python `analyze_*` confirm coverage/no-leak. **Race-skip** if sized. Run twice
@@ -498,17 +516,21 @@ proven-safe band).
 - **Clock:** base **AC slot**; a finality slot = `k` AC slots; run `x > k` AC slots and measure a
   settled finality slot. The AC keeps running inside the finality slot — **AC↔FC contention on one
   CPU/node is measured on purpose.**
-- **Finality chain — membership:** **node-based**, every node a member of **one** of `fs_subnets`
-  (stable, seeded), **all** its validators voting there → ≈`V/fs_subnets` votes/subnet. Members
-  **persistently subscribe** their subnet.
-- **Finality vote:** **per-validator** (k per node), **fixed-time** at `fc_vote_offset_ms` (~1 s),
-  **un-gated, dissemination-only** (no fork-choice outcome measured) **this cut — content is a
-  planned next step** (a measured target + eventual coupling, §4b); size 226 B.
-- **Finality aggregate:** `fs_aggregators` (16)/subnet, drawn per finality slot, **one aggregate each**
-  on a **global** topic at `finality_slot_aggregation_fraction` (50 %); **size scales** with the
-  subnet's voting population (`328 + ⌈vps/8⌉`). Aggregator is a persistent member **and** dials extra
-  subnet peers at the **previous AC slot** (`n·k−1`), dropped after publishing — so it is meshed long
-  enough to collect slot-`n` votes.
+- **Finality chain — assignment:** subnets partition the **validator set** (`finality_subnet_of`,
+  one uniform draw per validator → ≈`V/fs_subnets` votes/subnet regardless of hosting); every node
+  is additionally a stable member of **one** subnet (`finality_subscribers`, the persistent
+  mesh/receiver core it subscribes at bring-up).
+- **Finality vote:** **per-validator** (k per node), each on **its validator's** drawn subnet —
+  fan-out (Join + 2 dials at the pre-join slot) where the host isn't a member; **fixed-time** at
+  `fc_vote_offset_ms` (~1 s), **un-gated, dissemination-only** (no fork-choice outcome measured)
+  **this cut — content is a planned next step** (a measured target + eventual coupling, §4b);
+  size 226 B.
+- **Finality aggregate:** `fs_aggregators` (16) **validators per subnet from the whole set**, drawn
+  per finality slot; each host publishes **one aggregate** (deduped per host) on a **global** topic
+  at `finality_slot_aggregation_fraction` (50 %); **size scales** with the subnet's voting
+  population (`328 + ⌈vps/8⌉`). The host dials + **Subscribes** the (generally foreign) subnet at
+  the **previous AC slot** (`n·k−1`), and Unsubscribes + drops the dials after publishing — so it
+  is meshed long enough to collect slot-`n` votes.
 - **Verify:** reuse the per-node **batched verifier** — all three floods join the one queue (one CPU);
   no new component.
 - **Distribution:** **uniform** `V/N` (`V ≥ N`) now, behind a `Dist` seam so operator skew drops in
@@ -523,13 +545,14 @@ proven-safe band).
   `MakeFinalityAggregate` (reuse `sizedFiller`, `PriorHead`; aggregate sized by `vps`).
 - **`node/node.go`:** `KindACVote=7` / `KindFinalityVote=8` / `KindFinalityAggregate=9`; `decode`
   cases (`:364`); `batchedTopic` += the three topics (`:221`). **No verifier change.**
-- **`schedule/schedule.go`:** `Assignment.FinalitySubscribers [][]int` +
-  `ValidatorsPerSubnet []int` + per-slot `SlotPlan.ACVoters [][]AttesterRef` + per-finality-slot
-  `FinalityAggregators [][]int` (json tags); `View.ACVoteDuties` / `FinalitySubnet` /
-  `FinalityVoteDuties` / `FinalitySubscribersOf` / `FinalityAggregator`.
+- **`schedule/schedule.go`:** `Assignment.FinalitySubscribers [][]int` + `FinalitySubnetOf []int`
+  + `ValidatorsPerSubnet []int` + per-slot `SlotPlan.ACVoters []AttesterRef` + per-finality-slot
+  `FinalityAggregators [][]AttesterRef` (json tags); `View.ACVoteDuties` / `FinalitySubnet` /
+  `FinalityVoteDuties` / `FinalitySubscribersOf` / `FinalityAggregations`.
 - **`simctl/schedule.py`:** generate `ac_voters` (`_rng(seed,8,slot)`), `finality_subscribers`
-  (node-partitioned, `_rng(seed,9)`), `fc_aggregators` (`_rng(seed,10,fslot)`),
-  `validators_per_subnet`; skip committee/sync gen when decoupled; `to_dict` keys; `Params` fields;
+  (the node receiver core, `_rng(seed,9)`), `finality_subnet_of` (per-validator, `_rng(seed,12)`),
+  `fc_aggregators` (whole-set validator refs, `_rng(seed,10,fslot)`), `validators_per_subnet` (the
+  draw's counts); skip committee/sync gen when decoupled; `to_dict` keys; `Params` fields;
   asserts (`ac_vote_size≤V`, `fs_subnets≤N`).
 - **`simctl/topology.py`:** per-subnet tree loop over `finality_subscribers`
   (`generate_subnet_topology`, `:272`).
@@ -590,12 +613,13 @@ Decoupled consensus runs two chains on one fleet. The **availability chain** is 
 data-column burst plus a **global** flood of `ac_vote_size` (512) seeded-per-slot validator votes on
 one topic — no committees, no subnets, no aggregation, every node downloads all — each **block→vote
 coupled and DA-gated** (the column gate, reused verbatim; headline `fraction_voted_block`). The
-**finality chain** fires every `k` AC slots: every node, a stable member of **one** of `fs_subnets`
-(40) node-partitioned subnets, emits **one fixed-time `FinalityVote` per validator it hosts**
-(≈`V/fs_subnets` ≈ 25 000 votes/subnet) at ~1 s; then `fs_aggregators` (16)/subnet — persistent
-members that **pre-join extra peers at the previous AC slot** — each publish one **population-scaled**
-`FinalityAggregate` on a **global** topic at 50 % of the finality slot, every node downloading all
-640. All three floods share the existing per-node **batched verifier** (one CPU) and **contend with
+**finality chain** fires every `k` AC slots: every node emits **one fixed-time `FinalityVote` per
+validator it hosts**, each on **its validator's** drawn subnet (`finality_subnet_of` partitions the
+validator set over `fs_subnets` (40) subnets, ≈`V/fs_subnets` ≈ 25 000 votes/subnet; fan-out where
+the host isn't a stable member) at ~1 s; then `fs_aggregators` (16) validators/subnet from the
+whole set — whose hosts **dial + Subscribe the subnet at the previous AC slot** — each publish one
+**population-scaled** `FinalityAggregate` on a **global** topic at 50 % of the finality slot, every
+node downloading all 640. All three floods share the existing per-node **batched verifier** (one CPU) and **contend with
 the AC traffic on purpose**. Membership and the AC-voter draw are proven before any network; the AC
 vote's flip is proven by the reused column/block-suppression test; and the headline output is the
 block + AC-vote dissemination CDFs (with `fraction_voted_block`), the per-subnet FC-vote CDF +

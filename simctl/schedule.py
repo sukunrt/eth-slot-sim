@@ -223,8 +223,10 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
     set instead (a proposer originates all columns, so it must hold them all).
 
     With ``decoupled`` the attestation committees + sync are replaced by the availability +
-    finality chains: per-slot ac_voters, a node-partition into fs_subnets finality subnets, and
-    per-finality-slot fc_aggregators. Data columns are required (they gate the AC vote).
+    finality chains: per-slot ac_voters, a per-validator finality-subnet draw (finality_subnet_of)
+    over fs_subnets subnets with a stable node-partition receiver core (finality_subscribers), and
+    per-finality-slot fc_aggregators sampled from the whole validator set. Data columns are
+    required (they gate the AC vote).
 
     With ``dist`` tiered/explicit, per-node validator counts are drawn FIRST and V is replaced
     by their sum (emergent V) before any V-dependent validation or draw."""

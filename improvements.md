@@ -53,7 +53,7 @@ through all of that.
   enum (`BlockOnly | Attest | Decoupled`, sync as an orthogonal flag), or let `NewRunner`
   do the forcing itself.
 - Split the file by phase: `runner.go` (core loop + column gate), `runner_sync.go`,
-  `runner_decoupled.go`. The finality-state machinery (`armFinality` / `prejoinAggregator` /
+  `runner_decoupled.go`. The finality-state machinery (`armFinality` / `prejoinFinality` /
   `reapFinality`) is self-contained and moves cleanly.
 - `DecoupledParams` fields are copied one-by-one into `r.k` / `r.fcVoteOffset` /
   `r.fcAggFraction` — just store the struct pointer.
@@ -85,7 +85,8 @@ decoupled-consensus-spec.md):
 
 | Concept | Spec / prose | schedule.json (Python) | Go | Other aliases |
 |---|---|---|---|---|
-| Finality subnet membership | "FS subnets" | `finality_subscribers` | `FinalitySubscribers` | `fin_subs` (simctl/runner.py local), `fcvote` (batch class, node/node.go) |
+| Finality subnet membership (stable node receiver core) | "FS subnets" | `finality_subscribers` | `FinalitySubscribers` | `fin_subs` (simctl/runner.py local), `fcvote` (batch class, node/node.go) |
+| Finality voting subnet (per-validator draw) | "validator partition" | `finality_subnet_of` | `FinalitySubnetOf`, `FinalityVoteDuties` (pairs) | — |
 | Finality subnet count | `FS subnets` | `fs_subnets` | `FsSubnets` | — |
 | AC slots per finality slot | `AC_SLOTS_PER_FINALITY_SLOT`, "k" | `ac_slots_per_finality_slot` | `AcSlotsPerFinalitySlot`, `DecoupledParams.K`, `r.k` | — |
 | Availability-chain vote | "AC vote" | `ac_voters`, `ac_vote_size` | `KindACVote`, `ACVoteDuties`, `MakeACVote` | topic `availability_vote`, batch class `ac` |

@@ -1,5 +1,12 @@
 # Task: finality subnets must partition VALIDATORS, not nodes
 
+> **Status: DONE (2026-06-10).** Landed across simctl/schedule.py (`finality_subnet_of`,
+> stream 12; aggregator refs from the whole set), schedule/schedule.go (`FinalitySubnetOf`,
+> `FinalityVoteDuties` pairs, `FinalityAggregations`), driver/runner.go (`prejoinFinality`:
+> vote fan-out Join+dial and aggregator dial+Subscribe at n·k−1, teardown at the aggregation
+> deadline), node.Unsubscribe, analysis/check_arrivals.py (aggregator hosts required), and the
+> spec/config docs. The per_item_verification_delay.md n4000 rerun should carry this.
+
 ## The bug (design, present since the decoupled cut — not introduced by skew)
 
 `fs_subnets` is a **node** partition: `_finality_subscribers` assigns every node one random
