@@ -12,21 +12,29 @@ skip verification. All four gossipsub inbound limits sit above modeled backlog (
 
 ## Finality attestations (the flood under test)
 
-| | n500 | n1000 | n2000 |
-|---|---|---|---|
-| V (emergent) | 46 400 | 102 035 | 201 032 |
-| votes/subnet/fslot | ~9.3k | ~10.2k | ~10.1k |
-| delivery | 100% | 100% − 2 msgs | 99.964% (16 565 missing) |
-| publisher drops | 0 | 0 | **55** |
-| p50 | 389 ms | 420 ms | 412 ms |
-| p90 | 1.09 s | 1.27 s | 1.35 s |
-| p99 | 2.44 s | 3.05 s | 3.56 s |
-| p100 | 6.4 s | 11.6 s | **65.8 s** |
+| | n500 | n1000 | n2000 | n4000 |
+|---|---|---|---|---|
+| V (emergent) | 46 400 | 102 035 | 201 032 | 409 785 |
+| votes/subnet/fslot | ~9.3k | ~10.2k | ~10.1k | ~10.2k |
+| delivery | 100% | 100% − 2 msgs | 99.964% | **98.69%** (1.24M missing) |
+| publisher drops | 0 | 0 | 55 | **709** (10k outbound knob) |
+| p50 | 389 ms | 420 ms | 412 ms | 331 ms |
+| p90 | 1.09 s | 1.27 s | 1.35 s | 1.53 s |
+| p99 | 2.44 s | 3.05 s | 3.56 s | **12.3 s** |
+| p100 | 6.4 s | 11.6 s | **65.8 s** | **77.8 s** |
 
 Per-subnet load is constant by design, so the deltas are pure network-size effects:
-medians flat, p99 grows gently (~+0.5 s per doubling), only the extreme tail stretches.
-Aggregation deadline is 60 s into the finality slot — p99 clears it 17×; at n2000 the
-p100 sliver (~0.04%) crosses it for the first time.
+medians flat through n4000, p99 gentle (~+0.5 s per doubling) through n2000 — then a
+regime change at n4000 (p99 12.3 s, 1.3% loss). Aggregation deadline is 60 s into the
+finality slot — p99 clears it on every rung; the p100 sliver crosses it from n2000 on.
+
+**n4000 is where the network strains**: `fraction voted block` drops to **0.850** (every
+other rung: 1.000) — 15% of AC voters missed the block+DA gate by the 4 s deadline,
+because boundary-slot block delivery collapses under the ~410k-vote burst (slot-0 block
+p99 10.7 s vs ~0.7 s quiet; AC-vote p100 45.6 s, block p100 42.8 s). Medians stay
+sub-second everywhere — the supernode core absorbs the flood; the 25 Mbit home-node edge
+is what saturates. Publisher drops grew 13× on the unchanged 10k outbound knob (run
+launched before the 20k bump).
 
 The tail belongs to the home nodes: at n1000, the slowest 1% of arrivals are 99.6%
 25 Mbit receivers (baseline mix 45%) — the supernode core absorbs the flood in ~1–3 s,
@@ -34,17 +42,18 @@ the extreme tail is 25 Mbit last-hop delivery.
 
 ## Other message families (p99, all 100% delivered on every rung)
 
-| kind | n500 | n1000 | n2000 |
-|---|---|---|---|
-| blocks (128 KiB) | 938 ms | 1.05 s | 1.39 s |
-| data columns | 333 ms | 347 ms | 358 ms |
-| AC votes (512/slot) | 451 ms | 491 ms | 532 ms |
-| finality aggregates | 359 ms | 480 ms | 871 ms |
+| kind | n500 | n1000 | n2000 | n4000 |
+|---|---|---|---|---|
+| blocks (128 KiB) | 938 ms | 1.05 s | 1.39 s | 1.34 s |
+| data columns | 333 ms | 347 ms | 358 ms | 373 ms |
+| AC votes (512/slot) | 451 ms | 491 ms | 532 ms | 556 ms |
+| finality aggregates | 359 ms | 480 ms | 871 ms | 2.25 s |
 
-`fraction voted block: 1.000` everywhere; proposer guard OK. Boundary-slot contention
-(AC slots 0/10, where the vote burst lands on blocks+columns+AC votes) is real but mild:
-e.g. n2000 blocks p50 1.0 s on slot 0 vs ~520 ms quiet; AC-vote p99 847 ms vs ~530 ms.
-AC-vote deadline (4 s) has ≥4× margin on every rung.
+`fraction voted block: 1.000` through n2000 (n4000: 0.850 — see above); proposer guard
+OK everywhere. Boundary-slot contention (AC slots 0/10, where the vote burst lands on
+blocks+columns+AC votes) is mild through n2000 (e.g. n2000 blocks p50 1.0 s on slot 0 vs
+~520 ms quiet) and severe at n4000 (slot-0 block p99 10.7 s). AC-vote deadline (4 s) has
+≥4× margin on p99 at every rung; at n4000 the boundary-slot tail blows through it.
 
 ## Model fixes the ladder forced (all committed + pinned by tests)
 
@@ -58,14 +67,16 @@ AC-vote deadline (4 s) has ≥4× margin on every rung.
    (regulars 0%) in the first n500 runs, invariant to the other knobs.
    `TestFloodBeyondTopicValidatorConcurrency` (exactly 1025/1500 delivered pre-fix).
 
-## Open items
+## Open items (no further simulations without explicit go-ahead)
 
-- **n2000's two new signals** (both ~0.04% of votes, expected to grow at n4000):
-  55 publisher-side drops at multi-key hosts (outbound-queue pressure during the fan-out
-  burst — per-peer queue 10k is the one limit still near modeled backlog), and the
-  >60 s straggler sliver. With 16 aggregators/subnet neither should affect aggregation.
-- n4000 rung pending.
-- Sensitivity rung pending: `super_node_fraction: 0.2` at n500 — 50% supernodes is
+- **n4000 findings to dig into**: which mechanism gates the 0.850 voted fraction (block
+  late vs columns late at boundary slots); whether the 1.24M missing finality
+  attestations share the home-node-edge profile; whether 709 publisher drops vanish on
+  the 20k outbound queue (bumped after this run launched — a rerun would isolate it).
+- Candidate mitigations for the n4000 regime: vote-burst jitter across the finality
+  slot, larger fs_subnets at fixed N (smaller per-subnet bursts), supernode-biased mesh
+  for boundary-slot block delivery.
+- Sensitivity rung parked: `super_node_fraction: 0.2` at n500 — 50% supernodes is
   generous, and the tail/backbone both lean on it.
 - Earlier rungs (n50, n100) ran pre-fix; their numbers are not comparable and are
   superseded by this table.
