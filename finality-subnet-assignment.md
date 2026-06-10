@@ -30,22 +30,40 @@ attestation committees), each getting ~V/fs_subnets votes regardless of where ke
   dials that subnet's subscribers and publishes via gossipsub fanout. The attestation phase
   already has exactly this machinery (publishers dial into the subscriber set per slot) —
   reuse it, don't invent a new path.
-- Coverage expectation per vote: `finality_subscribers[subnet]`, minus the publisher only
-  when the publisher is itself a member. `validators_per_subnet[i]` = the draw's per-subnet
-  counts (~V/S ± noise), now decoupled from member-node hosting.
+- Coverage expectation per vote of finality slot n: `finality_subscribers[subnet]` ∪ that
+  slot's aggregator nodes for the subnet (they are subscribed from n·k−1 through the
+  aggregate publish), minus the publisher when it is in that set. The analyzer must count
+  aggregator arrivals as expected, not leaked; whether they are REQUIRED (missing if
+  absent) for the full mesh-warm window is a judgment call — require them for votes of
+  slot n itself, since collecting those is the aggregator's job.
+  `validators_per_subnet[i]` = the draw's per-subnet counts (~V/S ± noise), now decoupled
+  from member-node hosting.
 
 ## Touchpoints
 
 - `simctl/schedule.py`: draw `finality_subnet_of[v]` (seeded, after the Dist draw so V is
-  known); `_finality_subscribers` derives node membership from hosting + the draw;
-  `_validators_per_subnet` counts the draw; emit `finality_subnet_of` in to_dict.
+  known); `_validators_per_subnet` counts the draw; emit `finality_subnet_of` in to_dict.
+  finality_aggregators: per finality slot, per subnet, sample fs_aggregators from the
+  NODES hosting that subnet's validators (not from finality_subscribers).
 - `schedule/schedule.go`: load `FinalitySubnetOf []int`; `FinalitySubnet() (int, bool)` →
   `FinalitySubnets() []int` (or keep + add); `FinalityVoteDuties() []int` →
   `[]AttestDuty`-style (val, subnet) pairs from the map.
+- **Aggregators are NOT drawn from the stable subscriber set.** They are drawn from the
+  subnet's validator population (finality_subnet_of), i.e. from ALL nodes hosting a
+  validator on that subnet — generally non-members. This is the entire point of the
+  pre-join: the aggregator's node **Subscribes** (joins the mesh, not fanout) at AC slot
+  n·k−1, has the full prior slot to mesh, collects every vote of finality slot n, publishes
+  its aggregate at the aggregation fraction, then unsubscribes/drops the extra peers (stays
+  only if it is independently a stable member). The current cut draws aggregators from
+  members (`_slot_plan` finality_aggregators sample members; FinalityAggregator), which
+  made the pre-join redundant — that changes here and the pre-join becomes load-bearing.
 - `driver/runner.go` + `node/`: subscription stays membership-based (the stable
-  finality_subscribers partition); vote emission groups the node's hosted validators by
+  finality_subscribers set); vote emission groups the node's hosted validators by
   finality_subnet_of and publishes each group on its subnet — fanout (dial + publish
-  without subscribe) when not a member, mirroring the attestation publish path.
+  without subscribe) when not a member, mirroring the attestation publish path. Aggregator
+  pre-join switches from "extra dials by an already-member" to a real Subscribe at n·k−1
+  by a generally-non-member node (the existing dialed/dropped state in runner.go is the
+  scaffold; the subscribe/unsubscribe is the change).
 - `analysis/check_arrivals.py`: `_finality_votes` reads `finality_subnet_of` for each
   hosted val; expected receivers = the subnet's stable members (publisher excluded only
   if a member).
