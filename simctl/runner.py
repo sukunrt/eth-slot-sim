@@ -85,6 +85,7 @@ def _schedule_assignment(config: SimConfig) -> schedule.Assignment | None:
             ac_slots_per_finality_slot=dcc.ac_slots_per_finality_slot,
             fs_subnets=dcc.fs_subnets,
             fs_aggregators=dcc.fs_aggregators,
+            validator_segregation=dcc.validator_segregation,
         )
     return schedule.generate(
         schedule.Params(
@@ -205,6 +206,11 @@ def _host_args(
             f"-fc-vote-offset={dcc.fc_vote_offset_ms}ms",
             f"-fc-agg-fraction={dcc.finality_slot_aggregation_fraction}",
         ]
+        if dcc.validator_segregation:  # per-AC-slot rounds; the binary asserts the schedule agrees
+            args += [
+                "-fc-segregated=true",
+                f"-fc-round-agg-fraction={dcc.round_aggregation_fraction}",
+            ]
     if peers:
         args.append(f"-peer-nums={','.join(str(p) for p in peers)}")
     return " ".join(args)
@@ -320,6 +326,11 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
             fc_vote_offset_ms=dcc.fc_vote_offset_ms,
             fc_agg_fraction=dcc.finality_slot_aggregation_fraction,
         )
+        if dcc.validator_segregation:  # per-AC-slot rounds; TestRun asserts the schedule agrees
+            params.update(
+                fc_segregated=True,
+                fc_round_agg_fraction=dcc.round_aggregation_fraction,
+            )
     return params
 
 

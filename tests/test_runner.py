@@ -217,6 +217,35 @@ def test_schedule_assignment_carries_decoupled_knobs():
     assert a.slots[1].finality_aggregators is None  # a non-boundary slot carries none
 
 
+def _segregated_config():
+    return _decoupled_config(
+        decoupled_consensus=config.DecoupledConsensusConfig(
+            ac_vote_size=8, ac_slots_per_finality_slot=2, fs_subnets=2, fs_aggregators=2,
+            validator_segregation=True,
+        ),
+    )
+
+
+def test_host_args_include_segregation_flags():
+    args = runner._host_args(_segregated_config(), 0, 16, [1], "/s.json")
+    assert "-fc-segregated=true" in args and "-fc-round-agg-fraction=67" in args
+    # Plain decoupled ⇒ no segregation flags (the Go binary defaults them off).
+    assert "-fc-segregated" not in runner._host_args(_decoupled_config(), 0, 16, [1], "/s.json")
+
+
+def test_simnet_params_carry_segregation_keys():
+    p = runner._simnet_params(_segregated_config())
+    assert p["fc_segregated"] is True and p["fc_round_agg_fraction"] == 67
+    assert "fc_segregated" not in runner._simnet_params(_decoupled_config())
+
+
+def test_schedule_assignment_carries_segregation():
+    a = runner._schedule_assignment(_segregated_config())
+    assert a.finality_round_of is not None and len(a.finality_round_of) == 32
+    assert a.validators_per_round_subnet is not None  # k×fs cell counts
+    assert a.slots[1].finality_aggregators is not None  # every slot is a round
+
+
 def test_stop_time_covers_startup_slots_drain():
     # startup 120s + 10 slots * 12s + drain/margin > config's 1 min floor.
     cfg = config.SimConfig(num_slots=10, slot_duration_seconds=12,

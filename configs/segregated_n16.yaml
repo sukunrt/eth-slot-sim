@@ -1,0 +1,54 @@
+# Validator segregation, small end-to-end example (decoupled_n16 + the variant flag; see
+# validator-segregation-spec.md). The validator set splits into k (= ac_slots_per_finality_slot)
+# stable round groups: AC slot s carries round s % k's votes (~V/k validators) at
+# fc_vote_offset_ms into the slot, then fs_aggregators per subnet — drawn fresh EVERY slot —
+# publish cell-scaled aggregates at round_aggregation_fraction% of the slot; the last ~1/3 is the
+# aggregate-dissemination window (the headline CDF). Same total votes per finality slot as the
+# base decoupled config, spread evenly: burst vs hum. Measure fslot 1's rounds (AC slots 2-3).
+topology:
+  num_nodes: 16
+  degree: 6                # K: target peers per node
+  type: random
+  seed: 42
+  super_node_fraction: 0.5 # the full-custody backbone is drawn from the supernodes
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+attestation:
+  enabled: false           # OFF: this block only supplies V + the AC-vote deadline (attestation_due_ms)
+  validators: 32           # V (>= N): every node validates ⇒ uniform custody
+  committees: 1            # ignored under decoupled (no attestation committees)
+  committee_size: 8        # ignored under decoupled
+  attestation_due_ms: 4000 # the AC-vote deadline (reused; no new knob)
+
+data_columns:
+  enabled: true            # columns gate the AC vote (the "availability" chain)
+  num_columns: 8
+  blobs: 6
+  custody_floor: 8
+  full_custody_fraction: 0.5
+  column_backbone_floor: 3
+  verify_service_ms: 3
+  verify_parallelism_super: 16
+  verify_parallelism_regular: 4
+
+decoupled_consensus:
+  enabled: true
+  validator_segregation: true    # THE variant flag: per-AC-slot finality rounds
+  ac_vote_size: 8                # VRF-selected validators voting on the AC each slot (global topic)
+  ac_slots_per_finality_slot: 2  # k: ALSO the number of round groups
+  fs_subnets: 2                  # finality subnets, validator-partitioned; every subnet active every round
+  fs_aggregators: 2              # aggregator validators per subnet PER ROUND (whole-set sample)
+  round_aggregation_fraction: 67 # % of the AC slot when round aggregates publish (~8s of 12s)
+  fc_vote_offset_ms: 1000        # offset into the AC slot for the round's vote burst
+  # finality_slot_aggregation_fraction: ignored when validator_segregation is on
+
+num_slots: 5
+slot_duration_seconds: 12
+block_size: 131072
+verify_delay_ms: 10
+offset_ms: 0
+jitter_ms: 2000

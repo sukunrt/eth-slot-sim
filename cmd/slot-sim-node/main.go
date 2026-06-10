@@ -82,8 +82,10 @@ func main() {
 		syncOn         = flag.Bool("sync", false, "emit sync-committee messages + contributions (members only; needs schedule.json; reuses -att-due/-agg-due)")
 		decoupledOn    = flag.Bool("decoupled", false, "decoupled consensus: emit AC votes + finality votes/aggregates (replaces attestations+sync; needs schedule.json; AC deadline reuses -att-due)")
 		acK            = flag.Int("k", 10, "ac_slots_per_finality_slot (a finality slot spans k AC slots)")
-		fcVoteOffset   = flag.Duration("fc-vote-offset", time.Second, "offset into the finality slot for the per-validator finality-vote burst")
-		fcAggFraction  = flag.Int("fc-agg-fraction", 50, "percent of the finality slot when finality aggregates publish")
+		fcVoteOffset   = flag.Duration("fc-vote-offset", time.Second, "offset into the finality slot (AC slot when -fc-segregated) for the per-validator finality-vote burst")
+		fcAggFraction  = flag.Int("fc-agg-fraction", 50, "percent of the finality slot when finality aggregates publish (base mode)")
+		fcSegregated   = flag.Bool("fc-segregated", false, "validator segregation: per-AC-slot finality rounds (needs -decoupled and a segregated schedule.json)")
+		fcRoundAggFrac = flag.Int("fc-round-agg-fraction", 67, "percent of the AC slot when round aggregates publish (with -fc-segregated)")
 		attDue         = flag.Duration("att-due", 4*time.Second, "attestation deadline offset into the slot")
 		aggDue         = flag.Duration("agg-due", 0, "aggregate emit offset into the slot (0 ⇒ aggregates off)")
 		prep           = flag.Duration("prep", 0, "extra processing before emitting on block receipt")
@@ -120,9 +122,22 @@ func main() {
 	// Decoupled consensus replaces attestations + sync (the AC vote stands in for the attestation).
 	attest, syncEmit := *attestations, *syncOn
 	var decoupled *driver.DecoupledParams
+	if *fcSegregated && !*decoupledOn {
+		log.Fatal("-fc-segregated needs -decoupled")
+	}
 	if *decoupledOn {
+		// The flag must agree with the schedule's shape: a segregated plan run without the flag
+		// (or vice versa) would silently measure the wrong variant — fail loudly instead.
+		if sched == nil {
+			log.Fatal("-decoupled needs -schedule")
+		}
+		if *fcSegregated != sched.Segregated() {
+			log.Fatalf("-fc-segregated=%v but schedule.json segregated=%v (finality_round_of %spresent)",
+				*fcSegregated, sched.Segregated(), map[bool]string{true: "", false: "not "}[sched.Segregated()])
+		}
 		attest, syncEmit = false, false
-		decoupled = &driver.DecoupledParams{K: *acK, FCVoteOffset: *fcVoteOffset, FCAggFraction: *fcAggFraction}
+		decoupled = &driver.DecoupledParams{K: *acK, FCVoteOffset: *fcVoteOffset, FCAggFraction: *fcAggFraction,
+			Segregated: *fcSegregated, RoundAggFraction: *fcRoundAggFrac}
 	}
 	val := validator.New(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
 		rand.New(rand.NewPCG(*seed, uint64(*nodeNum))), proposers)

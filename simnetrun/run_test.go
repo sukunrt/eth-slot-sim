@@ -45,10 +45,13 @@ type params struct {
 	Attest   bool   `json:"attest"`
 	Sync     bool   `json:"sync"` // sync-committee phase (size/subnets/aggregators in schedule.json)
 	// Decoupled-consensus phase (membership/voters in schedule.json). Forces attest/sync off.
+	// Segregated must agree with the schedule's shape (finality_round_of present), asserted below.
 	Decoupled        bool    `json:"decoupled"`
 	K                int     `json:"k"`
 	FCVoteOffsetMs   int     `json:"fc_vote_offset_ms"`
 	FCAggFraction    int     `json:"fc_agg_fraction"`
+	Segregated       bool    `json:"fc_segregated"`
+	RoundAggFraction int     `json:"fc_round_agg_fraction"`
 	AttDueMs         int     `json:"att_due_ms"`
 	AggDueMs         int     `json:"agg_due_ms"` // aggregate phase (0 ⇒ off)
 	PrepMs           int     `json:"prep_ms"`
@@ -114,10 +117,16 @@ func TestRun(t *testing.T) {
 			cfg.Attest = p.Attest
 			cfg.Sync = p.Sync
 			if p.Decoupled { // replaces attestations + sync (driver.New forces those off)
+				if p.Segregated != a.Segregated() {
+					t.Fatalf("fc_segregated=%v but schedule.json segregated=%v — variant mismatch",
+						p.Segregated, a.Segregated())
+				}
 				cfg.Decoupled = &driver.DecoupledParams{
-					K:             p.K,
-					FCVoteOffset:  time.Duration(p.FCVoteOffsetMs) * time.Millisecond,
-					FCAggFraction: p.FCAggFraction,
+					K:                p.K,
+					FCVoteOffset:     time.Duration(p.FCVoteOffsetMs) * time.Millisecond,
+					FCAggFraction:    p.FCAggFraction,
+					Segregated:       p.Segregated,
+					RoundAggFraction: p.RoundAggFraction,
 				}
 			}
 			cfg.AttestationDue = time.Duration(p.AttDueMs) * time.Millisecond
