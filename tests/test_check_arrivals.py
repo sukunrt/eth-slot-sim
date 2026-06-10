@@ -1088,6 +1088,42 @@ def test_segregated_aggregates_published_every_slot():
     assert res.ok
 
 
+def test_finality_coverage_at_deadline_segregated():
+    # Subnet 0 members {1,2}; slot 0's subnet-0 aggregator host is 3, publishing its aggregate
+    # at 8000ms. Vote of val 0 reaches host 3 at 2000ms (covered); vote of val 2 reaches it at
+    # 9000ms (after the deadline — counted published, not covered) ⇒ coverage 0.5 for (0, 0).
+    data = _segregated_fc(6, 6, [[1, 2], [4, 5]], [0] * 6, [0, 1, 0, 1, 0, 1],
+                          slot_aggs=[[[3], []], [[3], []]])
+    lines = [
+        _fvpub(0, 0, 0, 0, 1000), _fvarr(3, 0, 0, 0, 0, 2000),
+        _fvpub(0, 0, 2, 2, 1000), _fvarr(3, 0, 0, 2, 2, 9000),
+        _fapub(0, 0, 3, 8000),
+        # Slot 1 (round 1): val 4's vote reaches host 3 in time ⇒ coverage 1.0 for (1, 0).
+        _fvpub(1, 0, 4, 4, 13000), _fvarr(3, 1, 0, 4, 4, 14000),
+        _fapub(1, 0, 3, 20000),
+    ]
+    pubs, arrs = ca.parse_events(lines)
+    cov = ca.finality_coverage_at_deadline(pubs, arrs, data)
+    assert cov[(0, 0)] == 0.5
+    assert cov[(1, 0)] == 1.0
+    assert (0, 1) not in cov  # subnet 1 published no aggregate: no deadline to measure against
+
+
+def test_finality_coverage_at_deadline_excludes_self_and_base_mode():
+    # Base mode (keyed by fslot): the aggregator host IS a vote's publisher — that pair is
+    # excluded (a vote is not expected back at its own publisher), so coverage is over the
+    # other vote only.
+    data = _decoupled_fc(4, 4, [[1, 2]], [0, 0, 0, 0], k=2, num_slots=2, fc_aggs=[[3]])
+    lines = [
+        _fvpub(0, 0, 3, 3, 1000),  # val 3's host IS aggregator host 3: excluded pair
+        _fvpub(0, 0, 1, 1, 1000), _fvarr(3, 0, 0, 1, 1, 2000),  # covered
+        _fapub(0, 0, 3, 8000),
+    ]
+    pubs, arrs = ca.parse_events(lines)
+    cov = ca.finality_coverage_at_deadline(pubs, arrs, data)
+    assert cov[(0, 0)] == 1.0
+
+
 def test_load_finality_rounds(tmp_path):
     (tmp_path / "schedule.json").write_text(
         '{"subnet_subscribers": [], "finality_round_of": [0, 1, 0], "slots": []}'

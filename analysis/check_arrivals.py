@@ -813,6 +813,50 @@ def _finality_aggregate_published(schedule_data: dict) -> tuple[set[tuple[int, i
     return published, n
 
 
+def finality_coverage_at_deadline(
+    pubs: dict[PubKey, tuple[int, bool]], arrs: list[Arrival], schedule_data: dict
+) -> dict[tuple[int, int], float]:
+    """Per (round key, subnet): the fraction of the round's published votes that reached the
+    round's aggregator HOSTS by the aggregation deadline — "how much of the round's vote does
+    each aggregate capture?", the Python twin of the Go Recorder's FinalityCoverageAtDeadline
+    (a headline metric, NOT an invariant: a late tail lowers it without being a failure). The
+    deadline is observed, not configured: each host's own FinalityAggregate publish instant
+    (all of a round's aggregates publish at one fixed-time deadline by construction). A vote is
+    not expected back at its own publisher; (key, subnet) cells whose hosts published no
+    aggregate are skipped (no deadline to measure against). Keys are finality slots in base
+    mode, AC slots under segregation — whatever rides the slot field. Shadow-slog only: the
+    simnet CSV carries per-message delays, not the absolute instants this comparison needs."""
+    agg_pub_t = {(s, sub, a): t for (k, s, sub, a, _o), (t, _v) in pubs.items()
+                 if k == FINALITY_AGGREGATE_KIND}
+    first_arr: dict[tuple[int, int, int, int, int], int] = {}
+    for n, k, s, sub, a, o, t in arrs:
+        if k != FINALITY_VOTE_KIND:
+            continue
+        key = (n, s, sub, a, o)
+        if key not in first_arr or t < first_arr[key]:
+            first_arr[key] = t
+    published, _n = _finality_aggregate_published(schedule_data)
+    hosts: dict[tuple[int, int], set[int]] = {}
+    for key, subnet, host in published:
+        hosts.setdefault((key, subnet), set()).add(host)
+    total: Counter = Counter()
+    covered: Counter = Counter()
+    for (k, s, sub, val, origin), (_t, _v) in pubs.items():
+        if k != FINALITY_VOTE_KIND:
+            continue
+        for host in hosts.get((s, sub), ()):
+            if host == origin:
+                continue
+            due = agg_pub_t.get((s, sub, host))
+            if due is None:
+                continue  # this host never published: no deadline for the pair
+            total[(s, sub)] += 1
+            at = first_arr.get((host, s, sub, val, origin))
+            if at is not None and at <= due:
+                covered[(s, sub)] += 1
+    return {cell: covered[cell] / n for cell, n in total.items()}
+
+
 def analyze_finality_aggregates(
     pubs: dict[PubKey, tuple[int, bool]], arrs: list[Arrival], schedule_data: dict
 ) -> AggregateResult:
@@ -1216,15 +1260,27 @@ def build_report(run_dir: Path) -> dict:
                 fvres, pubs, arrs, FINALITY_VOTE_KIND,
             )
 
-            k = schedule_data["params"]["ac_slots_per_finality_slot"]
-            slots = schedule_data["slots"]
-            if any(sp["slot"] % k == 0 and sp.get("finality_aggregators") for sp in slots):
+            # Boundary slots in base mode, every slot under segregation — either way the
+            # aggregator draws ride the slot dicts.
+            if any(sp.get("finality_aggregators") for sp in schedule_data["slots"]):
                 fares = analyze_finality_aggregates(pubs, arrs, schedule_data)
                 ok = ok and fares.ok
                 kinds["finality_aggregates"] = _kind_report(
                     "finality aggregate", "finality aggregates (distinct)",
                     fares, pubs, arrs, FINALITY_AGGREGATE_KIND,
                 )
+                # Coverage at the aggregation deadline: a headline metric (per AC slot under
+                # segregation — k points per fslot), not a pass/fail invariant.
+                cov = finality_coverage_at_deadline(pubs, arrs, schedule_data)
+                if cov:
+                    by_slot: dict[str, dict[str, float]] = {}
+                    for (slot, subnet), frac in sorted(cov.items()):
+                        by_slot.setdefault(str(slot), {})[str(subnet)] = round(frac, 4)
+                    kinds["finality_attestations"]["coverage_at_deadline"] = by_slot
+                    print("  vote coverage at the aggregation deadline (per slot/subnet):")
+                    for slot, subs in by_slot.items():
+                        line = "  ".join(f"subnet {s}: {f:.3f}" for s, f in subs.items())
+                        print(f"    slot {slot}: {line}")
 
         counts = schedule_data.get("validator_counts")
         if counts:
