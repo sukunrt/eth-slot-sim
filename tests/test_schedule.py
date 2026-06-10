@@ -481,6 +481,109 @@ def test_decoupled_same_seed_identical_seed_plus_one_differs():
     )
 
 
+def _segregated_params(**kw):
+    return _decoupled_params(validator_segregation=True, **kw)
+
+
+def test_finality_round_of_partitions_validators_into_rounds():
+    a = schedule.generate(_segregated_params(), supers=_DECOUPLED_SUPERS)
+    assert a.finality_round_of is not None
+    # One independent uniform draw per validator — V entries, each a round in [0, k).
+    assert len(a.finality_round_of) == 32
+    assert all(0 <= r < 2 for r in a.finality_round_of)
+    assert a.to_dict()["finality_round_of"] == a.finality_round_of
+
+
+def test_finality_round_of_under_tiered_covers_emergent_v():
+    a = schedule.generate(_segregated_params(dist="tiered"), supers=_DECOUPLED_SUPERS)
+    assert len(a.finality_round_of) == a.params.v  # V is emergent (Σ counts)
+    assert all(0 <= r < 2 for r in a.finality_round_of)
+
+
+def test_validators_per_round_subnet_counts_the_two_draws():
+    a = schedule.generate(_segregated_params(), supers=_DECOUPLED_SUPERS)
+    assert a.validators_per_round_subnet is not None
+    assert len(a.validators_per_round_subnet) == 2  # k rounds
+    assert all(len(row) == 2 for row in a.validators_per_round_subnet)  # fs_subnets
+    # Each (round, subnet) cell counts the intersection of the two independent draws.
+    want = Counter(zip(a.finality_round_of, a.finality_subnet_of))
+    for r, row in enumerate(a.validators_per_round_subnet):
+        for s, count in enumerate(row):
+            assert count == want[(r, s)]
+    # Column sums = the subnet draw's counts; total = V.
+    for s, count in enumerate(a.validators_per_subnet):
+        assert sum(row[s] for row in a.validators_per_round_subnet) == count
+    assert sum(sum(row) for row in a.validators_per_round_subnet) == 32
+    assert a.to_dict()["validators_per_round_subnet"] == a.validators_per_round_subnet
+
+
+def test_segregated_fc_aggregators_every_slot_whole_set_and_fresh():
+    a = schedule.generate(_segregated_params(num_slots=8), supers=_DECOUPLED_SUPERS)
+    seen = []
+    for sp in a.slots:
+        # Every AC slot is a round: each carries a fresh per-subnet aggregator draw.
+        assert sp.finality_aggregators is not None
+        assert len(sp.finality_aggregators) == 2  # fs_subnets
+        for subnet, aggs in enumerate(sp.finality_aggregators):
+            assert len(aggs) == min(2, 32)  # fs_aggregators per subnet per round
+            vals = [r.val for r in aggs]
+            assert len(set(vals)) == len(vals)
+            for pos, r in enumerate(aggs):
+                assert 0 <= r.val < 32
+                assert r.node == r.val % 16  # the host node carries the duty
+                assert r.subnet == subnet and r.position == pos
+        seen.append(tuple(r.val for aggs in sp.finality_aggregators for r in aggs))
+    assert len(set(seen)) > 1, "round aggregators should be re-drawn per AC slot"
+
+
+def test_segregation_requires_decoupled():
+    with pytest.raises(ValueError):
+        schedule.generate(
+            schedule.Params(n=8, v=16, c=2, sc=4, validator_segregation=True), supers=[0, 1]
+        )
+
+
+def test_segregated_same_seed_identical_seed_plus_one_differs():
+    base = _segregated_params(seed=7)
+    assert (
+        schedule.generate(base, supers=_DECOUPLED_SUPERS).to_dict()
+        == schedule.generate(base, supers=_DECOUPLED_SUPERS).to_dict()
+    )
+    other = _segregated_params(seed=8)
+    assert (
+        schedule.generate(other, supers=_DECOUPLED_SUPERS).to_dict()
+        != schedule.generate(base, supers=_DECOUPLED_SUPERS).to_dict()
+    )
+
+
+def test_segregation_off_keeps_decoupled_schedule_unchanged():
+    # Plain decoupled (no segregation) emits neither new key and keeps boundary-only aggregators.
+    d = schedule.generate(_decoupled_params(), supers=_DECOUPLED_SUPERS).to_dict()
+    assert "finality_round_of" not in d and "validators_per_round_subnet" not in d
+    assert all(
+        ("finality_aggregators" in s) == (s["slot"] % 2 == 0) for s in d["slots"]
+    )
+
+
+# Params of the committed segregated Go contract fixture
+# (schedule/testdata/segregated_schedule.json) — the decoupled fixture + segregation.
+_SEGREGATED_FIXTURE = (
+    Path(__file__).parent.parent / "schedule" / "testdata" / "segregated_schedule.json"
+)
+_SEGREGATED_FIXTURE_PARAMS = schedule.Params(
+    n=12, v=24, c=0, sc=0, num_columns=4, full_custody_fraction=0.5, column_backbone_floor=3,
+    decoupled=True, validator_segregation=True, ac_vote_size=4, ac_slots_per_finality_slot=2,
+    fs_subnets=3, fs_aggregators=2, seed=1, num_slots=4,
+)
+
+
+def test_committed_segregated_fixture_is_current():
+    # The Go contract test (schedule/schedule_test.go) loads this exact file; regenerate if stale.
+    on_disk = json.loads(_SEGREGATED_FIXTURE.read_text())
+    got = schedule.generate(_SEGREGATED_FIXTURE_PARAMS, supers=list(range(8))).to_dict()
+    assert got == on_disk, "stale segregated fixture; regenerate it"
+
+
 def test_aggregators_seeded_vary_across_slots_and_with_seed():
     base = schedule.Params(
         n=40, v=80, c=2, sc=4, subscribe_floor=20, target_aggregators=4, seed=7, num_slots=4

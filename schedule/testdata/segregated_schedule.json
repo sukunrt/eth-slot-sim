@@ -1,0 +1,483 @@
+{
+  "params": {
+    "n": 12,
+    "v": 24,
+    "c": 0,
+    "sc": 0,
+    "subnet_count": 64,
+    "subnets_per_node": 2,
+    "subscribe_floor": 10,
+    "target_aggregators": 16,
+    "seed": 1,
+    "num_slots": 4,
+    "ac_vote_size": 4,
+    "ac_slots_per_finality_slot": 2,
+    "fs_subnets": 3,
+    "fs_aggregators": 2
+  },
+  "subnet_subscribers": [],
+  "slots": [
+    {
+      "slot": 0,
+      "committees": [],
+      "subnet_of": [],
+      "aggregators": [],
+      "proposer": 0,
+      "ac_voters": [
+        {
+          "node": 4,
+          "val": 4,
+          "subnet": 0,
+          "position": 0
+        },
+        {
+          "node": 2,
+          "val": 14,
+          "subnet": 0,
+          "position": 1
+        },
+        {
+          "node": 1,
+          "val": 1,
+          "subnet": 0,
+          "position": 2
+        },
+        {
+          "node": 9,
+          "val": 21,
+          "subnet": 0,
+          "position": 3
+        }
+      ],
+      "finality_aggregators": [
+        [
+          {
+            "node": 11,
+            "val": 11,
+            "subnet": 0,
+            "position": 0
+          },
+          {
+            "node": 0,
+            "val": 12,
+            "subnet": 0,
+            "position": 1
+          }
+        ],
+        [
+          {
+            "node": 9,
+            "val": 9,
+            "subnet": 1,
+            "position": 0
+          },
+          {
+            "node": 5,
+            "val": 17,
+            "subnet": 1,
+            "position": 1
+          }
+        ],
+        [
+          {
+            "node": 10,
+            "val": 22,
+            "subnet": 2,
+            "position": 0
+          },
+          {
+            "node": 5,
+            "val": 5,
+            "subnet": 2,
+            "position": 1
+          }
+        ]
+      ]
+    },
+    {
+      "slot": 1,
+      "committees": [],
+      "subnet_of": [],
+      "aggregators": [],
+      "proposer": 1,
+      "ac_voters": [
+        {
+          "node": 6,
+          "val": 6,
+          "subnet": 0,
+          "position": 0
+        },
+        {
+          "node": 3,
+          "val": 3,
+          "subnet": 0,
+          "position": 1
+        },
+        {
+          "node": 11,
+          "val": 11,
+          "subnet": 0,
+          "position": 2
+        },
+        {
+          "node": 10,
+          "val": 22,
+          "subnet": 0,
+          "position": 3
+        }
+      ],
+      "finality_aggregators": [
+        [
+          {
+            "node": 1,
+            "val": 1,
+            "subnet": 0,
+            "position": 0
+          },
+          {
+            "node": 0,
+            "val": 12,
+            "subnet": 0,
+            "position": 1
+          }
+        ],
+        [
+          {
+            "node": 1,
+            "val": 1,
+            "subnet": 1,
+            "position": 0
+          },
+          {
+            "node": 3,
+            "val": 15,
+            "subnet": 1,
+            "position": 1
+          }
+        ],
+        [
+          {
+            "node": 2,
+            "val": 2,
+            "subnet": 2,
+            "position": 0
+          },
+          {
+            "node": 5,
+            "val": 5,
+            "subnet": 2,
+            "position": 1
+          }
+        ]
+      ]
+    },
+    {
+      "slot": 2,
+      "committees": [],
+      "subnet_of": [],
+      "aggregators": [],
+      "proposer": 2,
+      "ac_voters": [
+        {
+          "node": 0,
+          "val": 12,
+          "subnet": 0,
+          "position": 0
+        },
+        {
+          "node": 10,
+          "val": 22,
+          "subnet": 0,
+          "position": 1
+        },
+        {
+          "node": 9,
+          "val": 9,
+          "subnet": 0,
+          "position": 2
+        },
+        {
+          "node": 5,
+          "val": 5,
+          "subnet": 0,
+          "position": 3
+        }
+      ],
+      "finality_aggregators": [
+        [
+          {
+            "node": 8,
+            "val": 20,
+            "subnet": 0,
+            "position": 0
+          },
+          {
+            "node": 5,
+            "val": 5,
+            "subnet": 0,
+            "position": 1
+          }
+        ],
+        [
+          {
+            "node": 11,
+            "val": 11,
+            "subnet": 1,
+            "position": 0
+          },
+          {
+            "node": 0,
+            "val": 0,
+            "subnet": 1,
+            "position": 1
+          }
+        ],
+        [
+          {
+            "node": 8,
+            "val": 20,
+            "subnet": 2,
+            "position": 0
+          },
+          {
+            "node": 5,
+            "val": 17,
+            "subnet": 2,
+            "position": 1
+          }
+        ]
+      ]
+    },
+    {
+      "slot": 3,
+      "committees": [],
+      "subnet_of": [],
+      "aggregators": [],
+      "proposer": 4,
+      "ac_voters": [
+        {
+          "node": 7,
+          "val": 7,
+          "subnet": 0,
+          "position": 0
+        },
+        {
+          "node": 3,
+          "val": 15,
+          "subnet": 0,
+          "position": 1
+        },
+        {
+          "node": 8,
+          "val": 8,
+          "subnet": 0,
+          "position": 2
+        },
+        {
+          "node": 8,
+          "val": 20,
+          "subnet": 0,
+          "position": 3
+        }
+      ],
+      "finality_aggregators": [
+        [
+          {
+            "node": 11,
+            "val": 23,
+            "subnet": 0,
+            "position": 0
+          },
+          {
+            "node": 4,
+            "val": 16,
+            "subnet": 0,
+            "position": 1
+          }
+        ],
+        [
+          {
+            "node": 3,
+            "val": 15,
+            "subnet": 1,
+            "position": 0
+          },
+          {
+            "node": 9,
+            "val": 21,
+            "subnet": 1,
+            "position": 1
+          }
+        ],
+        [
+          {
+            "node": 5,
+            "val": 5,
+            "subnet": 2,
+            "position": 0
+          },
+          {
+            "node": 0,
+            "val": 0,
+            "subnet": 2,
+            "position": 1
+          }
+        ]
+      ]
+    }
+  ],
+  "num_columns": 4,
+  "column_subscribers": [
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ]
+  ],
+  "full_custody": [
+    0,
+    1,
+    2,
+    4
+  ],
+  "finality_subscribers": [
+    [
+      2,
+      3,
+      8,
+      9,
+      11
+    ],
+    [
+      1,
+      4,
+      5,
+      6,
+      7,
+      10
+    ],
+    [
+      0
+    ]
+  ],
+  "finality_subnet_of": [
+    2,
+    0,
+    0,
+    1,
+    1,
+    2,
+    2,
+    1,
+    2,
+    1,
+    2,
+    1,
+    1,
+    0,
+    0,
+    2,
+    1,
+    0,
+    0,
+    2,
+    2,
+    1,
+    2,
+    2
+  ],
+  "validators_per_subnet": [
+    6,
+    8,
+    10
+  ],
+  "finality_round_of": [
+    1,
+    0,
+    0,
+    1,
+    0,
+    1,
+    0,
+    1,
+    0,
+    1,
+    0,
+    0,
+    1,
+    1,
+    0,
+    1,
+    0,
+    0,
+    0,
+    1,
+    1,
+    0,
+    0,
+    0
+  ],
+  "validators_per_round_subnet": [
+    [
+      5,
+      4,
+      5
+    ],
+    [
+      1,
+      4,
+      5
+    ]
+  ]
+}

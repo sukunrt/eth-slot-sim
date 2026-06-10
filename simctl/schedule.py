@@ -61,6 +61,11 @@ class Params:
     ac_slots_per_finality_slot: int = 0
     fs_subnets: int = 0
     fs_aggregators: int = 0
+    # Validator segregation (requires decoupled): k (= ac_slots_per_finality_slot) also becomes
+    # the number of round groups — AC slot s is round s % k, only validators with
+    # finality_round_of[v] == s % k vote in it, and fc_aggregators are drawn per AC slot instead
+    # of per finality slot. See validator-segregation-spec.md.
+    validator_segregation: bool = False
     # Validator→node distribution (the Dist seam; see skewed-validators-spec.md). "uniform":
     # validator v → node v % N, no schedule field, V from the v knob — the status quo. "tiered":
     # regular nodes draw count i+1 with regular_weights[i]; supernodes draw a truncated log-normal
@@ -96,10 +101,11 @@ class SlotPlan:
     # ac_voters = the VRF-selected validators voting on the availability chain this slot — a flat set
     # (no committees/subnets; one global topic). None when the decoupled phase is off.
     ac_voters: list[AttesterRef] | None = None
-    # finality_aggregators[i] = the aggregator refs for finality subnet i this finality slot —
-    # fs_aggregators VALIDATORS sampled from the entire set (unrelated to subnet membership or
-    # hosting); the host node carries the duty. Set only on a finality-boundary slot
-    # (slot % k == 0), None otherwise.
+    # finality_aggregators[i] = the aggregator refs for finality subnet i — fs_aggregators
+    # VALIDATORS sampled from the entire set (unrelated to subnet membership or hosting); the
+    # host node carries the duty. Base: set only on a finality-boundary slot (slot % k == 0),
+    # once per finality slot. Segregated: set on EVERY slot (each AC slot is a round with its
+    # own fresh draw). None otherwise.
     finality_aggregators: list[list[AttesterRef]] | None = None
 
 
@@ -124,6 +130,13 @@ class Assignment:
     finality_subscribers: list[list[int]] | None = None
     finality_subnet_of: list[int] | None = None
     validators_per_subnet: list[int] | None = None
+    # Validator segregation (None when off). finality_round_of[v] = the round (0..k-1) validator v
+    # votes in — an independent uniform draw, stable for the run; its presence in schedule.json IS
+    # how Go and the analysis detect the variant. validators_per_round_subnet[r][i] = the
+    # (round, subnet) cell counts of the two independent draws (Σ_r per subnet =
+    # validators_per_subnet[i], ΣΣ = V), for the cell-scaled aggregate size and coverage counts.
+    finality_round_of: list[int] | None = None
+    validators_per_round_subnet: list[list[int]] | None = None
     # validator_counts[node] = hosted-validator count (the Dist seam; None under uniform — a
     # uniform schedule.json is byte-identical to before). Ids are contiguous by node.
     validator_counts: list[int] | None = None
@@ -165,6 +178,11 @@ class Assignment:
             d["finality_subscribers"] = self.finality_subscribers
             d["finality_subnet_of"] = self.finality_subnet_of
             d["validators_per_subnet"] = self.validators_per_subnet
+            # Segregation keys appear only under the variant (back-compat: a non-segregated
+            # decoupled schedule.json is byte-identical to before).
+            if self.params.validator_segregation:
+                d["finality_round_of"] = self.finality_round_of
+                d["validators_per_round_subnet"] = self.validators_per_round_subnet
         # The Dist seam: present only under tiered/explicit (back-compat: a uniform
         # schedule.json is unchanged; absent ⇒ consumers fall back to v % N).
         if self.validator_counts is not None:
@@ -188,7 +206,7 @@ def _slot_dict(s: SlotPlan) -> dict:
         d["sync_aggregators"] = s.sync_aggregators
     if s.ac_voters is not None:  # only when the decoupled phase is on
         d["ac_voters"] = [_ref_dict(r) for r in s.ac_voters]
-    if s.finality_aggregators is not None:  # only on a finality-boundary slot
+    if s.finality_aggregators is not None:  # boundary slots (base) / every slot (segregated)
         d["finality_aggregators"] = [
             [_ref_dict(r) for r in aggs] for aggs in s.finality_aggregators
         ]
@@ -263,6 +281,10 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
     finality_subscribers: list[list[int]] | None = None
     finality_subnet_of: list[int] | None = None
     validators_per_subnet: list[int] | None = None
+    finality_round_of: list[int] | None = None
+    validators_per_round_subnet: list[list[int]] | None = None
+    if p.validator_segregation and not p.decoupled:
+        raise ValueError("validator_segregation requires decoupled")
     if p.decoupled:
         if p.num_columns <= 0:
             raise ValueError("decoupled consensus needs data columns (num_columns > 0) — they gate the AC vote")
@@ -275,6 +297,16 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
         validators_per_subnet = [0] * p.fs_subnets
         for s in finality_subnet_of:
             validators_per_subnet[s] += 1
+        if p.validator_segregation:
+            if p.ac_slots_per_finality_slot < 1:
+                raise ValueError("validator_segregation needs ac_slots_per_finality_slot >= 1")
+            finality_round_of = _finality_round_of(p)
+            # The two draws are independent: cell (r, i) = |{v: round r, subnet i}|.
+            validators_per_round_subnet = [
+                [0] * p.fs_subnets for _ in range(p.ac_slots_per_finality_slot)
+            ]
+            for r, s in zip(finality_round_of, finality_subnet_of):
+                validators_per_round_subnet[r][s] += 1
 
     slots = [
         _slot_plan(p, slot, subscribers, proposer_pool[slot % len(proposer_pool)],
@@ -286,6 +318,8 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
         column_subscribers=column_subscribers, full_custody=full_custody,
         sync_subscribers=sync_subscribers, finality_subscribers=finality_subscribers,
         finality_subnet_of=finality_subnet_of, validators_per_subnet=validators_per_subnet,
+        finality_round_of=finality_round_of,
+        validators_per_round_subnet=validators_per_round_subnet,
         validator_counts=counts,
     )
 
@@ -451,6 +485,15 @@ def _finality_subnet_of(p: Params) -> list[int]:
     return [rng.randrange(p.fs_subnets) for _ in range(p.v)]
 
 
+def _finality_round_of(p: Params) -> list[int]:
+    """finality_round_of[v] = the round (0..k-1) validator v votes in under segregation — an
+    independent uniform draw per validator, exactly parallel to _finality_subnet_of and stable
+    for the run (a validator votes in the same round of every finality slot). Stream 13: the
+    next free after 8/9/10/12 (11 is the dist_seed-keyed count draw)."""
+    rng = _rng(p.seed, 13)
+    return [rng.randrange(p.ac_slots_per_finality_slot) for _ in range(p.v)]
+
+
 def _slot_plan(
     p: Params,
     slot: int,
@@ -498,12 +541,18 @@ def _slot_plan(
             AttesterRef(node=node_of(v), val=v, subnet=0, position=pos)  # subnet unused (global)
             for pos, v in enumerate(voters)
         ]
-        if slot % p.ac_slots_per_finality_slot == 0:  # a finality-slot boundary
-            fslot = slot // p.ac_slots_per_finality_slot
-            # Per subnet, fs_aggregators VALIDATORS from the ENTIRE set — unrelated to subnet
-            # membership or hosting. The host node carries the duty (it pre-joins the subnet's
-            # mesh at AC slot n·k−1, generally as a non-member).
-            agg_rng = _rng(p.seed, 10, fslot)
+        # Per subnet, fs_aggregators VALIDATORS from the ENTIRE set — unrelated to subnet
+        # membership or hosting. The host node carries the duty (it pre-joins the subnet's mesh
+        # one AC slot ahead, generally as a non-member). Base: drawn once per finality slot,
+        # keyed by fslot, on the boundary slot. Segregated: a fresh draw EVERY slot (each AC
+        # slot is a round) — same stream (10); the modes are mutually exclusive, so the two
+        # keyings can't collide within a run.
+        agg_rng = None
+        if p.validator_segregation:
+            agg_rng = _rng(p.seed, 10, slot)
+        elif slot % p.ac_slots_per_finality_slot == 0:  # a finality-slot boundary
+            agg_rng = _rng(p.seed, 10, slot // p.ac_slots_per_finality_slot)
+        if agg_rng is not None:
             finality_aggregators = [
                 [
                     AttesterRef(node=node_of(v), val=v, subnet=subnet, position=pos)
