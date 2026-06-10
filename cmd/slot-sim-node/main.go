@@ -88,9 +88,9 @@ func main() {
 		aggDue         = flag.Duration("agg-due", 0, "aggregate emit offset into the slot (0 ⇒ aggregates off)")
 		prep           = flag.Duration("prep", 0, "extra processing before emitting on block receipt")
 		attestVerify   = flag.Duration("attest-verify-delay", 10*time.Millisecond, "attestation batch base verify delay")
-		attestPerItem  = flag.Duration("attest-per-item", 100*time.Microsecond, "attestation per-item verify cost")
-		attestWindow   = flag.Duration("attest-batch-window", 50*time.Millisecond, "attestation batch window")
-		attestBatchMax = flag.Int("attest-batch-max", 200, "max attestations per verify batch (0 = uncapped)")
+		attestPerItem  = flag.Duration("attest-per-item", 10*time.Microsecond, "attestation per-item verify cost")
+		attestWindow   = flag.Duration("attest-batch-window", 10*time.Millisecond, "attestation batch window")
+		attestBatchMax = flag.Int("attest-batch-max", 300, "max attestations per verify batch (0 = uncapped)")
 		rpcLogNode     = flag.Int("rpc-log-node", -1, "node-num to enable gossipsub debug RPC logging on (-1 = off)")
 
 		// Data columns are driven by schedule.json (num_columns/column_subscribers/full_custody);

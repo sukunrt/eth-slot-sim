@@ -49,9 +49,9 @@ class AttestationConfig(BaseModel):
     attestation_due_ms: int = 4000  # ATTESTATION_DUE (3333 bp of a 12 s slot)
     prep_ms: int = 0  # Δ_prep before emitting on block receipt
     verify_delay_ms: int = 10  # batched verifier base delay
-    per_item_ms: float = 0.1  # batched verifier per-attestation cost (0.1 ⇒ 100µs/BLS verify)
-    batch_window_ms: int = 50  # batched verifier window
-    batch_max_items: int = 200  # max attestations per verify batch (0 = uncapped)
+    per_item_ms: float = 0.01  # batched verifier per-attestation cost (0.01 ⇒ 10µs, batched BLS)
+    batch_window_ms: int = 10  # batched verifier window
+    batch_max_items: int = 300  # max attestations per verify batch (0 = uncapped)
     # Aggregate phase (the t≈8 s SignedAggregateAndProof flood on the global topic). Each
     # committee's ~target_aggregators aggregators publish one distinct aggregate each.
     target_aggregators: int = 16  # aggregators per committee (TARGET_AGGREGATORS_PER_COMMITTEE)

@@ -129,13 +129,15 @@ func (n *Node) Start(ctx context.Context) error {
 		pubsub.WithMessageIdFn(MessageIDFunc),
 		pubsub.WithMessageSignaturePolicy(pubsub.StrictNoSign),
 		pubsub.WithNoAuthor(),
-		// 4096: the decoupled finality-attestation burst (~10k votes/subnet at one
-		// instant) overflowed 1000 — ~70 votes died at their publisher in the n1000 run.
-		// The validate (inbound) queue matches: with the capped batched verifier the
-		// backlog now waits in this queue, and 1000 would drop the burst's tail instead
-		// of delaying it.
-		pubsub.WithPeerOutboundQueueSize(4096),
-		pubsub.WithValidateQueueSize(4096),
+		// 10k: the decoupled finality-attestation burst (~10k votes/subnet at one
+		// instant) overflowed 1000 (~70 votes died at their publisher in the early n1000
+		// run) and a multi-key host's own burst can exceed 4096 under tiered skew.
+		pubsub.WithPeerOutboundQueueSize(10000),
+		// 20k: the inbound validate queue is ONE global queue per node, and aggregator
+		// hosts subscribe several finality subnets at once — at 4096, k simultaneous
+		// ~10k-vote bursts dropped 11% of finality attestations in the n500 run, hitting
+		// the multi-subnet aggregator hosts hardest. 20k holds ~2 full subnet bursts.
+		pubsub.WithValidateQueueSize(20000),
 		pubsub.WithMaxMessageSize(maxMessageSize),
 	}
 	if n.RPCLogger != nil {
