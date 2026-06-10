@@ -77,20 +77,21 @@ func main() {
 		seed        = flag.Uint64("seed", 1, "validator rng seed (combined with node-num)")
 		startup     = flag.Duration("startup", 60*time.Second, "bring-up window before slot 0")
 
-		schedulePath  = flag.String("schedule", "", "path to schedule.json (empty → block-only)")
-		attestations  = flag.Bool("attestations", true, "emit attestations (false → block-only; committee still sets the proposer schedule)")
-		syncOn        = flag.Bool("sync", false, "emit sync-committee messages + contributions (members only; needs schedule.json; reuses -att-due/-agg-due)")
-		decoupledOn   = flag.Bool("decoupled", false, "decoupled consensus: emit AC votes + finality votes/aggregates (replaces attestations+sync; needs schedule.json; AC deadline reuses -att-due)")
-		acK           = flag.Int("k", 10, "ac_slots_per_finality_slot (a finality slot spans k AC slots)")
-		fcVoteOffset  = flag.Duration("fc-vote-offset", time.Second, "offset into the finality slot for the per-validator finality-vote burst")
-		fcAggFraction = flag.Int("fc-agg-fraction", 50, "percent of the finality slot when finality aggregates publish")
-		attDue        = flag.Duration("att-due", 4*time.Second, "attestation deadline offset into the slot")
-		aggDue        = flag.Duration("agg-due", 0, "aggregate emit offset into the slot (0 ⇒ aggregates off)")
-		prep          = flag.Duration("prep", 0, "extra processing before emitting on block receipt")
-		attestVerify  = flag.Duration("attest-verify-delay", 10*time.Millisecond, "attestation batch base verify delay")
-		attestPerItem = flag.Duration("attest-per-item", 0, "attestation per-item verify cost")
-		attestWindow  = flag.Duration("attest-batch-window", 50*time.Millisecond, "attestation batch window")
-		rpcLogNode    = flag.Int("rpc-log-node", -1, "node-num to enable gossipsub debug RPC logging on (-1 = off)")
+		schedulePath   = flag.String("schedule", "", "path to schedule.json (empty → block-only)")
+		attestations   = flag.Bool("attestations", true, "emit attestations (false → block-only; committee still sets the proposer schedule)")
+		syncOn         = flag.Bool("sync", false, "emit sync-committee messages + contributions (members only; needs schedule.json; reuses -att-due/-agg-due)")
+		decoupledOn    = flag.Bool("decoupled", false, "decoupled consensus: emit AC votes + finality votes/aggregates (replaces attestations+sync; needs schedule.json; AC deadline reuses -att-due)")
+		acK            = flag.Int("k", 10, "ac_slots_per_finality_slot (a finality slot spans k AC slots)")
+		fcVoteOffset   = flag.Duration("fc-vote-offset", time.Second, "offset into the finality slot for the per-validator finality-vote burst")
+		fcAggFraction  = flag.Int("fc-agg-fraction", 50, "percent of the finality slot when finality aggregates publish")
+		attDue         = flag.Duration("att-due", 4*time.Second, "attestation deadline offset into the slot")
+		aggDue         = flag.Duration("agg-due", 0, "aggregate emit offset into the slot (0 ⇒ aggregates off)")
+		prep           = flag.Duration("prep", 0, "extra processing before emitting on block receipt")
+		attestVerify   = flag.Duration("attest-verify-delay", 10*time.Millisecond, "attestation batch base verify delay")
+		attestPerItem  = flag.Duration("attest-per-item", 100*time.Microsecond, "attestation per-item verify cost")
+		attestWindow   = flag.Duration("attest-batch-window", 50*time.Millisecond, "attestation batch window")
+		attestBatchMax = flag.Int("attest-batch-max", 200, "max attestations per verify batch (0 = uncapped)")
+		rpcLogNode     = flag.Int("rpc-log-node", -1, "node-num to enable gossipsub debug RPC logging on (-1 = off)")
 
 		// Data columns are driven by schedule.json (num_columns/column_subscribers/full_custody);
 		// these size the per-node width-P column verifier.
@@ -130,7 +131,8 @@ func main() {
 		VerifyDelay:       func() time.Duration { return *verifyDelay },
 		AttestVerifyDelay: func() time.Duration { return *attestVerify },
 		AttestPerItem:     *attestPerItem, AttestBatchWindow: *attestWindow,
-		D: *d, Dlo: *dlo, Dhi: *dhi,
+		AttestBatchMax: *attestBatchMax,
+		D:              *d, Dlo: *dlo, Dhi: *dhi,
 	}
 	if sched != nil && sched.NumColumns > 0 { // size the column verifier from this node's role
 		nd.ColVerifyService = func() time.Duration { return *colVerify }

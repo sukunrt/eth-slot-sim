@@ -45,16 +45,17 @@ type params struct {
 	Attest   bool   `json:"attest"`
 	Sync     bool   `json:"sync"` // sync-committee phase (size/subnets/aggregators in schedule.json)
 	// Decoupled-consensus phase (membership/voters in schedule.json). Forces attest/sync off.
-	Decoupled        bool `json:"decoupled"`
-	K                int  `json:"k"`
-	FCVoteOffsetMs   int  `json:"fc_vote_offset_ms"`
-	FCAggFraction    int  `json:"fc_agg_fraction"`
-	AttDueMs         int  `json:"att_due_ms"`
-	AggDueMs         int  `json:"agg_due_ms"` // aggregate phase (0 ⇒ off)
-	PrepMs           int  `json:"prep_ms"`
-	AttVerifyMs      int  `json:"att_verify_ms"`
-	AttPerItemMs     int  `json:"att_per_item_ms"`
-	AttBatchWindowMs int  `json:"att_batch_window_ms"`
+	Decoupled        bool    `json:"decoupled"`
+	K                int     `json:"k"`
+	FCVoteOffsetMs   int     `json:"fc_vote_offset_ms"`
+	FCAggFraction    int     `json:"fc_agg_fraction"`
+	AttDueMs         int     `json:"att_due_ms"`
+	AggDueMs         int     `json:"agg_due_ms"` // aggregate phase (0 ⇒ off)
+	PrepMs           int     `json:"prep_ms"`
+	AttVerifyMs      int     `json:"att_verify_ms"`
+	AttPerItemMs     float64 `json:"att_per_item_ms"` // fractional: 0.1 ⇒ 100µs
+	AttBatchWindowMs int     `json:"att_batch_window_ms"`
+	AttBatchMax      int     `json:"att_batch_max"` // max attestations per batch; 0 = uncapped
 
 	// Data-columns phase (active when schedule.json has num_columns > 0). The verifier P is
 	// sized per node from its full-custody role in schedule.json.
@@ -123,8 +124,9 @@ func TestRun(t *testing.T) {
 			cfg.AggregateDue = time.Duration(p.AggDueMs) * time.Millisecond
 			cfg.Prep = time.Duration(p.PrepMs) * time.Millisecond
 			cfg.AttestVerifyDelay = func() time.Duration { return time.Duration(p.AttVerifyMs) * time.Millisecond }
-			cfg.AttestPerItem = time.Duration(p.AttPerItemMs) * time.Millisecond
+			cfg.AttestPerItem = time.Duration(p.AttPerItemMs * float64(time.Millisecond))
 			cfg.AttestBatchWindow = time.Duration(p.AttBatchWindowMs) * time.Millisecond
+			cfg.AttestBatchMax = p.AttBatchMax
 			if a.NumColumns > 0 { // size the per-node column verifier (P from full-custody role)
 				cfg.ColVerifyService = func() time.Duration { return time.Duration(p.ColVerifyServiceMs) * time.Millisecond }
 				cfg.ColVerifyParallelismSuper = p.ColVerifySuper

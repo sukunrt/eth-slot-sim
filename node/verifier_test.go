@@ -65,9 +65,11 @@ func (f *fixedDelay) callCount() int {
 	return f.calls
 }
 
-func newTestVerifier(t *testing.T, delay func() time.Duration, perAtt, window time.Duration) *batchVerifier {
+func newTestVerifier(
+	t *testing.T, delay func() time.Duration, perAtt, window time.Duration, maxBatch int,
+) *batchVerifier {
 	t.Helper()
-	v := newBatchVerifier(delay, perAtt, window, slog.Default())
+	v := newBatchVerifier(delay, perAtt, window, maxBatch, slog.Default())
 	go v.run()
 	t.Cleanup(func() { v.stop() })
 	return v
@@ -76,7 +78,7 @@ func newTestVerifier(t *testing.T, delay func() time.Duration, perAtt, window ti
 func TestVerifierSingleItem(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sink := &recordingSink{}
-		v := newTestVerifier(t, func() time.Duration { return 20 * time.Millisecond }, 0, 5*time.Millisecond)
+		v := newTestVerifier(t, func() time.Duration { return 20 * time.Millisecond }, 0, 5*time.Millisecond, 0)
 
 		v.submit(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{1, 2, 3}}, sink.callback())
 		time.Sleep(50 * time.Millisecond)
@@ -92,7 +94,7 @@ func TestVerifierSingleItem(t *testing.T) {
 
 func TestVerifierSubmitAndWaitBlocks(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		v := newTestVerifier(t, func() time.Duration { return 10 * time.Millisecond }, 0, 5*time.Millisecond)
+		v := newTestVerifier(t, func() time.Duration { return 10 * time.Millisecond }, 0, 5*time.Millisecond, 0)
 
 		start := time.Now()
 		v.submitAndWait(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{1}})
@@ -110,7 +112,7 @@ func TestVerifierBatchesWithinWindow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sink := &recordingSink{}
 		delay := &fixedDelay{delay: 5 * time.Millisecond}
-		v := newTestVerifier(t, delay.fn(), 0, 50*time.Millisecond)
+		v := newTestVerifier(t, delay.fn(), 0, 50*time.Millisecond, 0)
 
 		v.submit(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{1}}, sink.callback())
 		time.Sleep(10 * time.Millisecond) // verifyBatch finished, window still open
@@ -132,7 +134,7 @@ func TestVerifierItemsDuringVerifyAreQueued(t *testing.T) {
 	// dropped — the run loop must accumulate, not drain-and-drop, while timerRunning.
 	synctest.Test(t, func(t *testing.T) {
 		sink := &recordingSink{}
-		v := newTestVerifier(t, func() time.Duration { return 30 * time.Millisecond }, 0, 5*time.Millisecond)
+		v := newTestVerifier(t, func() time.Duration { return 30 * time.Millisecond }, 0, 5*time.Millisecond, 0)
 
 		v.submit(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{1}}, sink.callback())
 		time.Sleep(10 * time.Millisecond) // mid-verification
@@ -150,7 +152,7 @@ func TestVerifierManyItemsNoneDropped(t *testing.T) {
 	// The t≈4s flood in a test tube: a burst from many goroutines, all verified.
 	synctest.Test(t, func(t *testing.T) {
 		sink := &recordingSink{}
-		v := newTestVerifier(t, func() time.Duration { return 5 * time.Millisecond }, 0, 5*time.Millisecond)
+		v := newTestVerifier(t, func() time.Duration { return 5 * time.Millisecond }, 0, 5*time.Millisecond, 0)
 
 		const n = 50
 		var wg sync.WaitGroup
@@ -171,7 +173,7 @@ func TestVerifierManyItemsNoneDropped(t *testing.T) {
 func TestVerifierStopDrains(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sink := &recordingSink{}
-		v := newBatchVerifier(func() time.Duration { return 5 * time.Millisecond }, 0, 2*time.Millisecond, slog.Default())
+		v := newBatchVerifier(func() time.Duration { return 5 * time.Millisecond }, 0, 2*time.Millisecond, 0, slog.Default())
 		go v.run()
 
 		v.submit(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{1, 2}}, sink.callback())
@@ -186,7 +188,7 @@ func TestVerifierStopDrains(t *testing.T) {
 func TestVerifierStopWithoutWork(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sink := &recordingSink{}
-		v := newBatchVerifier(func() time.Duration { return 5 * time.Millisecond }, 0, 2*time.Millisecond, slog.Default())
+		v := newBatchVerifier(func() time.Duration { return 5 * time.Millisecond }, 0, 2*time.Millisecond, 0, slog.Default())
 		go v.run()
 		v.stop() // idle verifier returns immediately (the busy-spin guard)
 		if got := sink.count(); got != 0 {
@@ -201,7 +203,7 @@ func TestVerifierPerAttestationDelayCounted(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sink := &recordingSink{}
 		delay := &fixedDelay{delay: 10 * time.Millisecond}
-		v := newTestVerifier(t, delay.fn(), 1*time.Millisecond, 5*time.Millisecond)
+		v := newTestVerifier(t, delay.fn(), 1*time.Millisecond, 5*time.Millisecond, 0)
 
 		v.submit(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{1, 2, 3}}, sink.callback())
 		time.Sleep(50 * time.Millisecond)
@@ -222,7 +224,7 @@ func TestVerifierMultipleTopicsAndSlots(t *testing.T) {
 	// their Topic/Slot intact.
 	synctest.Test(t, func(t *testing.T) {
 		sink := &recordingSink{}
-		v := newTestVerifier(t, func() time.Duration { return 10 * time.Millisecond }, 0, 5*time.Millisecond)
+		v := newTestVerifier(t, func() time.Duration { return 10 * time.Millisecond }, 0, 5*time.Millisecond, 0)
 
 		v.submit(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{1}}, sink.callback())
 		v.submit(verificationItem{Topic: "t0", Slot: 2, Attestations: []any{2}}, sink.callback())
@@ -250,7 +252,7 @@ func TestVerifierMultipleTopicsAndSlots(t *testing.T) {
 
 func TestVerifierSubmitAndWaitMultipleConcurrent(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		v := newTestVerifier(t, func() time.Duration { return 15 * time.Millisecond }, 0, 5*time.Millisecond)
+		v := newTestVerifier(t, func() time.Duration { return 15 * time.Millisecond }, 0, 5*time.Millisecond, 0)
 
 		var wg sync.WaitGroup
 		var mu sync.Mutex
@@ -275,9 +277,84 @@ func TestVerifierSubmitAndWaitMultipleConcurrent(t *testing.T) {
 
 func TestVerifierStopIsSafe(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		v := newBatchVerifier(func() time.Duration { return time.Millisecond }, 0, time.Millisecond, slog.Default())
+		v := newBatchVerifier(func() time.Duration { return time.Millisecond }, 0, time.Millisecond, 0, slog.Default())
 		go v.run()
 		v.stop() // single stop must not panic
+	})
+}
+
+func TestVerifierBatchCapSplits(t *testing.T) {
+	// maxBatchItems bounds each drain: 5 items queued behind a busy verifier dispatch as
+	// capped batches of 2+2+1, not one batch of 5.
+	synctest.Test(t, func(t *testing.T) {
+		sink := &recordingSink{}
+		delay := &fixedDelay{delay: 10 * time.Millisecond}
+		v := newTestVerifier(t, delay.fn(), 0, 5*time.Millisecond, 2)
+
+		v.submit(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{0}}, sink.callback())
+		time.Sleep(time.Millisecond) // batch 1 (the lone primer) is mid-verification
+		for i := range 5 {
+			v.submit(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{i}}, sink.callback())
+		}
+		time.Sleep(time.Second)
+
+		if got := sink.totalAttestations(); got != 6 {
+			t.Fatalf("attestations = %d, want 6 (none dropped)", got)
+		}
+		if got := delay.callCount(); got != 4 {
+			t.Fatalf("batches = %d, want 4 (primer + capped 2+2+1)", got)
+		}
+	})
+}
+
+func TestVerifierCapBoundsBatchDelay(t *testing.T) {
+	// A capped batch sleeps base + cap·perItem, not base + queued·perItem: with cap 2,
+	// base 10ms, perItem 5ms, the first pair of a 4-item backlog releases at +20ms and
+	// the second pair a batch later — never all four behind a 30ms sleep.
+	synctest.Test(t, func(t *testing.T) {
+		sink := &recordingSink{}
+		v := newTestVerifier(t, func() time.Duration { return 10 * time.Millisecond },
+			5*time.Millisecond, 5*time.Millisecond, 2)
+
+		v.submit(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{0}}, sink.callback())
+		time.Sleep(time.Millisecond) // primer (base + 1·perItem = 15ms) is mid-verification
+		for i := range 4 {
+			v.submit(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{i}}, sink.callback())
+		}
+		// Primer done at t≈16ms; window (5ms) already expired ⇒ capped pairs drain
+		// back-to-back at +20ms each: t≈36ms and t≈56ms.
+		time.Sleep(20 * time.Millisecond) // t≈21ms
+		if got := sink.count(); got != 1 {
+			t.Fatalf("count at 21ms = %d, want 1 (primer only)", got)
+		}
+		time.Sleep(20 * time.Millisecond) // t≈41ms
+		if got := sink.count(); got != 3 {
+			t.Fatalf("count at 41ms = %d, want 3 (capped pair, not the whole backlog)", got)
+		}
+		time.Sleep(20 * time.Millisecond) // t≈61ms
+		if got := sink.count(); got != 5 {
+			t.Fatalf("count at 61ms = %d, want 5 (second pair)", got)
+		}
+	})
+}
+
+func TestVerifierStopDrainsPastCap(t *testing.T) {
+	// stop() must keep draining capped batches until the queue is empty — a cap smaller
+	// than the backlog must not drop the leftover.
+	synctest.Test(t, func(t *testing.T) {
+		sink := &recordingSink{}
+		v := newBatchVerifier(func() time.Duration { return 5 * time.Millisecond },
+			0, 2*time.Millisecond, 1, slog.Default())
+		go v.run()
+
+		for i := range 3 {
+			v.submit(verificationItem{Topic: "t0", Slot: 1, Attestations: []any{i}}, sink.callback())
+		}
+		v.stop() // blocks until queued items are validated
+
+		if got := sink.totalAttestations(); got != 3 {
+			t.Fatalf("attestations = %d, want 3 (drained past the cap on stop)", got)
+		}
 	})
 }
 
@@ -287,7 +364,7 @@ func TestVerifierBatchDelayGrowsWithK(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const base, perAtt = 10 * time.Millisecond, 2 * time.Millisecond
 		measure := func(k int) time.Duration {
-			v := newTestVerifier(t, func() time.Duration { return base }, perAtt, 5*time.Millisecond)
+			v := newTestVerifier(t, func() time.Duration { return base }, perAtt, 5*time.Millisecond, 0)
 			atts := make([]any, k)
 			start := time.Now()
 			v.submitAndWait(verificationItem{Topic: "t0", Slot: 1, Attestations: atts})

@@ -24,9 +24,12 @@ type queuedItem struct {
 }
 
 // batchVerifier pipelines attestation verification. submit() pushes items into a
-// mutex-protected queue. run() loops on a timer: every batchWindow it swaps out the
-// accumulated queue, verifies the batch (sleeping for the verification delay), then
-// loops. While one batch verifies, new items accumulate in the queue for the next round.
+// mutex-protected queue. run() loops on a timer: every batchWindow it drains up to
+// maxBatchItems attestations from the queue, verifies the batch (sleeping for the
+// verification delay), then loops. While one batch verifies, new items — and any capped
+// leftover — accumulate in the queue for the next round, so throughput is bounded at
+// maxBatchItems per window and a single batch never blocks longer than
+// base + maxBatchItems·perItem.
 //
 // Copied from batched-attestation-sim's verifier — the batch window + base delay +
 // per-item cost is the validation-as-sleep model on the per-hop path.
@@ -34,6 +37,7 @@ type batchVerifier struct {
 	verificationDelay   func() time.Duration
 	perAttestationDelay time.Duration
 	batchWindow         time.Duration
+	maxBatchItems       int // max attestations drained per batch; 0 = uncapped
 	logger              *slog.Logger
 
 	mu      sync.Mutex
@@ -47,12 +51,14 @@ func newBatchVerifier(
 	verificationDelay func() time.Duration,
 	perAttestationDelay time.Duration,
 	batchWindow time.Duration,
+	maxBatchItems int,
 	logger *slog.Logger,
 ) *batchVerifier {
 	return &batchVerifier{
 		verificationDelay:   verificationDelay,
 		perAttestationDelay: perAttestationDelay,
 		batchWindow:         batchWindow,
+		maxBatchItems:       maxBatchItems,
 		logger:              logger,
 		notify:              make(chan struct{}, 1),
 		done:                make(chan struct{}),
@@ -113,8 +119,11 @@ func (v *batchVerifier) run() {
 			continue
 		}
 		queueLen := len(v.queue)
-		batch := v.queue
-		v.queue = nil
+		n := batchEnd(v.queue, v.maxBatchItems)
+		batch := v.queue[:n]
+		if v.queue = v.queue[n:]; len(v.queue) == 0 {
+			v.queue = nil
+		}
 		v.mu.Unlock()
 
 		if stopped && queueLen == 0 {
@@ -128,11 +137,37 @@ func (v *batchVerifier) run() {
 		v.verifyBatch(batch)
 		v.mu.Lock()
 		stopped = v.stopped
+		drained := len(v.queue) == 0
 		v.mu.Unlock()
 		if stopped {
-			return
+			if drained {
+				return
+			}
+			// Capped leftover on stop: re-signal so the select above doesn't park on the
+			// window timer — stopped drains run back-to-back until the queue is empty.
+			select {
+			case v.notify <- struct{}{}:
+			default:
+			}
 		}
 	}
+}
+
+// batchEnd returns how many queued items the next batch takes: whole items while their
+// attestation total (the per-item sleep multiplier) stays within maxItems, always at
+// least one. The leftover stays queued for the next window. maxItems 0 ⇒ uncapped.
+func batchEnd(queue []queuedItem, maxItems int) int {
+	if maxItems <= 0 {
+		return len(queue)
+	}
+	n, atts := 0, 0
+	for n < len(queue) {
+		if atts += len(queue[n].item.Attestations); n > 0 && atts > maxItems {
+			break
+		}
+		n++
+	}
+	return n
 }
 
 // verifyBatch simulates batch verification and dispatches each item.

@@ -191,6 +191,7 @@ def _host_args(
             f"-attest-verify-delay={a.verify_delay_ms}ms",
             f"-attest-per-item={a.per_item_ms}ms",
             f"-attest-batch-window={a.batch_window_ms}ms",
+            f"-attest-batch-max={a.batch_max_items}",
         ]
     if config.sync is not None:
         # size/subnets/aggregators ride schedule.json; the deadlines reuse -att-due/-agg-due.
@@ -299,6 +300,7 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
             att_verify_ms=a.verify_delay_ms,
             att_per_item_ms=a.per_item_ms,
             att_batch_window_ms=a.batch_window_ms,
+            att_batch_max=a.batch_max_items,
         )
     dc = config.data_columns
     if dc is not None and dc.enabled:  # custody lives in schedule.json; these size the verifier

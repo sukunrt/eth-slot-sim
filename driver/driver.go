@@ -53,6 +53,7 @@ type Config struct {
 	AttestVerifyDelay func() time.Duration
 	AttestPerItem     time.Duration
 	AttestBatchWindow time.Duration
+	AttestBatchMax    int // max attestations per verify batch; 0 = uncapped
 
 	// Aggregate phase (optional). 0 ⇒ no aggregates. Each committee's aggregators (from the
 	// committee assignment) publish one distinct aggregate each at this offset.
@@ -107,6 +108,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 			AttestVerifyDelay: cfg.AttestVerifyDelay,
 			AttestPerItem:     cfg.AttestPerItem,
 			AttestBatchWindow: cfg.AttestBatchWindow,
+			AttestBatchMax:    cfg.AttestBatchMax,
 			D:                 cfg.D, Dlo: cfg.Dlo, Dhi: cfg.Dhi,
 		}
 		// Size the column verifier from the node's full-custody role (custody applies even when

@@ -72,6 +72,7 @@ type Node struct {
 	AttestVerifyDelay func() time.Duration
 	AttestPerItem     time.Duration
 	AttestBatchWindow time.Duration
+	AttestBatchMax    int // max attestations per verify batch; 0 = uncapped
 
 	// Column verify-hook (width-P semaphore): models the t=0 column burst as a P-server
 	// per-core queue. ColVerifyService is the per-column cost; ColVerifyParallelism is P (16
@@ -245,7 +246,7 @@ func (n *Node) batchVerifierFor(class string) *batchVerifier {
 	if window <= 0 {
 		window = defaultBatchWindow
 	}
-	v := newBatchVerifier(base, n.AttestPerItem, window, slog.Default())
+	v := newBatchVerifier(base, n.AttestPerItem, window, n.AttestBatchMax, slog.Default())
 	go v.run()
 	n.verifiers[class] = v
 	return v
