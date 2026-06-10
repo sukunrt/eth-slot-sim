@@ -984,6 +984,122 @@ def test_load_finality_subscribers_none_without_decoupled(tmp_path):
     assert ca.load_finality_subscribers(tmp_path) is None
 
 
+# --- validator segregation (per-AC-slot rounds; finality_round_of in schedule.json) ----
+#
+# Under segregation the slot field carries the AC slot: expected voters of slot s are the
+# validators whose round is s % k, aggregators ride EVERY slot (keyed by it), and the NEXT
+# slot's aggregator hosts — pre-joined before slot s's votes publish — are allowed (not leaks)
+# but not required receivers.
+
+
+def _segregated_fc(n, v, finality_subscribers, finality_subnet_of, finality_round_of, k=2,
+                   num_slots=2, slot_aggs=None):
+    """slot_aggs[slot] = per-subnet VALIDATOR id lists riding EVERY slot (the per-round draw)."""
+    slots = []
+    for s in range(num_slots):
+        sp = {"slot": s, "committees": [], "subnet_of": [], "proposer": 0}
+        if slot_aggs is not None:
+            sp["finality_aggregators"] = _fc_agg_refs(n, slot_aggs[s])
+        slots.append(sp)
+    vprs = [[0] * len(finality_subscribers) for _ in range(k)]
+    for r, sub in zip(finality_round_of, finality_subnet_of):
+        vprs[r][sub] += 1
+    return {
+        "params": {"n": n, "v": v, "ac_slots_per_finality_slot": k},
+        "subnet_subscribers": [],
+        "finality_subscribers": finality_subscribers,
+        "finality_subnet_of": finality_subnet_of,
+        "finality_round_of": finality_round_of,
+        "validators_per_round_subnet": vprs,
+        "slots": slots,
+    }
+
+
+def test_segregated_vote_expected_round_filtered_csv(tmp_path):
+    # V=4 (val==host), subnet 0 {0,2}, subnet 1 {1,3}; rounds: vals 0,1 → 0; vals 2,3 → 1.
+    # Slot 0 expects ONLY round-0 votes (vals 0,1), slot 1 only round-1 (vals 2,3) — 4 votes
+    # total over the fslot, not 8 (the base analyzer would expect every val every key).
+    data = _segregated_fc(4, 4, [[0, 2], [1, 3]], [0, 1, 0, 1], [0, 0, 1, 1])
+    csv_path = tmp_path / "simnet_arrivals.csv"
+    csv_path.write_text(
+        "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
+        "2,0,8,0,0,40,false\n"  # slot 0: val 0 (round 0) reaches mate 2
+        "3,0,8,1,1,40,false\n"  # slot 0: val 1 (round 0) reaches mate 3
+        "0,1,8,0,2,40,false\n"  # slot 1: val 2 (round 1) reaches mate 0
+        "1,1,8,1,3,40,false\n"  # slot 1: val 3 (round 1) reaches mate 1
+    )
+    res = ca.analyze_finality_votes_csv(csv_path, data)
+    assert res.expected == 4 and res.arrivals == 4 and res.published == 4
+    assert res.missing == [] and res.leaked == [] and res.duplicates == []
+    assert res.ok
+
+
+def test_segregated_vote_missing_detected_per_slot(tmp_path):
+    data = _segregated_fc(4, 4, [[0, 2], [1, 3]], [0, 1, 0, 1], [0, 0, 1, 1])
+    csv_path = tmp_path / "simnet_arrivals.csv"
+    csv_path.write_text(
+        "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
+        "2,0,8,0,0,40,false\n"
+        "3,0,8,1,1,40,false\n"
+        "1,1,8,1,3,40,false\n"  # val 2's slot-1 vote never reached member 0
+    )
+    res = ca.analyze_finality_votes_csv(csv_path, data)
+    assert res.missing == [(0, 1, 0, 2)]
+    assert not res.ok
+
+
+def test_segregated_receivers_aggregator_keyed_by_ac_slot():
+    # Subnet 0 members {1,2}; val 0 (host 0, round 0) publishes in slot 0. Slot 0's subnet-0
+    # aggregator host 3 is REQUIRED; slot 1's aggregator host 4 pre-joined at slot 0's start, so
+    # its arrival is ALLOWED (not a leak) but its absence is no miss; node 5 is a leak.
+    data = _segregated_fc(6, 6, [[1, 2], [4, 5]], [0] * 6, [0, 1, 0, 1, 0, 1],
+                          slot_aggs=[[[3], []], [[4], []]])
+    base = [_fvpub(0, 0, 0, 0, 0), _fvarr(1, 0, 0, 0, 0, 200), _fvarr(2, 0, 0, 0, 0, 200),
+            _fvarr(3, 0, 0, 0, 0, 220)]
+    pubs, arrs = ca.parse_events(base)
+    res = ca.analyze_finality_votes(pubs, arrs, data)
+    assert res.expected == 3 and res.missing == [] and res.leaked == []
+    assert res.ok
+    # + the next slot's aggregator host: allowed, still ok.
+    pubs, arrs = ca.parse_events(base + [_fvarr(4, 0, 0, 0, 0, 230)])
+    res = ca.analyze_finality_votes(pubs, arrs, data)
+    assert res.missing == [] and res.leaked == [] and res.ok
+    # Without the slot's OWN aggregator host: a miss.
+    pubs, arrs = ca.parse_events(base[:-1])
+    res = ca.analyze_finality_votes(pubs, arrs, data)
+    assert res.missing == [(3, 0, 0, 0)] and not res.ok
+    # An unrelated node: a leak.
+    pubs, arrs = ca.parse_events(base + [_fvarr(5, 0, 0, 0, 0, 230)])
+    res = ca.analyze_finality_votes(pubs, arrs, data)
+    assert res.leaked == [(5, 0, 0, 0)] and not res.ok
+
+
+def test_segregated_aggregates_published_every_slot():
+    # One subnet, aggregator host 0 in slot 0 and host 1 in slot 1 — keyed by the AC slot, one
+    # aggregate per slot reaching N−1 (the base analyzer would only read boundary slot 0).
+    data = _segregated_fc(4, 4, [[0, 1, 2, 3]], [0] * 4, [0, 1, 0, 1],
+                          slot_aggs=[[[0]], [[1]]])
+    lines = [_fapub(0, 0, 0, 800), _fapub(1, 0, 1, 800)] + [
+        _faarr(node, s, 0, agg, 900) for s, agg in ((0, 0), (1, 1)) for node in set(range(4)) - {agg}
+    ]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_finality_aggregates(pubs, arrs, data)
+    assert res.published == 2 and res.expected == 6 and res.arrivals == 6
+    assert res.ok
+
+
+def test_load_finality_rounds(tmp_path):
+    (tmp_path / "schedule.json").write_text(
+        '{"subnet_subscribers": [], "finality_round_of": [0, 1, 0], "slots": []}'
+    )
+    assert ca.load_finality_rounds(tmp_path) == [0, 1, 0]
+
+
+def test_load_finality_rounds_none_without_segregation(tmp_path):
+    (tmp_path / "schedule.json").write_text('{"subnet_subscribers": [], "slots": []}')
+    assert ca.load_finality_rounds(tmp_path) is None
+
+
 # --- finality aggregates (kind=9, global topic, distinct per aggregator host) ----------
 #
 # Each finality-subnet aggregator HOST publishes ONE distinct aggregate (the host node rides

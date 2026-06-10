@@ -635,21 +635,39 @@ def analyze_ac_votes_csv(path: Path, schedule_data: dict) -> AttestResult:
     return _ac_vote_result(published, n, counts, received, delays_ms)
 
 
-def _finality_receivers(schedule_data: dict) -> Callable[[int, int], set[int]]:
-    """(finality_slot, subnet) → the expected receiver set of a vote there: the subnet's stable
-    members ∪ that finality slot's aggregator HOST nodes for the subnet. The hosts are subscribed
-    from the pre-join slot through the aggregation deadline, and collecting the slot's votes is
-    their whole job — so they are REQUIRED receivers, not leaks. (The publisher is excluded by
+def _finality_receivers(
+    schedule_data: dict,
+) -> tuple[Callable[[int, int], set[int]], Callable[[int, int], set[int]]]:
+    """(required, allowed) receiver sets of a vote keyed by (round key, subnet) — the round key
+    is the finality slot in base mode, the AC slot under segregation (finality_round_of present).
+    required = the subnet's stable members ∪ that round's aggregator HOST nodes: the hosts are
+    subscribed from the pre-join through the aggregation deadline, and collecting the round's
+    votes is their whole job — REQUIRED receivers, not leaks. Under segregation `allowed` also
+    includes the NEXT slot's aggregator hosts: they pre-join at the start of slot s (for s+1),
+    BEFORE slot s's votes publish, so they hear the round's tail by construction — legitimate
+    receivers, but not required (their mesh may still be forming). (The publisher is excluded by
     the callers, which know each vote's host.)"""
     members = {i: set(m) for i, m in enumerate(schedule_data["finality_subscribers"])}
     k = schedule_data["params"]["ac_slots_per_finality_slot"]
+    segregated = "finality_round_of" in schedule_data
     agg_hosts: dict[tuple[int, int], set[int]] = {}
     for sp in schedule_data["slots"]:
-        if sp["slot"] % k != 0:
+        if not segregated and sp["slot"] % k != 0:
             continue
+        key = sp["slot"] if segregated else sp["slot"] // k
         for subnet, refs in enumerate(sp.get("finality_aggregators") or []):
-            agg_hosts[(sp["slot"] // k, subnet)] = {r["node"] for r in refs}
-    return lambda fslot, subnet: members.get(subnet, set()) | agg_hosts.get((fslot, subnet), set())
+            agg_hosts[(key, subnet)] = {r["node"] for r in refs}
+
+    def required(key: int, subnet: int) -> set[int]:
+        return members.get(subnet, set()) | agg_hosts.get((key, subnet), set())
+
+    def allowed(key: int, subnet: int) -> set[int]:
+        out = required(key, subnet)
+        if segregated:
+            out = out | agg_hosts.get((key + 1, subnet), set())
+        return out
+
+    return required, allowed
 
 
 def analyze_finality_votes(
@@ -658,22 +676,31 @@ def analyze_finality_votes(
     schedule_data: dict,
 ) -> SyncMessageResult:
     """Cross-check finality-vote arrivals (Shadow slog) against the expected receiver sets: each
-    validator's vote reaches exactly _finality_receivers(fslot, subnet) \\ {host} — no missing,
-    leaked, or dup. The validator is the attester field and the host is the origin (which it's
-    excluded from), like an attestation; the finality slot rides the slot field.
-    Dissemination-only (no voted bool)."""
-    receivers = _finality_receivers(schedule_data)
+    validator's vote reaches the required receivers (_finality_receivers) \\ {host} — no missing,
+    leaked (beyond the allowed set), or dup. The validator is the attester field and the host is
+    the origin (which it's excluded from), like an attestation; the slot field carries the
+    finality slot (base) or the AC slot (segregation — the expected sets derive from the actual
+    publishes, so the round filter is implicit). Dissemination-only (no voted bool)."""
+    required, allowed = _finality_receivers(schedule_data)
     fv_pubs = {(s, sub, a, o): t for (k, s, sub, a, o), (t, _v) in pubs.items() if k == FINALITY_VOTE_KIND}
     fv_arrs = [(n, s, sub, a, o, t) for (n, k, s, sub, a, o, t) in arrs if k == FINALITY_VOTE_KIND]
 
-    counts = Counter((n, s, sub, a, o) for n, s, sub, a, o, _ in fv_arrs)
+    # Arrivals at allowed-but-not-required receivers are real receipts but outside the strict
+    # got==want contract — dropped from the accounting (not leaks, not counted); beyond the
+    # allowed set is a leak.
+    leaked = sorted(
+        (n, s, sub, a) for n, s, sub, a, _o, _t in fv_arrs if n not in allowed(s, sub)
+    )
+    strict = [(n, s, sub, a, o, t) for n, s, sub, a, o, t in fv_arrs if n in required(s, sub)]
+
+    counts = Counter((n, s, sub, a, o) for n, s, sub, a, o, _ in strict)
     received = set(counts)
     duplicates = sorted((n, s, sub, a) for (n, s, sub, a, _o), c in counts.items() if c > 1)
 
     missing: list[tuple[int, int, int, int]] = []
     expected = 0
     for slot, subnet, val, host in fv_pubs:
-        for node in receivers(slot, subnet):
+        for node in required(slot, subnet):
             if node == host:
                 continue
             expected += 1
@@ -681,24 +708,22 @@ def analyze_finality_votes(
                 missing.append((node, slot, subnet, val))
     missing.sort()
 
-    leaked = sorted(
-        (n, s, sub, a) for n, s, sub, a, _o, _t in fv_arrs if n not in receivers(s, sub)
-    )
     delays_ms = sorted(
-        (t - fv_pubs[(s, sub, a, o)]) / 1e6 for n, s, sub, a, o, t in fv_arrs if (s, sub, a, o) in fv_pubs
+        (t - fv_pubs[(s, sub, a, o)]) / 1e6 for n, s, sub, a, o, t in strict if (s, sub, a, o) in fv_pubs
     )
     return SyncMessageResult(
-        len(fv_arrs), expected, missing, leaked, duplicates, delays_ms, 0.0, len(fv_pubs)
+        len(strict), expected, missing, leaked, duplicates, delays_ms, 0.0, len(fv_pubs)
     )
 
 
 def _finality_votes(schedule_data: dict) -> list[tuple[int, int, int]]:
-    """The (subnet, val, host) of every published vote: one per validator per finality slot, on
-    ITS validator's drawn subnet (finality_subnet_of — subnets partition the validator set, so a
-    host publishes wherever its keys landed, fanning out beyond its own membership). A validator's
-    host comes from validator_counts when present (the Dist seam: node i hosts the contiguous ids
-    [Σ counts[:i], Σ counts[:i+1])), else uniform V→N (val % N == host) — the same duties
-    FinalityVoteDuties produces."""
+    """The (subnet, val, host) of every potential vote, on ITS validator's drawn subnet
+    (finality_subnet_of — subnets partition the validator set, so a host publishes wherever its
+    keys landed, fanning out beyond its own membership). One per validator per finality slot in
+    base mode; under segregation the caller filters to the round's validators per AC slot. A
+    validator's host comes from validator_counts when present (the Dist seam: node i hosts the
+    contiguous ids [Σ counts[:i], Σ counts[:i+1])), else uniform V→N (val % N == host) — the
+    same duties FinalityVoteDuties produces."""
     n = schedule_data["params"]["n"]
     subnet_of = schedule_data["finality_subnet_of"]
     counts = schedule_data.get("validator_counts")
@@ -712,15 +737,21 @@ def _finality_votes(schedule_data: dict) -> list[tuple[int, int, int]]:
 
 
 def analyze_finality_votes_csv(path: Path, schedule_data: dict) -> SyncMessageResult:
-    """Finality-vote coverage for the simnet backend. Keyed by (slot=finality slot, subnet,
+    """Finality-vote coverage for the simnet backend. Keyed by (slot=round key, subnet,
     attester=val) with no origin column; a vote's host (publisher, excluded from its coverage)
     comes from _finality_votes (validator_counts when present, else val % N). Expected receivers
-    come from _finality_receivers (stable members ∪ the slot's aggregator hosts); each finality
-    slot every validator publishes one vote on its drawn subnet."""
+    come from _finality_receivers (stable members ∪ the round's aggregator hosts). Base: every
+    validator publishes once per finality slot. Segregated: the expected voters of AC slot s are
+    the round-(s % k) validators, one slot per fslot each; allowed-but-not-required arrivals
+    (the next round's pre-joined aggregator hosts) are dropped from the strict accounting."""
     votes = _finality_votes(schedule_data)
-    receivers = _finality_receivers(schedule_data)
-    fslots = sorted({sp["slot"] // schedule_data["params"]["ac_slots_per_finality_slot"]
-                     for sp in schedule_data["slots"]})
+    required, allowed = _finality_receivers(schedule_data)
+    k = schedule_data["params"]["ac_slots_per_finality_slot"]
+    rounds = schedule_data.get("finality_round_of")
+    if rounds is None:  # base: one vote burst per finality slot, keyed by it
+        keys = sorted({sp["slot"] // k for sp in schedule_data["slots"]})
+    else:  # segregated: every AC slot is a round, keyed by the AC slot itself
+        keys = [sp["slot"] for sp in schedule_data["slots"]]
 
     received: dict[tuple[int, int, int], set[int]] = {}
     counts: Counter = Counter()
@@ -732,24 +763,30 @@ def analyze_finality_votes_csv(path: Path, schedule_data: dict) -> SyncMessageRe
                 continue
             slot, subnet, val = int(r["slot"]), int(r["subnet"]), int(r["attester"])
             node = int(r["node"])
+            if node not in allowed(slot, subnet):
+                leaked.append((node, slot, subnet, val))
+                continue
+            if node not in required(slot, subnet):
+                continue  # the next round's pre-joined aggregator host: real, outside the contract
             counts[(node, slot, subnet, val)] += 1
             received.setdefault((slot, subnet, val), set()).add(node)
             delays_ms.append(float(r["delay_ms"]))
-            if node not in receivers(slot, subnet):
-                leaked.append((node, slot, subnet, val))
 
     missing: list[tuple[int, int, int, int]] = []
     expected = 0
-    for fslot in fslots:
+    published = 0
+    for key in keys:
         for subnet, val, host in votes:
-            for node in receivers(fslot, subnet):
+            if rounds is not None and rounds[val] != key % k:
+                continue  # not this round's validator
+            published += 1
+            for node in required(key, subnet):
                 if node == host:
                     continue
                 expected += 1
-                if node not in received.get((fslot, subnet, val), set()):
-                    missing.append((node, fslot, subnet, val))
+                if node not in received.get((key, subnet, val), set()):
+                    missing.append((node, key, subnet, val))
     duplicates = sorted(k for k, c in counts.items() if c > 1)
-    published = len(fslots) * len(votes)
     return SyncMessageResult(
         sum(counts.values()), expected, sorted(missing), sorted(leaked), duplicates,
         sorted(delays_ms), 0.0, published,
@@ -757,19 +794,22 @@ def analyze_finality_votes_csv(path: Path, schedule_data: dict) -> SyncMessageRe
 
 
 def _finality_aggregate_published(schedule_data: dict) -> tuple[set[tuple[int, int, int]], int]:
-    """The published finality aggregates (finality_slot, subnet, aggregator host node) — one per
-    distinct HOST (two selected validators on one node dedupe to one aggregate) — and N.
-    finality_aggregators rides each finality-BOUNDARY slot (slot % k == 0, k =
-    ac_slots_per_finality_slot) as per-subnet validator refs; finality_slot = slot // k."""
+    """The published finality aggregates (round key, subnet, aggregator host node) — one per
+    distinct HOST (two selected validators on one node dedupe to one aggregate) — and N. Base:
+    finality_aggregators rides each finality-BOUNDARY slot (slot % k == 0), keyed by the
+    finality slot (slot // k). Segregated (finality_round_of present): EVERY slot carries a
+    fresh draw, keyed by the AC slot itself."""
     n = schedule_data["params"]["n"]
     k = schedule_data["params"]["ac_slots_per_finality_slot"]
+    segregated = "finality_round_of" in schedule_data
     published: set[tuple[int, int, int]] = set()
     for sp in schedule_data["slots"]:
-        if sp["slot"] % k != 0:
+        if not segregated and sp["slot"] % k != 0:
             continue
+        key = sp["slot"] if segregated else sp["slot"] // k
         for subnet, refs in enumerate(sp.get("finality_aggregators") or []):
             for ref in refs:
-                published.add((sp["slot"] // k, subnet, ref["node"]))
+                published.add((key, subnet, ref["node"]))
     return published, n
 
 
@@ -857,6 +897,15 @@ def load_finality_subscribers(run_dir: Path) -> dict[int, set[int]] | None:
     if subs is None:
         return None
     return {i: set(members) for i, members in enumerate(subs)}
+
+
+def load_finality_rounds(run_dir: Path) -> list[int] | None:
+    """finality_round_of (validator → round, the per-AC-slot segregation draw) from
+    schedule.json, or None when the run is not segregated — the variant detector."""
+    path = run_dir / "schedule.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text()).get("finality_round_of")
 
 
 def load_proposers(run_dir: Path) -> list[int] | None:
