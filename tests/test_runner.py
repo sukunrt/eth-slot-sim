@@ -253,3 +253,49 @@ def test_stop_time_covers_startup_slots_drain():
     sh = runner.generate_shadow_yaml(cfg, _toy_topology(), {})
     minutes = float(sh["general"]["stop_time"].removesuffix(" min"))
     assert minutes * 60 >= 120 + 10 * 12 + 12  # startup + run + at least one drain slot
+
+
+def test_host_args_partial_flags():
+    cfg = config.SimConfig(
+        topology=config.TopologyConfig(num_nodes=3),
+        attestation=config.AttestationConfig(
+            transport="partial", partial=config.PartialConfig(publish_interval_ms=50)),
+    )
+    args = runner._host_args(cfg, 0, 3, [1], "/run/schedule.json")
+    for token in (
+        "-transport=partial",
+        "-partial-publish-interval=50ms",
+        "-partial-max-peers-per-attestation=0",
+        "-partial-max-iwant-per-position=10",
+        "-partial-attestation-data-size=128",
+        "-partial-signature-size=96",
+        "-partial-disable-metadata-gossip=false",
+    ):
+        assert token in args, f"missing {token} in {args!r}"
+    # Classic (the default): no transport flags at all — the binary defaults to classic.
+    classic = runner._host_args(
+        config.SimConfig(topology=config.TopologyConfig(num_nodes=3),
+                         attestation=config.AttestationConfig()),
+        0, 3, [1], "/run/schedule.json")
+    assert "-transport" not in classic
+
+
+def test_simnet_params_carry_partial_knobs():
+    cfg = config.SimConfig(
+        topology=config.TopologyConfig(num_nodes=3),
+        attestation=config.AttestationConfig(
+            transport="partial", partial=config.PartialConfig(max_iwant_per_position=5)),
+    )
+    p = runner._simnet_params(cfg)
+    assert p["transport"] == "partial"
+    assert p["partial_publish_interval_ms"] == 20
+    assert p["partial_max_peers_per_attestation"] == 0
+    assert p["partial_max_iwant_per_position"] == 5
+    assert p["partial_attestation_data_size"] == 128
+    assert p["partial_signature_size"] == 96
+    assert p["partial_disable_metadata_gossip"] is False
+    # Classic: no partial keys.
+    classic = runner._simnet_params(
+        config.SimConfig(topology=config.TopologyConfig(num_nodes=3),
+                         attestation=config.AttestationConfig()))
+    assert "transport" not in classic

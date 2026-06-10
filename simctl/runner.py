@@ -20,6 +20,7 @@ import yaml
 
 from analysis import check_arrivals
 from simctl import schedule
+from simctl import config as config_module
 from simctl.config import SimConfig
 from simctl.manifest import format_dir_timestamp, random_suffix, write_json_atomic
 from simctl.topology import (
@@ -194,6 +195,17 @@ def _host_args(
             f"-attest-batch-window={a.batch_window_ms}ms",
             f"-attest-batch-max={a.batch_max_items}",
         ]
+        if a.transport == "partial":
+            pp = a.partial or config_module.PartialConfig()
+            args += [
+                "-transport=partial",
+                f"-partial-publish-interval={pp.publish_interval_ms}ms",
+                f"-partial-max-peers-per-attestation={pp.max_peers_per_attestation}",
+                f"-partial-max-iwant-per-position={pp.max_iwant_per_position}",
+                f"-partial-attestation-data-size={pp.attestation_data_size}",
+                f"-partial-signature-size={pp.signature_size}",
+                f"-partial-disable-metadata-gossip={'true' if pp.disable_metadata_gossip else 'false'}",
+            ]
     if config.sync is not None:
         # size/subnets/aggregators ride schedule.json; the deadlines reuse -att-due/-agg-due.
         args.append(f"-sync={'true' if config.sync.enabled else 'false'}")
@@ -308,6 +320,17 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
             att_batch_window_ms=a.batch_window_ms,
             att_batch_max=a.batch_max_items,
         )
+        if a.transport == "partial":
+            pp = a.partial or config_module.PartialConfig()
+            params.update(
+                transport="partial",
+                partial_publish_interval_ms=pp.publish_interval_ms,
+                partial_max_peers_per_attestation=pp.max_peers_per_attestation,
+                partial_max_iwant_per_position=pp.max_iwant_per_position,
+                partial_attestation_data_size=pp.attestation_data_size,
+                partial_signature_size=pp.signature_size,
+                partial_disable_metadata_gossip=pp.disable_metadata_gossip,
+            )
     dc = config.data_columns
     if dc is not None and dc.enabled:  # custody lives in schedule.json; these size the verifier
         params.update(

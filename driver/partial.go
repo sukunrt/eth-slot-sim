@@ -73,9 +73,10 @@ func (r partialResolver) Identity(kind node.Kind, subnet, group, position int) (
 	return -1, -1
 }
 
-// partialOpts maps the run params onto one node's transport options (defaults resolved in
-// node/; the sizes are resolved here because the runner builds the payloads).
-func partialOpts(pp *PartialParams, seed uint64, resolver node.PartialResolver) *node.PartialOpts {
+// NodeOpts maps the run params onto one node's transport options (defaults resolved in node/;
+// the sizes resolve here because the runner builds the payloads). Shared by Driver.New and the
+// Shadow binary, which builds its single node without a Driver.
+func (pp *PartialParams) NodeOpts(seed uint64, resolver node.PartialResolver) *node.PartialOpts {
 	return &node.PartialOpts{
 		PublishInterval:        pp.PublishInterval,
 		MaxPeersPerAttestation: pp.MaxPeersPerAttestation,

@@ -65,6 +65,16 @@ type params struct {
 	ColVerifyServiceMs int `json:"col_verify_service_ms"`
 	ColVerifySuper     int `json:"col_verify_super"`
 	ColVerifyReg       int `json:"col_verify_regular"`
+
+	// Partial transport for the attestation-class floods ("" / "classic" ⇒ classic). Field
+	// names mirror simctl's PartialConfig (improvements.md §8).
+	Transport                    string `json:"transport"`
+	PartialPublishIntervalMs     int    `json:"partial_publish_interval_ms"`
+	PartialMaxPeersPerAtt        int    `json:"partial_max_peers_per_attestation"`
+	PartialMaxIWantPerPosition   int    `json:"partial_max_iwant_per_position"`
+	PartialAttestationDataSize   int    `json:"partial_attestation_data_size"`
+	PartialSignatureSize         int    `json:"partial_signature_size"`
+	PartialDisableMetadataGossip bool   `json:"partial_disable_metadata_gossip"`
 }
 
 // TestRun is the simnet backend: it runs the block-dissemination scenario over a
@@ -140,6 +150,16 @@ func TestRun(t *testing.T) {
 				cfg.ColVerifyService = func() time.Duration { return time.Duration(p.ColVerifyServiceMs) * time.Millisecond }
 				cfg.ColVerifyParallelismSuper = p.ColVerifySuper
 				cfg.ColVerifyParallelismReg = p.ColVerifyReg
+			}
+			if p.Transport == "partial" {
+				cfg.Partial = &driver.PartialParams{
+					PublishInterval:        time.Duration(p.PartialPublishIntervalMs) * time.Millisecond,
+					MaxPeersPerAttestation: p.PartialMaxPeersPerAtt,
+					MaxIWantPerPosition:    p.PartialMaxIWantPerPosition,
+					AttestationDataSize:    p.PartialAttestationDataSize,
+					SignatureSize:          p.PartialSignatureSize,
+					DisableMetadataGossip:  p.PartialDisableMetadataGossip,
+				}
 			}
 		}
 		d := driver.New(nw, cfg, rec)

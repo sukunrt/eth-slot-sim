@@ -411,3 +411,73 @@ def test_validator_distribution_explicit_checks_length(tmp_path):
     )
     with pytest.raises(ValueError, match="length num_nodes"):
         config.load_config(p)
+
+
+# --- partial-message transport --------------------------------------------------
+
+
+def test_partial_transport_defaults():
+    a = config.AttestationConfig()
+    assert a.transport == "classic"
+    assert a.partial is None
+    p = config.PartialConfig()
+    assert p.publish_interval_ms == 20
+    assert p.max_peers_per_attestation == 0  # 0 ⇒ 2·D
+    assert p.max_iwant_per_position == 10
+    assert p.attestation_data_size == 128
+    assert p.signature_size == 96
+    assert p.disable_metadata_gossip is False
+
+
+def test_partial_transport_loads(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "topology:\n  num_nodes: 8\n"
+        "attestation:\n  validators: 16\n  transport: partial\n"
+        "  partial:\n    publish_interval_ms: 50\n    signature_size: 48\n"
+    )
+    cfg = config.load_config(p)
+    assert cfg.attestation.transport == "partial"
+    assert cfg.attestation.partial.publish_interval_ms == 50
+    assert cfg.attestation.partial.signature_size == 48
+
+
+def test_partial_transport_needs_a_phase(tmp_path):
+    # The transport carries attestation-class floods: it needs attestations or decoupled on.
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "topology:\n  num_nodes: 8\n"
+        "attestation:\n  enabled: false\n  validators: 16\n  transport: partial\n"
+    )
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_partial_transport_with_decoupled(tmp_path):
+    # Decoupled on (attestations replaced): partial governs the finality votes.
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml()
+                 .replace("attestation:\n", "attestation:\n  transport: partial\n"))
+    cfg = config.load_config(p)
+    assert cfg.attestation.transport == "partial"
+
+
+def test_partial_block_rejects_unknown_keys(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "topology:\n  num_nodes: 8\n"
+        "attestation:\n  validators: 16\n  transport: partial\n"
+        "  partial:\n    bogus_knob: 1\n"
+    )
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_partial_transport_rejects_bad_value(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "topology:\n  num_nodes: 8\n"
+        "attestation:\n  validators: 16\n  transport: telepathy\n"
+    )
+    with pytest.raises(Exception):
+        config.load_config(p)

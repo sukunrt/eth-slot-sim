@@ -100,6 +100,16 @@ func main() {
 		colVerify      = flag.Duration("col-verify-service", 3*time.Millisecond, "per-column verify delay")
 		colVerifySuper = flag.Int("col-verify-super", 16, "column verify parallelism P for a full-custody node")
 		colVerifyReg   = flag.Int("col-verify-regular", 4, "column verify parallelism P for an ordinary node")
+
+		// Partial transport for the attestation-class floods (partial-attestation-spec.md §9).
+		// Flag names mirror simctl's PartialConfig field names.
+		transport       = flag.String("transport", "classic", "attestation-class transport: classic | partial (needs -attestations or -decoupled)")
+		partialInterval = flag.Duration("partial-publish-interval", 20*time.Millisecond, "partial transport publish tick")
+		partialMaxPeers = flag.Int("partial-max-peers-per-attestation", 0, "per-position forward cap (0 = 2*D)")
+		partialMaxIWant = flag.Int("partial-max-iwant-per-position", 10, "per-position request cap across gossip peers")
+		partialDataSize = flag.Int("partial-attestation-data-size", 128, "shared attestation_data bytes per bucket")
+		partialSigSize  = flag.Int("partial-signature-size", 96, "per-vote signature filler bytes")
+		partialNoGossip = flag.Bool("partial-disable-metadata-gossip", false, "no-gossip variant: mesh push only")
 	)
 	flag.Parse()
 	if settleWindow(*startup, meshJoinStagger) <= 0 {
@@ -159,8 +169,32 @@ func main() {
 	if *rpcLogNode == *nodeNum {
 		nd.RPCLogger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
+	// The partial transport is a transport, not a phase: it needs a flood to carry (the
+	// attestation phase or decoupled's finality votes) and the schedule for the resolver.
+	var pp *driver.PartialParams
+	switch *transport {
+	case "classic":
+	case "partial":
+		if sched == nil {
+			log.Fatal("-transport=partial needs -schedule")
+		}
+		if !attest && decoupled == nil {
+			log.Fatal("-transport=partial needs -attestations or -decoupled")
+		}
+		pp = &driver.PartialParams{
+			PublishInterval:        *partialInterval,
+			MaxPeersPerAttestation: *partialMaxPeers,
+			MaxIWantPerPosition:    *partialMaxIWant,
+			AttestationDataSize:    *partialDataSize,
+			SignatureSize:          *partialSigSize,
+			DisableMetadataGossip:  *partialNoGossip,
+		}
+		nd.Partial = pp.NodeOpts(*seed, driver.NewPartialResolver(sched))
+	default:
+		log.Fatalf("-transport=%q, want classic or partial", *transport)
+	}
 	peers := parseIntList(*peerNumsStr)
-	runner := driver.NewRunner(*nodeNum, nd, val, sched, attest, syncEmit, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers, decoupled, nil)
+	runner := driver.NewRunner(*nodeNum, nd, val, sched, attest, syncEmit, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers, decoupled, pp)
 	runner.Attach() // sets nd.OnReceive before JoinTopics
 
 	ctx := context.Background()

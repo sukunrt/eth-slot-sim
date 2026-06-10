@@ -133,7 +133,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 			}
 		}
 		if cfg.Partial != nil {
-			nd.Partial = partialOpts(cfg.Partial, cfg.Seed, resolver)
+			nd.Partial = cfg.Partial.NodeOpts(cfg.Seed, resolver)
 		}
 		// Decoupled consensus replaces attestations + sync, so force both emit flags off when it's on
 		// (the runner's mutual-exclusion invariant: a slot emits an AC vote OR an attestation, never both).

@@ -33,6 +33,22 @@ class GossipsubParams(BaseModel):
     Dhigh: int = 12
 
 
+class PartialConfig(BaseModel):
+    """Partial-message transport knobs (partial-attestation-spec.md §9), consulted only when
+    ``attestation.transport`` is ``partial``. Defaults mirror the draft spec: 20 ms publish
+    ticks, forward cap 2·D (0 sentinel), 10 IWANTs per missing position, and the 128 + 96 B
+    split of classic's 240 B attestation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    publish_interval_ms: int = 20
+    max_peers_per_attestation: int = 0  # 0 ⇒ 2·D
+    max_iwant_per_position: int = 10
+    attestation_data_size: int = 128
+    signature_size: int = 96
+    disable_metadata_gossip: bool = False
+
+
 class AttestationConfig(BaseModel):
     """Attestation phase knobs. Present ⇒ the run adds the block→attestation response.
     V, C, s_c are independent (only C·s_c ≤ V); see committee.py."""
@@ -56,6 +72,12 @@ class AttestationConfig(BaseModel):
     # committee's ~target_aggregators aggregators publish one distinct aggregate each.
     target_aggregators: int = 16  # aggregators per committee (TARGET_AGGREGATORS_PER_COMMITTEE)
     aggregate_due_ms: int = 8000  # AGGREGATE_DUE (6667 bp of a 12 s slot); 0 ⇒ aggregates off
+    # Transport for the attestation-class floods (standard attestations + finality votes when
+    # decoupled): classic one-publish-per-message gossipsub, or the partial-messages extension
+    # on the same schedule. A transport, not a phase — validated to need attestations or
+    # decoupled on. schedule.json is unchanged, so classic-vs-partial runs are comparable.
+    transport: Literal["classic", "partial"] = "classic"
+    partial: PartialConfig | None = None  # knobs; consulted only when transport == "partial"
 
 
 class DataColumnsConfig(BaseModel):
@@ -276,6 +298,21 @@ class SimConfig(BaseModel):
 
     def _dist_is_uniform(self) -> bool:
         return self.validator_distribution is None or self.validator_distribution.type == "uniform"
+
+    @model_validator(mode="after")
+    def _check_partial_transport(self) -> "SimConfig":
+        a = self.attestation
+        if a is None or a.transport != "partial":
+            return self
+        # The transport carries the attestation-class floods, so one of them must exist:
+        # attestations on, or decoupled on (it governs the finality votes there).
+        decoupled_on = self.decoupled_consensus is not None and self.decoupled_consensus.enabled
+        if not a.enabled and not decoupled_on:
+            raise ValueError(
+                "transport: partial is a transport, not a phase — it needs "
+                "attestation.enabled or decoupled_consensus.enabled"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_validator_distribution(self) -> "SimConfig":
