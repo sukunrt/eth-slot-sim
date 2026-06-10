@@ -15,8 +15,12 @@ implemented once, here. Aggregation is out of scope for now.
 
 from __future__ import annotations
 
+import math
 import random
-from dataclasses import dataclass
+from bisect import bisect_right
+from dataclasses import dataclass, replace
+from itertools import accumulate
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,19 @@ class Params:
     ac_slots_per_finality_slot: int = 0
     fs_subnets: int = 0
     fs_aggregators: int = 0
+    # Validator→node distribution (the Dist seam; see skewed-validators-spec.md). "uniform":
+    # validator v → node v % N, no schedule field, V from the v knob — the status quo. "tiered":
+    # regular nodes draw count i+1 with regular_weights[i]; supernodes draw a truncated log-normal
+    # on [super_min, super_max] with mean super_mean. "explicit": explicit_counts verbatim. Under
+    # tiered/explicit, V is EMERGENT (params.v := Σ counts; the v knob is ignored) and validator
+    # ids are contiguous by node: node i hosts [Σ counts[:i], Σ counts[:i+1]).
+    dist: str = "uniform"
+    regular_weights: tuple[float, ...] = (0.65, 0.25, 0.10)  # P(count = index+1)
+    super_min: int = 1
+    super_max: int = 1000
+    super_mean: float = 200.0
+    dist_seed: int = 7  # independent of the draw seed
+    explicit_counts: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +118,9 @@ class Assignment:
     # aggregate size and coverage count.
     finality_subscribers: list[list[int]] | None = None
     validators_per_subnet: list[int] | None = None
+    # validator_counts[node] = hosted-validator count (the Dist seam; None under uniform — a
+    # uniform schedule.json is byte-identical to before). Ids are contiguous by node.
+    validator_counts: list[int] | None = None
 
     def to_dict(self) -> dict:
         d = {
@@ -138,6 +158,10 @@ class Assignment:
             d["params"]["fs_aggregators"] = self.params.fs_aggregators
             d["finality_subscribers"] = self.finality_subscribers
             d["validators_per_subnet"] = self.validators_per_subnet
+        # The Dist seam: present only under tiered/explicit (back-compat: a uniform
+        # schedule.json is unchanged; absent ⇒ consumers fall back to v % N).
+        if self.validator_counts is not None:
+            d["validator_counts"] = self.validator_counts
         return d
 
 
@@ -191,7 +215,15 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
 
     With ``decoupled`` the attestation committees + sync are replaced by the availability +
     finality chains: per-slot ac_voters, a node-partition into fs_subnets finality subnets, and
-    per-finality-slot fc_aggregators. Data columns are required (they gate the AC vote)."""
+    per-finality-slot fc_aggregators. Data columns are required (they gate the AC vote).
+
+    With ``dist`` tiered/explicit, per-node validator counts are drawn FIRST and V is replaced
+    by their sum (emergent V) before any V-dependent validation or draw."""
+    counts: list[int] | None = None
+    if p.dist != "uniform":
+        counts = _validator_counts(p, supers)
+        p = replace(p, v=sum(counts))
+    node_of = _node_of(p, counts)
     if not p.decoupled:
         if p.c * p.sc > p.v:
             raise ValueError(f"C*s_c ({p.c * p.sc}) > V ({p.v}): too many committee positions")
@@ -227,19 +259,90 @@ def generate(p: Params, supers: list[int] | None = None) -> Assignment:
         if p.fs_subnets > p.n:
             raise ValueError(f"fs_subnets ({p.fs_subnets}) > N ({p.n})")
         finality_subscribers = _finality_subscribers(p)
-        validators_per_subnet = _validators_per_subnet(p, finality_subscribers)
+        validators_per_subnet = _validators_per_subnet(p, finality_subscribers, counts)
 
     slots = [
         _slot_plan(p, slot, subscribers, proposer_pool[slot % len(proposer_pool)],
-                   sync_subscribers, finality_subscribers)
+                   node_of, sync_subscribers, finality_subscribers)
         for slot in range(p.num_slots)
     ]
     return Assignment(
         params=p, subnet_subscribers=subscribers, slots=slots,
         column_subscribers=column_subscribers, full_custody=full_custody,
         sync_subscribers=sync_subscribers, finality_subscribers=finality_subscribers,
-        validators_per_subnet=validators_per_subnet,
+        validators_per_subnet=validators_per_subnet, validator_counts=counts,
     )
+
+
+_SUPER_SIGMA = 1.0  # log-normal shape for the supernode tier; μ is solved for the mean
+
+
+def _validator_counts(p: Params, supers: list[int] | None) -> list[int]:
+    """Per-node hosted-validator counts (the Dist seam). tiered: regular nodes draw count i+1
+    with probability regular_weights[i]; supernodes draw a log-normal rejection-sampled into
+    [super_min, super_max], with μ solved so the truncated mean is super_mean. explicit:
+    explicit_counts verbatim. Seeded by dist_seed, independent of the draw seed."""
+    if p.dist == "explicit":
+        if p.explicit_counts is None or len(p.explicit_counts) != p.n:
+            raise ValueError("explicit dist needs explicit_counts of length N")
+        return list(p.explicit_counts)
+    if p.dist != "tiered":
+        raise ValueError(f"unknown dist {p.dist!r}")
+    if not supers:
+        raise ValueError("tiered dist needs supernodes (super_node_fraction > 0)")
+    if not p.super_min <= p.super_mean <= p.super_max:
+        raise ValueError(
+            f"super_mean ({p.super_mean}) must lie in [super_min, super_max] "
+            f"[{p.super_min}, {p.super_max}]"
+        )
+    rng = _rng(p.dist_seed, 11)
+    mu = _lognorm_mu(p.super_min, p.super_max, p.super_mean, _SUPER_SIGMA)
+    sup = set(supers)
+    regular_counts = range(1, len(p.regular_weights) + 1)
+    counts: list[int] = []
+    for node in range(p.n):
+        if node in sup:
+            while True:  # rejection-sample into range; μ is calibrated for this truncation
+                x = rng.lognormvariate(mu, _SUPER_SIGMA)
+                if p.super_min <= x <= p.super_max:
+                    counts.append(round(x))
+                    break
+        else:
+            counts.append(rng.choices(regular_counts, weights=p.regular_weights)[0])
+    return counts
+
+
+def _lognorm_mu(lo: float, hi: float, mean: float, sigma: float) -> float:
+    """μ such that log-normal(μ, σ) truncated to [lo, hi] has the given mean. The truncated
+    mean is monotone increasing in μ, so bisection converges; 100 halvings is exact to well
+    under one validator."""
+    def phi(z: float) -> float:
+        return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+    def trunc_mean(mu: float) -> float:
+        a, b = (math.log(lo) - mu) / sigma, (math.log(hi) - mu) / sigma
+        denom = phi(b) - phi(a)
+        if denom <= 0:  # numerically degenerate: the window is in a far tail
+            return lo if a > 0 else hi
+        return math.exp(mu + sigma * sigma / 2) * (phi(b - sigma) - phi(a - sigma)) / denom
+
+    lo_mu, hi_mu = math.log(lo) - 4 * sigma, math.log(hi) + 4 * sigma
+    for _ in range(100):
+        mid = (lo_mu + hi_mu) / 2
+        if trunc_mean(mid) < mean:
+            lo_mu = mid
+        else:
+            hi_mu = mid
+    return (lo_mu + hi_mu) / 2
+
+
+def _node_of(p: Params, counts: list[int] | None) -> Callable[[int], int]:
+    """The validator→node map: uniform v % N, or (with counts) the contiguous-range lookup —
+    node i hosts ids [Σ counts[:i], Σ counts[:i+1])."""
+    if counts is None:
+        return lambda val: val % p.n
+    bounds = list(accumulate(counts))
+    return lambda val: bisect_right(bounds, val)
 
 
 def _full_custody(p: Params, supers: list[int]) -> list[int]:
@@ -322,10 +425,14 @@ def _finality_subscribers(p: Params) -> list[list[int]]:
     return [sorted(s) for s in subs]
 
 
-def _validators_per_subnet(p: Params, finality_subscribers: list[list[int]]) -> list[int]:
-    """validators_per_subnet[i] = the validators voting on subnet i = Σ over its member nodes of the
-    validators that node hosts (uniform V→N: validator v → node v % N). Node `node` hosts the
-    validators v with v % N == node, i.e. (V - 1 - node) // N + 1 of them."""
+def _validators_per_subnet(
+    p: Params, finality_subscribers: list[list[int]], counts: list[int] | None
+) -> list[int]:
+    """validators_per_subnet[i] = the validators voting on subnet i = Σ over its member nodes of
+    the validators that node hosts: counts[node] (the Dist seam) or, uniform, the v with
+    v % N == node — (V - 1 - node) // N + 1 of them."""
+    if counts is not None:
+        return [sum(counts[node] for node in members) for members in finality_subscribers]
     return [sum((p.v - 1 - node) // p.n + 1 for node in members) for members in finality_subscribers]
 
 
@@ -334,6 +441,7 @@ def _slot_plan(
     slot: int,
     subscribers: list[list[int]],
     proposer: int,
+    node_of: Callable[[int], int],
     sync_subscribers: list[list[int]] | None = None,
     finality_subscribers: list[list[int]] | None = None,
 ) -> SlotPlan:
@@ -347,7 +455,7 @@ def _slot_plan(
         for ci in range(p.c):
             subnet = ci  # identity: committee ci → subnet ci (C ≤ subnet_count)
             members = [
-                AttesterRef(node=v % p.n, val=v, subnet=subnet, position=pos)
+                AttesterRef(node=node_of(v), val=v, subnet=subnet, position=pos)
                 for pos, v in enumerate(vals[ci * p.sc : (ci + 1) * p.sc])
             ]
             committees.append(members)
@@ -373,7 +481,7 @@ def _slot_plan(
     if finality_subscribers is not None:
         voters = _rng(p.seed, 8, slot).sample(range(p.v), p.ac_vote_size)
         ac_voters = [
-            AttesterRef(node=v % p.n, val=v, subnet=0, position=pos)  # subnet unused (global topic)
+            AttesterRef(node=node_of(v), val=v, subnet=0, position=pos)  # subnet unused (global)
             for pos, v in enumerate(voters)
         ]
         if slot % p.ac_slots_per_finality_slot == 0:  # a finality-slot boundary

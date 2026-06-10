@@ -66,7 +66,7 @@ not of one phase):
 validator_distribution:
   type: uniform | tiered | explicit   # default uniform = status quo
   # tiered (the realistic one): tier by the node class the topology already has
-  regular: {min: 1, max: 3}               # uniform over {1,2,3}
+  regular: {weights: [0.65, 0.25, 0.10]}  # P(count = index+1): most solo nodes run 1 key
   super: {min: 1, max: 1000, mean: 200}   # heavy-tailed, calibrated to the mean (below)
   # explicit: counts file or inline list (escape hatch for experiments)
   counts: [...]
@@ -75,11 +75,12 @@ validator_distribution:
 
 - **uniform** — status quo, emits the uniform counts explicitly (one code path).
 - **tiered** — the realistic shape, keyed off `supernode_ids(...)` (no new node classes):
-  regular nodes draw uniformly from `[regular.min, regular.max]` (solo stakers, 1–3 keys);
-  supernodes draw from a heavy-tailed distribution on `[super.min, super.max]` with the
-  given mean — log-normal with σ as an implementation default, μ solved numerically so the
-  truncated mean hits `super.mean`, rejection-sampled into range. At
-  `super_node_fraction: 0.5` and the defaults above, E[V] ≈ (2 + 200)/2 · N ≈ 100N.
+  regular nodes draw count `i+1` with probability `regular.weights[i]` (defaults: 65% one
+  key, 25% two, 10% three — solo stakers, biased to 1); supernodes draw from a heavy-tailed
+  distribution on `[super.min, super.max]` with the given mean — log-normal with σ as an
+  implementation default, μ solved numerically so the truncated mean hits `super.mean`,
+  rejection-sampled into range. At `super_node_fraction: 0.5` and the defaults above,
+  E[V] ≈ (1.45 + 200)/2 · N ≈ 100N.
   **V is emergent in this mode**: schedule.json's `params.v` := Σ counts, and
   `attestation.validators` is ignored (warn when set and different). Go and the analyzer
   already read V from schedule.json, so nothing downstream changes.

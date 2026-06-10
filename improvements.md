@@ -93,6 +93,7 @@ decoupled-consensus-spec.md):
 | Finality attestation (the per-validator finality-chain message) | "finality attestation" (canonical); "FC vote" / "finality vote" are aliases | — (per-validator, derived) | `KindFinalityVote`, `MakeFinalityVote`, `pb.FinalityVote` | "finality vote" (analysis output), batch class `fcvote` |
 | Attestation subnet membership | "subscribers" | `subnet_subscribers` | `SubnetSubscribers`, `Subscribers(s)` | `subscribers` (analysis param) |
 | Sync subnet membership | — | `sync_subscribers` | `SyncSubscribers` | — |
+| Validator distribution (the Dist seam) | "validator distribution", "skew" | `validator_counts` | `ValidatorCounts` | `dist`/`counts` (schedule.Params), skewed-validators-spec.md |
 
 Decide one prefix per concept (suggest: `finality_*` everywhere, drop `fs_*` / `fc*`;
 `ac_*` everywhere for the availability chain) and rename in one pass.

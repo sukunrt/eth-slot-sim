@@ -857,6 +857,30 @@ def test_analyze_finality_votes_csv_coverage_ok(tmp_path):
     assert res.ok
 
 
+def test_analyze_finality_votes_csv_with_validator_counts(tmp_path):
+    # The Dist seam: validator_counts [2,1,1] ⇒ node0 hosts vals {0,1}, node1 {2}, node2 {3}
+    # (contiguous ids, NOT val % N). Subnet 0 {0,1}: node0's two votes reach node1, node1's
+    # vote reaches node0. Subnet 1 {2} has no mates ⇒ val 3 expects 0 arrivals.
+    data = _decoupled_fc(3, 4, [[0, 1], [2]])
+    data["validator_counts"] = [2, 1, 1]
+    csv_path = tmp_path / "simnet_arrivals.csv"
+    csv_path.write_text(
+        "node,slot,kind,subnet,attester,delay_ms,voted_block\n"
+        "1,0,8,0,0,40,false\n"  # val 0 (host 0) reaches mate 1
+        "1,0,8,0,1,40,false\n"  # val 1 (ALSO host 0 under counts) reaches mate 1
+        "0,0,8,0,2,40,false\n"  # val 2 (host 1) reaches mate 0
+    )
+    res = ca.analyze_finality_votes_csv(csv_path, data)
+    assert res.expected == 3 and res.arrivals == 3 and res.published == 4
+    assert res.missing == [] and res.leaked == [] and res.duplicates == []
+    assert res.ok
+    # Under the uniform fallback the same arrivals would be wrong (val 1 would host on node 1,
+    # making its arrival at node 1 a self-receive and val 2's host node 2 — a different plan).
+    del data["validator_counts"]
+    res = ca.analyze_finality_votes_csv(csv_path, data)
+    assert not res.ok
+
+
 def test_analyze_finality_votes_csv_detects_missing_and_leak(tmp_path):
     # subnet 0 {1,2,3}, V=N=4 so vals 1,2,3 host on subnet 0; node 0 alone on subnet 1.
     data = _decoupled_fc(4, 4, [[1, 2, 3], [0]])

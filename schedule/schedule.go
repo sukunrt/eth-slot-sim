@@ -98,7 +98,12 @@ type Assignment struct {
 	// V→N), carried for the scaled aggregate size and the coverage count. Generated in Python.
 	FinalitySubscribers [][]int    `json:"finality_subscribers,omitempty"`
 	ValidatorsPerSubnet []int      `json:"validators_per_subnet,omitempty"`
-	Slots               []SlotPlan `json:"slots"`
+	// ValidatorCounts[node] = hosted-validator count (the Dist seam; see
+	// skewed-validators-spec.md). When present, validator ids are contiguous by node: node i
+	// hosts [Σ counts[:i], Σ counts[:i+1]) and Params.V = Σ counts. Empty ⇒ uniform v % N.
+	// Generated in Python, carried here verbatim.
+	ValidatorCounts []int      `json:"validator_counts,omitempty"`
+	Slots           []SlotPlan `json:"slots"`
 }
 
 // Load reads a schedule.json produced by simctl/schedule.py.
@@ -304,9 +309,21 @@ func (v View) FinalitySubnet() (subnet int, member bool) {
 }
 
 // FinalityVoteDuties returns the validators this node hosts — it emits one FinalityVote per validator
-// on its finality subnet, every finality slot (all validators vote). Uniform V→N: the validators v
-// with v % N == node. The Dist seam (operator skew) changes only this mapping.
+// on its finality subnet, every finality slot (all validators vote). With ValidatorCounts (the Dist
+// seam) ids are contiguous by node: [Σ counts[:node], Σ counts[:node+1]); otherwise uniform V→N:
+// the validators v with v % N == node.
 func (v View) FinalityVoteDuties() []int {
+	if c := v.a.ValidatorCounts; len(c) > 0 {
+		start := 0
+		for _, n := range c[:v.node] {
+			start += n
+		}
+		out := make([]int, c[v.node])
+		for i := range out {
+			out[i] = start + i
+		}
+		return out
+	}
 	var out []int
 	for val := v.node; val < v.a.Params.V; val += v.a.Params.N {
 		out = append(out, val)

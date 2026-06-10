@@ -114,6 +114,36 @@ class DecoupledConsensusConfig(BaseModel):
     fc_vote_offset_ms: int = 1000  # offset into the finality slot for the per-validator vote burst
 
 
+class RegularTierConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    weights: list[float] = [0.65, 0.25, 0.10]  # P(count = index+1): most solo nodes run 1 key
+
+
+class SuperTierConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    min: int = 1
+    max: int = 1000
+    mean: float = 200.0  # truncated log-normal mean (μ solved; σ is an implementation default)
+
+
+class ValidatorDistributionConfig(BaseModel):
+    """Validator→node distribution (the Dist seam; see skewed-validators-spec.md). uniform keeps
+    v % N with V = attestation.validators (status quo, no schedule.json change). tiered keys off
+    the supernode set: regular nodes draw 1..len(weights) keys (weighted), supernodes draw a
+    truncated log-normal on [min, max] with the given mean — and V becomes EMERGENT
+    (Σ counts; attestation.validators is ignored). explicit takes per-node counts verbatim."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["uniform", "tiered", "explicit"] = "uniform"
+    regular: RegularTierConfig = Field(default_factory=RegularTierConfig)
+    super: SuperTierConfig = Field(default_factory=SuperTierConfig)
+    counts: list[int] | None = None  # explicit mode only; len == num_nodes
+    seed: int = 7  # independent of the schedule draw seed
+
+
 class SimConfig(BaseModel):
     """Root configuration for a single block-dissemination run."""
 
@@ -126,6 +156,8 @@ class SimConfig(BaseModel):
     sync: SyncConfig | None = None  # present+enabled ⇒ run the sync-committee phase
     # present+enabled ⇒ run decoupled consensus (replaces attestations + sync)
     decoupled_consensus: DecoupledConsensusConfig | None = None
+    # absent or type=uniform ⇒ validator v on node v % N (the status quo)
+    validator_distribution: ValidatorDistributionConfig | None = None
     num_slots: int = 5
     slot_duration_seconds: int = 12
     block_size: int = 128 * 1024
@@ -150,7 +182,9 @@ class SimConfig(BaseModel):
             raise ValueError("data_columns need an attestation block (V and the committee)")
         if self.topology.super_node_fraction <= 0:
             raise ValueError("data_columns need topology.super_node_fraction > 0 (the full-custody backbone)")
-        if self.attestation.validators < self.topology.num_nodes:
+        # Under a non-uniform distribution V is emergent (Σ counts ≥ N because every count ≥ 1),
+        # so the V ≥ N check only applies to the uniform mapping.
+        if self._dist_is_uniform() and self.attestation.validators < self.topology.num_nodes:
             raise ValueError(
                 f"data_columns need V ({self.attestation.validators}) >= N "
                 f"({self.topology.num_nodes}): every node must validate (uniform custody)"
@@ -193,10 +227,17 @@ class SimConfig(BaseModel):
         n = self.topology.num_nodes
         if self.topology.super_node_fraction <= 0:
             raise ValueError("decoupled_consensus needs topology.super_node_fraction > 0 (column backbone)")
-        if self.attestation.validators < n:
-            raise ValueError(f"decoupled_consensus needs V ({self.attestation.validators}) >= N ({n})")
-        if dc.ac_vote_size > self.attestation.validators:
-            raise ValueError(f"ac_vote_size ({dc.ac_vote_size}) > V ({self.attestation.validators})")
+        # V-dependent checks only bind under the uniform mapping; with tiered/explicit, V is
+        # emergent (Σ counts) and ac_vote_size ≤ V is enforced at generation time.
+        if self._dist_is_uniform():
+            if self.attestation.validators < n:
+                raise ValueError(
+                    f"decoupled_consensus needs V ({self.attestation.validators}) >= N ({n})"
+                )
+            if dc.ac_vote_size > self.attestation.validators:
+                raise ValueError(
+                    f"ac_vote_size ({dc.ac_vote_size}) > V ({self.attestation.validators})"
+                )
         if dc.fs_subnets > n:
             raise ValueError(f"fs_subnets ({dc.fs_subnets}) > N ({n})")
         if not 0 < dc.finality_slot_aggregation_fraction < 100:
@@ -208,6 +249,34 @@ class SimConfig(BaseModel):
             raise ValueError(
                 f"fc_vote_offset_ms ({dc.fc_vote_offset_ms}) must be < the aggregation deadline ({agg_ms} ms)"
             )
+        return self
+
+    def _dist_is_uniform(self) -> bool:
+        return self.validator_distribution is None or self.validator_distribution.type == "uniform"
+
+    @model_validator(mode="after")
+    def _check_validator_distribution(self) -> "SimConfig":
+        vd = self.validator_distribution
+        if vd is None or vd.type == "uniform":
+            return self
+        # Non-uniform distributions still need the attestation block (deadlines + the schedule
+        # gate in the runner); V itself is emergent.
+        if self.attestation is None:
+            raise ValueError("validator_distribution needs an attestation block (the schedule gate)")
+        if vd.type == "tiered":
+            if self.topology.super_node_fraction <= 0:
+                raise ValueError("tiered validator_distribution needs super_node_fraction > 0")
+            if not vd.regular.weights or any(w < 0 for w in vd.regular.weights) \
+                    or sum(vd.regular.weights) <= 0:
+                raise ValueError("regular.weights must be non-empty and non-negative")
+            if not 1 <= vd.super.min <= vd.super.mean <= vd.super.max:
+                raise ValueError("super tier needs 1 <= min <= mean <= max")
+        if vd.type == "explicit":
+            if vd.counts is None or len(vd.counts) != self.topology.num_nodes:
+                raise ValueError("explicit validator_distribution needs counts of length num_nodes")
+            floor = 1 if self.data_columns is not None and self.data_columns.enabled else 0
+            if any(c < floor for c in vd.counts):
+                raise ValueError(f"explicit counts must all be >= {floor} (data-columns custody)")
         return self
 
 

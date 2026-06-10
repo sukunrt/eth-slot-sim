@@ -307,3 +307,49 @@ def test_decoupled_disabled_skips_validation(tmp_path):
     p.write_text("topology:\n  num_nodes: 16\ndecoupled_consensus:\n  enabled: false\n  fs_subnets: 99\n")
     cfg = config.load_config(p)
     assert cfg.decoupled_consensus.enabled is False
+
+
+def test_validator_distribution_tiered_needs_supers(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "topology:\n"
+        "  num_nodes: 12\n"
+        "attestation:\n"
+        "  enabled: false\n"
+        "validator_distribution:\n"
+        "  type: tiered\n"
+    )
+    with pytest.raises(ValueError, match="super_node_fraction"):
+        config.load_config(p)
+
+
+def test_validator_distribution_tiered_loads_with_defaults(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "topology:\n"
+        "  num_nodes: 12\n"
+        "  super_node_fraction: 0.5\n"
+        "attestation:\n"
+        "  enabled: false\n"
+        "validator_distribution:\n"
+        "  type: tiered\n"
+    )
+    cfg = config.load_config(p)
+    vd = cfg.validator_distribution
+    assert vd.regular.weights == [0.65, 0.25, 0.10]
+    assert (vd.super.min, vd.super.max, vd.super.mean) == (1, 1000, 200.0)
+
+
+def test_validator_distribution_explicit_checks_length(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        "topology:\n"
+        "  num_nodes: 12\n"
+        "attestation:\n"
+        "  enabled: false\n"
+        "validator_distribution:\n"
+        "  type: explicit\n"
+        "  counts: [1, 2, 3]\n"
+    )
+    with pytest.raises(ValueError, match="length num_nodes"):
+        config.load_config(p)

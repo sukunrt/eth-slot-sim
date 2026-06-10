@@ -62,6 +62,20 @@ def _schedule_assignment(config: SimConfig) -> schedule.Assignment | None:
             sync_subnets=sc.subnets,
             sync_target_aggregators=sc.target_aggregators,
         )
+    dist_kwargs: dict[str, Any] = {}
+    vd = config.validator_distribution
+    if vd is not None and vd.type != "uniform":  # the Dist seam: V becomes Σ counts (emergent)
+        if "validators" in a.model_fields_set:
+            print(f"validator_distribution={vd.type}: V is emergent — attestation.validators ignored")
+        dist_kwargs = dict(
+            dist=vd.type,
+            regular_weights=tuple(vd.regular.weights),
+            super_min=vd.super.min,
+            super_max=vd.super.max,
+            super_mean=vd.super.mean,
+            dist_seed=vd.seed,
+            explicit_counts=tuple(vd.counts) if vd.counts is not None else None,
+        )
     dcc_kwargs: dict[str, Any] = {}
     dcc = config.decoupled_consensus
     if dcc is not None and dcc.enabled:  # decoupled replaces committee + sync gen with AC/FC membership
@@ -87,6 +101,7 @@ def _schedule_assignment(config: SimConfig) -> schedule.Assignment | None:
             **col_kwargs,
             **sync_kwargs,
             **dcc_kwargs,
+            **dist_kwargs,
         ),
         supers=supers,
     )

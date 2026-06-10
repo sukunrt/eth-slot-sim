@@ -22,6 +22,7 @@ Usage: python analysis/check_arrivals.py <run-dir>
 """
 
 import csv
+import itertools
 import json
 import math
 import re
@@ -667,27 +668,34 @@ def analyze_finality_votes(
     )
 
 
-def _finality_votes(schedule_data: dict) -> tuple[dict[int, set[int]], list[tuple[int, int]]]:
-    """The finality-subnet member sets keyed by subnet, plus the (subnet, val) of every published
-    vote. One vote per validator per finality slot; a validator's host is val % N (uniform V→N), so
-    val belongs to the subnet whose members include that host. Σ over members h of |{v<V : v%N==h}|
-    votes per subnet, the same per-host multiplicity FinalityVoteDuties produces."""
+def _finality_votes(schedule_data: dict) -> tuple[dict[int, set[int]], list[tuple[int, int, int]]]:
+    """The finality-subnet member sets keyed by subnet, plus the (subnet, val, host) of every
+    published vote. One vote per validator per finality slot; a validator's host comes from
+    validator_counts when present (the Dist seam: node i hosts the contiguous ids
+    [Σ counts[:i], Σ counts[:i+1])), else uniform V→N (val % N == host) — the same per-host
+    multiplicity FinalityVoteDuties produces."""
     n, v = schedule_data["params"]["n"], schedule_data["params"]["v"]
     subscribers = {i: set(m) for i, m in enumerate(schedule_data["finality_subscribers"])}
-    votes: list[tuple[int, int]] = []
+    counts = schedule_data.get("validator_counts")
+    if counts is not None:
+        starts = list(itertools.accumulate([0] + counts))
+        hosted = {host: range(starts[host], starts[host + 1]) for host in range(n)}
+    else:
+        hosted = {host: range(host, v, n) for host in range(n)}
+    votes: list[tuple[int, int, int]] = []
     for subnet, members in subscribers.items():
         for host in members:
-            for val in range(host, v, n):
-                votes.append((subnet, val))
+            for val in hosted[host]:
+                votes.append((subnet, val, host))
     return subscribers, votes
 
 
 def analyze_finality_votes_csv(path: Path, schedule_data: dict) -> SyncMessageResult:
     """Finality-vote coverage for the simnet backend. Keyed by (slot=finality slot, subnet,
-    attester=val) with no origin column; a vote's host (publisher, excluded from its coverage) is
-    val % N (uniform V→N). Members come from schedule.json's finality_subscribers (stable across
-    finality slots); each finality slot every hosted validator publishes one vote."""
-    n = schedule_data["params"]["n"]
+    attester=val) with no origin column; a vote's host (publisher, excluded from its coverage)
+    comes from _finality_votes (validator_counts when present, else val % N). Members come from
+    schedule.json's finality_subscribers (stable across finality slots); each finality slot every
+    hosted validator publishes one vote."""
     subscribers, votes = _finality_votes(schedule_data)
     fslots = sorted({sp["slot"] // schedule_data["params"]["ac_slots_per_finality_slot"]
                      for sp in schedule_data["slots"]})
@@ -711,8 +719,7 @@ def analyze_finality_votes_csv(path: Path, schedule_data: dict) -> SyncMessageRe
     missing: list[tuple[int, int, int, int]] = []
     expected = 0
     for fslot in fslots:
-        for subnet, val in votes:
-            host = val % n
+        for subnet, val, host in votes:
             for node in subscribers.get(subnet, set()):
                 if node == host:
                     continue

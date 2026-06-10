@@ -458,3 +458,95 @@ def test_aggregators_seeded_vary_across_slots_and_with_seed():
         n=40, v=80, c=2, sc=4, subscribe_floor=20, target_aggregators=4, seed=8, num_slots=4
     )
     assert schedule.generate(other).slots[0].aggregators != a.slots[0].aggregators
+
+
+# --- validator distribution (the Dist seam; skewed-validators-spec.md) ----------
+#
+# tiered/explicit replace the uniform v % N map: per-node counts ride schedule.json
+# (validator_counts), validator ids are contiguous by node, and V is emergent (Σ counts).
+
+
+def _tiered_params(**kw):
+    return _decoupled_params(dist="tiered", **kw)
+
+
+def test_tiered_counts_tiers_sum_and_emergent_v():
+    a = schedule.generate(_tiered_params(), supers=_DECOUPLED_SUPERS)
+    counts = a.validator_counts
+    assert counts is not None and len(counts) == 16
+    supers = set(_DECOUPLED_SUPERS)
+    for node, c in enumerate(counts):
+        if node in supers:
+            assert 1 <= c <= 1000
+        else:
+            assert c in (1, 2, 3)
+    assert a.params.v == sum(counts)  # V is emergent
+    d = a.to_dict()
+    assert d["validator_counts"] == counts
+    assert d["params"]["v"] == sum(counts)
+
+
+def test_tiered_refs_use_contiguous_ranges():
+    # Every drawn ref (AC voters here) maps val -> the node whose contiguous range holds it.
+    a = schedule.generate(_tiered_params(), supers=_DECOUPLED_SUPERS)
+    counts = a.validator_counts
+    starts = [0]
+    for c in counts:
+        starts.append(starts[-1] + c)
+    for sp in a.slots:
+        for r in sp.ac_voters:
+            assert starts[r.node] <= r.val < starts[r.node + 1]
+    # validators_per_subnet sums counts over members (and Σ over subnets = V).
+    for subnet, members in enumerate(a.finality_subscribers):
+        assert a.validators_per_subnet[subnet] == sum(counts[m] for m in members)
+    assert sum(a.validators_per_subnet) == a.params.v
+
+
+def test_tiered_deterministic_and_dist_seed_varies():
+    a = schedule.generate(_tiered_params(), supers=_DECOUPLED_SUPERS)
+    b = schedule.generate(_tiered_params(), supers=_DECOUPLED_SUPERS)
+    assert a.validator_counts == b.validator_counts
+    c = schedule.generate(_tiered_params(dist_seed=8), supers=_DECOUPLED_SUPERS)
+    assert a.validator_counts != c.validator_counts
+
+
+def test_tiered_super_mean_calibrated():
+    # Large fleet: the supernode tier's empirical mean lands near super_mean (the μ solve).
+    p = _tiered_params(n=1000, fs_subnets=4)
+    supers = list(range(500))
+    a = schedule.generate(p, supers=supers)
+    super_counts = [a.validator_counts[node] for node in supers]
+    mean = sum(super_counts) / len(super_counts)
+    assert 0.85 * 200 <= mean <= 1.15 * 200, mean
+
+
+def test_tiered_requires_supers():
+    try:
+        schedule.generate(_tiered_params(), supers=[])
+    except ValueError as e:
+        assert "supernodes" in str(e)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_explicit_counts_verbatim_and_length_checked():
+    counts = tuple(range(1, 17))  # node i hosts i+1 validators
+    a = schedule.generate(
+        _decoupled_params(dist="explicit", explicit_counts=counts), supers=_DECOUPLED_SUPERS
+    )
+    assert a.validator_counts == list(counts)
+    assert a.params.v == sum(counts)
+    try:
+        schedule.generate(
+            _decoupled_params(dist="explicit", explicit_counts=(1, 2)), supers=_DECOUPLED_SUPERS
+        )
+    except ValueError as e:
+        assert "length N" in str(e)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_uniform_keeps_schedule_json_unchanged():
+    a = schedule.generate(_decoupled_params(), supers=_DECOUPLED_SUPERS)
+    assert a.validator_counts is None
+    assert "validator_counts" not in a.to_dict()

@@ -401,6 +401,29 @@ func TestDecoupledMembership(t *testing.T) {
 	}
 }
 
+// The Dist seam (skewed-validators-spec.md): with ValidatorCounts, validator ids are contiguous
+// by node — node i hosts [Σ counts[:i], Σ counts[:i+1]) — and the ranges partition 0..V-1. The
+// uniform fallback (no counts) is pinned by TestDecoupledMembership above.
+func TestFinalityVoteDutiesWithCounts(t *testing.T) {
+	a := &Assignment{
+		Params:          Params{N: 3, V: 6},
+		ValidatorCounts: []int{3, 1, 2},
+	}
+	want := [][]int{{0, 1, 2}, {3}, {4, 5}}
+	var all []int
+	for node, w := range want {
+		got := a.Node(node).FinalityVoteDuties()
+		if !slices.Equal(got, w) {
+			t.Fatalf("node%d FinalityVoteDuties = %v, want %v", node, got, w)
+		}
+		all = append(all, got...)
+	}
+	// The per-node ranges partition the id space: every validator hosted exactly once.
+	if !slices.Equal(all, []int{0, 1, 2, 3, 4, 5}) {
+		t.Fatalf("ranges do not partition 0..V-1: %v", all)
+	}
+}
+
 // AggregateSubnets returns the subnets a node aggregates this slot — the committees whose
 // aggregator set includes it. A node can aggregate several committees, or none.
 func TestAggregateSubnets(t *testing.T) {
