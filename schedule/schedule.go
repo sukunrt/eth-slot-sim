@@ -118,6 +118,10 @@ type Assignment struct {
 	// Generated in Python, carried here verbatim.
 	ValidatorCounts []int      `json:"validator_counts,omitempty"`
 	Slots           []SlotPlan `json:"slots"`
+
+	// ranks caches the finality position tables (built once on first use, so the finality
+	// draws must not be mutated afterward) — the partial transport's position space (spec §3).
+	ranks finalityRanks
 }
 
 // Load reads a schedule.json produced by simctl/schedule.py.
@@ -188,11 +192,14 @@ func (a *Assignment) ProposerSchedule() []int {
 	return out
 }
 
-// AttestDuty is one attestation a node owes: which validator, on which subnet.
-// Content-free — the vote is decided later, by the coupling.
+// AttestDuty is one attestation a node owes: which validator, on which subnet, at which
+// committee position — the partial transport's wire identity (the committee seat for standard
+// attestations, the finality cell rank for finality votes; zero for AC votes, which stay
+// classic). Content-free — the vote is decided later, by the coupling.
 type AttestDuty struct {
-	Subnet int
-	Val    int
+	Subnet   int
+	Val      int
+	Position int
 }
 
 // View narrows the assignment to one node's slice (what a single host runs).
@@ -211,7 +218,7 @@ func (v View) AttestDuties(slot int) []AttestDuty {
 	for _, com := range v.a.Slots[slot].Committees {
 		for _, r := range com {
 			if r.Node == v.node {
-				duties = append(duties, AttestDuty{Subnet: r.Subnet, Val: r.Val})
+				duties = append(duties, AttestDuty{Subnet: r.Subnet, Val: r.Val, Position: r.Position})
 			}
 		}
 	}
@@ -347,7 +354,8 @@ func (v View) FinalityVoteDuties(slot int) []AttestDuty {
 	var out []AttestDuty
 	duty := func(val int) {
 		if include(val) {
-			out = append(out, AttestDuty{Subnet: v.a.FinalitySubnetOf[val], Val: val})
+			out = append(out, AttestDuty{Subnet: v.a.FinalitySubnetOf[val], Val: val,
+				Position: v.a.FinalityPosition(val)})
 		}
 	}
 	if c := v.a.ValidatorCounts; len(c) > 0 {

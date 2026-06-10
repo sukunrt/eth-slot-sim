@@ -201,11 +201,13 @@ func TestLoadDecoupledFixtureContract(t *testing.T) {
 		if !member || !slices.Contains(a.FinalitySubscribers[s], node) {
 			t.Fatalf("node %d FinalitySubnet = (%d,%v) inconsistent with FinalitySubscribers", node, s, member)
 		}
-		// One duty per hosted validator (uniform v%N here), on its drawn subnet.
+		// One duty per hosted validator (uniform v%N here), on its drawn subnet, at its cell
+		// rank (the rank itself is pinned by position_test.go).
 		duties := a.Node(node).FinalityVoteDuties(0) // base mode: the slot arg is ignored
 		var wantDuties []AttestDuty
 		for val := node; val < p.V; val += p.N {
-			wantDuties = append(wantDuties, AttestDuty{Subnet: a.FinalitySubnetOf[val], Val: val})
+			wantDuties = append(wantDuties, AttestDuty{
+				Subnet: a.FinalitySubnetOf[val], Val: val, Position: a.FinalityPosition(val)})
 		}
 		if !slices.Equal(duties, wantDuties) {
 			t.Fatalf("node %d FinalityVoteDuties = %v, want %v", node, duties, wantDuties)
@@ -312,7 +314,8 @@ func TestLoadSegregatedFixtureContract(t *testing.T) {
 			var want []AttestDuty
 			for val := node; val < p.V; val += p.N {
 				if a.FinalityRoundOf[val] == slot%k {
-					want = append(want, AttestDuty{Subnet: a.FinalitySubnetOf[val], Val: val})
+					want = append(want, AttestDuty{
+						Subnet: a.FinalitySubnetOf[val], Val: val, Position: a.FinalityPosition(val)})
 				}
 			}
 			if got := a.Node(node).FinalityVoteDuties(slot); !slices.Equal(got, want) {
@@ -357,18 +360,24 @@ func TestLoadSegregatedFixtureContract(t *testing.T) {
 
 // Under segregation FinalityVoteDuties filters the hosted validators by round (slot % k), in
 // both the uniform and the ValidatorCounts hosting models; a base (non-segregated) assignment
-// ignores the slot argument entirely.
+// ignores the slot argument entirely. Duty positions are the (subnet[, round]) cell ranks
+// (pinned in position_test.go). Each section builds a fresh Assignment — the rank tables are
+// built once per Assignment, so the draws must not be mutated after first use.
 func TestSegregatedFinalityVoteDuties(t *testing.T) {
-	a := &Assignment{
-		Params:           Params{N: 3, V: 6, AcSlotsPerFinalitySlot: 2},
-		FinalitySubnetOf: []int{1, 0, 0, 1, 0, 1},
-		FinalityRoundOf:  []int{0, 1, 0, 0, 1, 1},
+	segregated := func() *Assignment {
+		return &Assignment{
+			Params:           Params{N: 3, V: 6, AcSlotsPerFinalitySlot: 2},
+			FinalitySubnetOf: []int{1, 0, 0, 1, 0, 1},
+			FinalityRoundOf:  []int{0, 1, 0, 0, 1, 1},
+			// Cells: (s1,r0)={0,3}, (s0,r1)={1,4}, (s0,r0)={2}, (s1,r1)={5}.
+		}
 	}
 	// Uniform hosting (v % N): node 0 hosts vals 0 (round 0) and 3 (round 0).
+	a := segregated()
 	if got := a.Node(0).FinalityVoteDuties(0); !slices.Equal(got, []AttestDuty{
-		{Subnet: 1, Val: 0}, {Subnet: 1, Val: 3},
+		{Subnet: 1, Val: 0, Position: 0}, {Subnet: 1, Val: 3, Position: 1},
 	}) {
-		t.Fatalf("node0 FinalityVoteDuties(0) = %v, want [(1,0) (1,3)]", got)
+		t.Fatalf("node0 FinalityVoteDuties(0) = %v, want [(1,0,p0) (1,3,p1)]", got)
 	}
 	if got := a.Node(0).FinalityVoteDuties(1); got != nil {
 		t.Fatalf("node0 FinalityVoteDuties(1) = %v, want nil (both vals are round 0)", got)
@@ -378,23 +387,25 @@ func TestSegregatedFinalityVoteDuties(t *testing.T) {
 		t.Fatalf("node0 FinalityVoteDuties(2) = %v, want round-0 duties again", got)
 	}
 	// ValidatorCounts hosting: node 0 hosts vals 0,1,2 — rounds 0,1,0.
+	a = segregated()
 	a.ValidatorCounts = []int{3, 1, 2}
 	if got := a.Node(0).FinalityVoteDuties(1); !slices.Equal(got, []AttestDuty{
-		{Subnet: 0, Val: 1},
+		{Subnet: 0, Val: 1, Position: 0},
 	}) {
-		t.Fatalf("node0 counts FinalityVoteDuties(1) = %v, want [(0,1)]", got)
+		t.Fatalf("node0 counts FinalityVoteDuties(1) = %v, want [(0,1,p0)]", got)
 	}
 	if got := a.Node(0).FinalityVoteDuties(0); !slices.Equal(got, []AttestDuty{
-		{Subnet: 1, Val: 0}, {Subnet: 0, Val: 2},
+		{Subnet: 1, Val: 0, Position: 0}, {Subnet: 0, Val: 2, Position: 0},
 	}) {
-		t.Fatalf("node0 counts FinalityVoteDuties(0) = %v, want [(1,0) (0,2)]", got)
+		t.Fatalf("node0 counts FinalityVoteDuties(0) = %v, want [(1,0,p0) (0,2,p0)]", got)
 	}
-	// Base mode (no FinalityRoundOf): the slot argument is ignored — all duties, any slot.
+	// Base mode (no FinalityRoundOf): the slot argument is ignored — all duties, any slot;
+	// positions are subnet-wide ranks (subnet 1 cell = {0,3,5}).
+	a = segregated()
 	a.FinalityRoundOf = nil
-	a.ValidatorCounts = nil
 	for _, slot := range []int{0, 1, 7} {
 		if got := a.Node(0).FinalityVoteDuties(slot); !slices.Equal(got, []AttestDuty{
-			{Subnet: 1, Val: 0}, {Subnet: 1, Val: 3},
+			{Subnet: 1, Val: 0, Position: 0}, {Subnet: 1, Val: 3, Position: 1},
 		}) {
 			t.Fatalf("base node0 FinalityVoteDuties(%d) = %v, want all duties", slot, got)
 		}
@@ -422,7 +433,7 @@ func rawDuties(a *Assignment, node, slot int) []AttestDuty {
 	for _, com := range a.Slots[slot].Committees {
 		for _, r := range com {
 			if r.Node == node {
-				out = append(out, AttestDuty{Subnet: r.Subnet, Val: r.Val})
+				out = append(out, AttestDuty{Subnet: r.Subnet, Val: r.Val, Position: r.Position})
 			}
 		}
 	}
@@ -600,16 +611,17 @@ func TestDecoupledMembership(t *testing.T) {
 	}
 
 	// FinalityVoteDuties: one (val, subnet) pair per hosted validator (uniform v%N), the subnet
-	// from finality_subnet_of — a node's keys can land on several subnets.
+	// from finality_subnet_of — a node's keys can land on several subnets. Positions are the
+	// subnet cells' ranks: subnet0 = {0,2,4,7,8,10}, subnet1 = {1,3,5,6,9,11}.
 	if got := a.Node(0).FinalityVoteDuties(0); !slices.Equal(got, []AttestDuty{
-		{Subnet: 0, Val: 0}, {Subnet: 1, Val: 6},
+		{Subnet: 0, Val: 0, Position: 0}, {Subnet: 1, Val: 6, Position: 3},
 	}) {
-		t.Fatalf("node0 FinalityVoteDuties = %v, want [(0,0) (1,6)]", got)
+		t.Fatalf("node0 FinalityVoteDuties = %v, want [(0,0,p0) (1,6,p3)]", got)
 	}
 	if got := a.Node(5).FinalityVoteDuties(0); !slices.Equal(got, []AttestDuty{
-		{Subnet: 1, Val: 5}, {Subnet: 1, Val: 11},
+		{Subnet: 1, Val: 5, Position: 2}, {Subnet: 1, Val: 11, Position: 5},
 	}) {
-		t.Fatalf("node5 FinalityVoteDuties = %v, want [(1,5) (1,11)]", got)
+		t.Fatalf("node5 FinalityVoteDuties = %v, want [(1,5,p2) (1,11,p5)]", got)
 	}
 
 	// FinalitySubscribersOf: a subnet's member set; out-of-range ⇒ nil.
@@ -645,10 +657,11 @@ func TestFinalityVoteDutiesWithCounts(t *testing.T) {
 		ValidatorCounts:  []int{3, 1, 2},
 		FinalitySubnetOf: []int{1, 0, 0, 1, 0, 1},
 	}
+	// Positions are the subnet cells' ranks: subnet0 = {1,2,4}, subnet1 = {0,3,5}.
 	want := [][]AttestDuty{
-		{{Subnet: 1, Val: 0}, {Subnet: 0, Val: 1}, {Subnet: 0, Val: 2}},
-		{{Subnet: 1, Val: 3}},
-		{{Subnet: 0, Val: 4}, {Subnet: 1, Val: 5}},
+		{{Subnet: 1, Val: 0, Position: 0}, {Subnet: 0, Val: 1, Position: 0}, {Subnet: 0, Val: 2, Position: 1}},
+		{{Subnet: 1, Val: 3, Position: 1}},
+		{{Subnet: 0, Val: 4, Position: 2}, {Subnet: 1, Val: 5, Position: 2}},
 	}
 	var all []int
 	for node, w := range want {
