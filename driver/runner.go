@@ -404,7 +404,7 @@ func (r *NodeRunner) prejoinFinality(n int, view schedule.View) {
 	if !member {
 		return
 	}
-	duties := view.FinalityVoteDuties()
+	duties := view.FinalityVoteDuties(n)
 	aggSubnets := view.FinalityAggregations(n)
 
 	var voteDialed, aggDialed []int

@@ -202,7 +202,7 @@ func TestLoadDecoupledFixtureContract(t *testing.T) {
 			t.Fatalf("node %d FinalitySubnet = (%d,%v) inconsistent with FinalitySubscribers", node, s, member)
 		}
 		// One duty per hosted validator (uniform v%N here), on its drawn subnet.
-		duties := a.Node(node).FinalityVoteDuties()
+		duties := a.Node(node).FinalityVoteDuties(0) // base mode: the slot arg is ignored
 		var wantDuties []AttestDuty
 		for val := node; val < p.V; val += p.N {
 			wantDuties = append(wantDuties, AttestDuty{Subnet: a.FinalitySubnetOf[val], Val: val})
@@ -226,6 +226,177 @@ func TestLoadDecoupledFixtureContract(t *testing.T) {
 			if got := a.Node(node).FinalityAggregations(n); !slices.Equal(got, want) {
 				t.Fatalf("node %d FinalityAggregations(%d) = %v, want %v", node, n, got, want)
 			}
+		}
+	}
+}
+
+// TestLoadSegregatedFixtureContract guards the Python→Go schema handoff for the
+// validator-segregation fields: a schedule.json produced by simctl/schedule.py with
+// validator_segregation on unmarshals into the new fields and the slot-keyed accessors agree.
+func TestLoadSegregatedFixtureContract(t *testing.T) {
+	a, err := Load(filepath.Join("testdata", "segregated_schedule.json"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	p := a.Params
+	if p.N != 12 || p.V != 24 || p.AcSlotsPerFinalitySlot != 2 || p.FsSubnets != 3 ||
+		p.FsAggregators != 2 {
+		t.Fatalf("params = %+v, want n12 v24 k2 fs3 fsAgg2", p)
+	}
+	k := p.AcSlotsPerFinalitySlot
+
+	// Presence of finality_round_of IS the variant detection.
+	if !a.Segregated() {
+		t.Fatal("Segregated() = false on a segregated schedule")
+	}
+
+	// FinalityRoundOf partitions the VALIDATOR set into k rounds, and
+	// ValidatorsPerRoundSubnet is exactly the two draws' (round, subnet) cell counts.
+	if len(a.FinalityRoundOf) != p.V {
+		t.Fatalf("finality_round_of len %d, want V=%d", len(a.FinalityRoundOf), p.V)
+	}
+	cells := make([][]int, k)
+	for r := range cells {
+		cells[r] = make([]int, p.FsSubnets)
+	}
+	for val, r := range a.FinalityRoundOf {
+		if r < 0 || r >= k {
+			t.Fatalf("finality_round_of[%d] = %d out of range", val, r)
+		}
+		cells[r][a.FinalitySubnetOf[val]]++
+	}
+	if len(a.ValidatorsPerRoundSubnet) != k {
+		t.Fatalf("validators_per_round_subnet rows = %d, want k=%d",
+			len(a.ValidatorsPerRoundSubnet), k)
+	}
+	for r := range cells {
+		if !slices.Equal(cells[r], a.ValidatorsPerRoundSubnet[r]) {
+			t.Fatalf("validators_per_round_subnet[%d] = %v, want draw counts %v",
+				r, a.ValidatorsPerRoundSubnet[r], cells[r])
+		}
+	}
+	for s := range p.FsSubnets { // column sums = the subnet draw's counts
+		sum := 0
+		for r := range k {
+			sum += a.ValidatorsPerRoundSubnet[r][s]
+		}
+		if sum != a.ValidatorsPerSubnet[s] {
+			t.Fatalf("subnet %d round-cell sum %d != validators_per_subnet %d",
+				s, sum, a.ValidatorsPerSubnet[s])
+		}
+	}
+
+	// EVERY slot carries a fresh per-round aggregator draw (not just boundaries).
+	for _, sp := range a.Slots {
+		if len(sp.FinalityAggregators) != p.FsSubnets {
+			t.Fatalf("slot %d aggregators = %d, want %d (every slot is a round)",
+				sp.Slot, len(sp.FinalityAggregators), p.FsSubnets)
+		}
+		for subnet, aggs := range sp.FinalityAggregators {
+			if len(aggs) != min(p.FsAggregators, p.V) {
+				t.Fatalf("slot %d subnet %d aggregators = %d, want %d",
+					sp.Slot, subnet, len(aggs), min(p.FsAggregators, p.V))
+			}
+			for _, r := range aggs {
+				if r.Node != r.Val%p.N || r.Subnet != subnet {
+					t.Fatalf("slot %d subnet %d aggregator %+v inconsistent", sp.Slot, subnet, r)
+				}
+			}
+		}
+	}
+
+	// FinalityVoteDuties(s): exactly the hosted validators whose round is s % k, on their
+	// drawn subnets. Over one full finality slot every hosted validator appears exactly once.
+	for node := range p.N {
+		for slot := range len(a.Slots) {
+			var want []AttestDuty
+			for val := node; val < p.V; val += p.N {
+				if a.FinalityRoundOf[val] == slot%k {
+					want = append(want, AttestDuty{Subnet: a.FinalitySubnetOf[val], Val: val})
+				}
+			}
+			if got := a.Node(node).FinalityVoteDuties(slot); !slices.Equal(got, want) {
+				t.Fatalf("node %d FinalityVoteDuties(%d) = %v, want %v", node, slot, got, want)
+			}
+		}
+		var fslotVals []int
+		for slot := range k {
+			for _, d := range a.Node(node).FinalityVoteDuties(slot) {
+				fslotVals = append(fslotVals, d.Val)
+			}
+		}
+		slices.Sort(fslotVals)
+		var hosted []int
+		for val := node; val < p.V; val += p.N {
+			hosted = append(hosted, val)
+		}
+		if !slices.Equal(fslotVals, hosted) {
+			t.Fatalf("node %d votes %v over a finality slot, want every hosted validator once %v",
+				node, fslotVals, hosted)
+		}
+	}
+
+	// FinalityAggregations(s) is keyed by the AC slot itself: slot s's refs, deduped to subnets.
+	for slot := range len(a.Slots) {
+		refs := a.Slots[slot].FinalityAggregators
+		for node := range p.N {
+			var want []int
+			for subnet, aggs := range refs {
+				for _, r := range aggs {
+					if r.Node == node && !slices.Contains(want, subnet) {
+						want = append(want, subnet)
+					}
+				}
+			}
+			if got := a.Node(node).FinalityAggregations(slot); !slices.Equal(got, want) {
+				t.Fatalf("node %d FinalityAggregations(%d) = %v, want %v", node, slot, got, want)
+			}
+		}
+	}
+}
+
+// Under segregation FinalityVoteDuties filters the hosted validators by round (slot % k), in
+// both the uniform and the ValidatorCounts hosting models; a base (non-segregated) assignment
+// ignores the slot argument entirely.
+func TestSegregatedFinalityVoteDuties(t *testing.T) {
+	a := &Assignment{
+		Params:           Params{N: 3, V: 6, AcSlotsPerFinalitySlot: 2},
+		FinalitySubnetOf: []int{1, 0, 0, 1, 0, 1},
+		FinalityRoundOf:  []int{0, 1, 0, 0, 1, 1},
+	}
+	// Uniform hosting (v % N): node 0 hosts vals 0 (round 0) and 3 (round 0).
+	if got := a.Node(0).FinalityVoteDuties(0); !slices.Equal(got, []AttestDuty{
+		{Subnet: 1, Val: 0}, {Subnet: 1, Val: 3},
+	}) {
+		t.Fatalf("node0 FinalityVoteDuties(0) = %v, want [(1,0) (1,3)]", got)
+	}
+	if got := a.Node(0).FinalityVoteDuties(1); got != nil {
+		t.Fatalf("node0 FinalityVoteDuties(1) = %v, want nil (both vals are round 0)", got)
+	}
+	// Round arithmetic uses slot % k: slot 2 is round 0 again.
+	if got := a.Node(0).FinalityVoteDuties(2); len(got) != 2 {
+		t.Fatalf("node0 FinalityVoteDuties(2) = %v, want round-0 duties again", got)
+	}
+	// ValidatorCounts hosting: node 0 hosts vals 0,1,2 — rounds 0,1,0.
+	a.ValidatorCounts = []int{3, 1, 2}
+	if got := a.Node(0).FinalityVoteDuties(1); !slices.Equal(got, []AttestDuty{
+		{Subnet: 0, Val: 1},
+	}) {
+		t.Fatalf("node0 counts FinalityVoteDuties(1) = %v, want [(0,1)]", got)
+	}
+	if got := a.Node(0).FinalityVoteDuties(0); !slices.Equal(got, []AttestDuty{
+		{Subnet: 1, Val: 0}, {Subnet: 0, Val: 2},
+	}) {
+		t.Fatalf("node0 counts FinalityVoteDuties(0) = %v, want [(1,0) (0,2)]", got)
+	}
+	// Base mode (no FinalityRoundOf): the slot argument is ignored — all duties, any slot.
+	a.FinalityRoundOf = nil
+	a.ValidatorCounts = nil
+	for _, slot := range []int{0, 1, 7} {
+		if got := a.Node(0).FinalityVoteDuties(slot); !slices.Equal(got, []AttestDuty{
+			{Subnet: 1, Val: 0}, {Subnet: 1, Val: 3},
+		}) {
+			t.Fatalf("base node0 FinalityVoteDuties(%d) = %v, want all duties", slot, got)
 		}
 	}
 }
@@ -430,12 +601,12 @@ func TestDecoupledMembership(t *testing.T) {
 
 	// FinalityVoteDuties: one (val, subnet) pair per hosted validator (uniform v%N), the subnet
 	// from finality_subnet_of — a node's keys can land on several subnets.
-	if got := a.Node(0).FinalityVoteDuties(); !slices.Equal(got, []AttestDuty{
+	if got := a.Node(0).FinalityVoteDuties(0); !slices.Equal(got, []AttestDuty{
 		{Subnet: 0, Val: 0}, {Subnet: 1, Val: 6},
 	}) {
 		t.Fatalf("node0 FinalityVoteDuties = %v, want [(0,0) (1,6)]", got)
 	}
-	if got := a.Node(5).FinalityVoteDuties(); !slices.Equal(got, []AttestDuty{
+	if got := a.Node(5).FinalityVoteDuties(0); !slices.Equal(got, []AttestDuty{
 		{Subnet: 1, Val: 5}, {Subnet: 1, Val: 11},
 	}) {
 		t.Fatalf("node5 FinalityVoteDuties = %v, want [(1,5) (1,11)]", got)
@@ -481,7 +652,7 @@ func TestFinalityVoteDutiesWithCounts(t *testing.T) {
 	}
 	var all []int
 	for node, w := range want {
-		got := a.Node(node).FinalityVoteDuties()
+		got := a.Node(node).FinalityVoteDuties(0) // base mode: the slot arg is ignored
 		if !slices.Equal(got, w) {
 			t.Fatalf("node%d FinalityVoteDuties = %v, want %v", node, got, w)
 		}

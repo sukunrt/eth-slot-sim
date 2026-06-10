@@ -100,9 +100,18 @@ type Assignment struct {
 	// duties' subnets via fan-out when it isn't a member. ValidatorsPerSubnet[i] = that draw's
 	// per-subnet counts (~V/S ± binomial noise), carried for the scaled aggregate size and the
 	// coverage count. Generated in Python.
-	FinalitySubscribers [][]int    `json:"finality_subscribers,omitempty"`
-	FinalitySubnetOf    []int      `json:"finality_subnet_of,omitempty"`
-	ValidatorsPerSubnet []int      `json:"validators_per_subnet,omitempty"`
+	FinalitySubscribers [][]int `json:"finality_subscribers,omitempty"`
+	FinalitySubnetOf    []int   `json:"finality_subnet_of,omitempty"`
+	ValidatorsPerSubnet []int   `json:"validators_per_subnet,omitempty"`
+	// Validator segregation (empty when off — its presence IS how this side detects the
+	// variant; see Segregated). FinalityRoundOf[val] = the round (0..k-1) validator val votes
+	// in: AC slot s is round s % k, and only round-(s%k) validators emit finality votes in it
+	// (an independent uniform draw, stable for the run). ValidatorsPerRoundSubnet[r][i] = the
+	// (round, subnet) cell counts of the two independent draws (Σ_r per subnet =
+	// ValidatorsPerSubnet[i], ΣΣ = V) — they size the cell-scaled round aggregate. Generated in
+	// Python. See validator-segregation-spec.md.
+	FinalityRoundOf          []int   `json:"finality_round_of,omitempty"`
+	ValidatorsPerRoundSubnet [][]int `json:"validators_per_round_subnet,omitempty"`
 	// ValidatorCounts[node] = hosted-validator count (the Dist seam; see
 	// skewed-validators-spec.md). When present, validator ids are contiguous by node: node i
 	// hosts [Σ counts[:i], Σ counts[:i+1]) and Params.V = Σ counts. Empty ⇒ uniform v % N.
@@ -149,6 +158,14 @@ func (a *Assignment) SyncSubscribersOf(subnet int) []int {
 		return nil
 	}
 	return a.SyncSubscribers[subnet]
+}
+
+// Segregated reports whether this plan was generated with validator segregation
+// (per-AC-slot finality rounds): the presence of finality_round_of in schedule.json is the
+// variant detection — the schedule itself is the one source of truth, so the slot-keyed
+// accessors (FinalityVoteDuties, FinalityAggregations) branch on it, not on a driver flag.
+func (a *Assignment) Segregated() bool {
+	return len(a.FinalityRoundOf) > 0
 }
 
 // FinalitySubscribersOf returns the member nodes on finality subnet i (its stable membership) — the
@@ -313,50 +330,64 @@ func (v View) FinalitySubnet() (subnet int, member bool) {
 	return -1, false
 }
 
-// FinalityVoteDuties returns the finality votes this node owes every finality slot — one
+// FinalityVoteDuties returns the finality votes this node owes in AC slot `slot` — one
 // (val, subnet) pair per hosted validator, the subnet from FinalitySubnetOf (so one node's keys
-// can land on many subnets; it fans out where it isn't a member). With ValidatorCounts (the Dist
-// seam) hosted ids are contiguous by node: [Σ counts[:node], Σ counts[:node+1]); otherwise
-// uniform V→N: the validators v with v % N == node.
-func (v View) FinalityVoteDuties() []AttestDuty {
-	duty := func(val int) AttestDuty {
-		return AttestDuty{Subnet: v.a.FinalitySubnetOf[val], Val: val}
+// can land on many subnets; it fans out where it isn't a member). Base mode ignores slot: every
+// hosted validator votes once per finality slot (callers pass the fslot, inert here). Under
+// segregation (Segregated) the duties are the hosted validators whose FinalityRoundOf round is
+// slot % k — each votes in exactly one AC slot of every finality slot. With ValidatorCounts
+// (the Dist seam) hosted ids are contiguous by node: [Σ counts[:node], Σ counts[:node+1]);
+// otherwise uniform V→N: the validators v with v % N == node.
+func (v View) FinalityVoteDuties(slot int) []AttestDuty {
+	include := func(int) bool { return true }
+	if v.a.Segregated() {
+		round := slot % v.a.Params.AcSlotsPerFinalitySlot
+		include = func(val int) bool { return v.a.FinalityRoundOf[val] == round }
+	}
+	var out []AttestDuty
+	duty := func(val int) {
+		if include(val) {
+			out = append(out, AttestDuty{Subnet: v.a.FinalitySubnetOf[val], Val: val})
+		}
 	}
 	if c := v.a.ValidatorCounts; len(c) > 0 {
 		start := 0
 		for _, n := range c[:v.node] {
 			start += n
 		}
-		out := make([]AttestDuty, c[v.node])
-		for i := range out {
-			out[i] = duty(start + i)
+		for val := start; val < start+c[v.node]; val++ {
+			duty(val)
 		}
 		return out
 	}
-	var out []AttestDuty
 	for val := v.node; val < v.a.Params.V; val += v.a.Params.N {
-		out = append(out, duty(val))
+		duty(val)
 	}
 	return out
 }
 
-// FinalityAggregations returns the finality subnets this node aggregates for finality slot n —
-// the subnets with an aggregator ref hosted here, deduped (two selected validators on one node
-// yield one aggregate). Aggregator validators are sampled from the ENTIRE set, so the node is
-// generally NOT a member of these subnets: it pre-joins their meshes at AC slot n·k−1. Drawn per
-// finality slot and stored on the boundary AC slot (n·k), so this reads
-// Slots[n·k].FinalityAggregators. Nil if the node aggregates nothing or n is out of range.
-func (v View) FinalityAggregations(n int) []int {
+// FinalityAggregations returns the finality subnets this node aggregates — the subnets with an
+// aggregator ref hosted here, deduped (two selected validators on one node yield one
+// aggregate). Aggregator validators are sampled from the ENTIRE set, so the node is generally
+// NOT a member of these subnets: it pre-joins their meshes one AC slot ahead. Base mode: the
+// argument is the FINALITY slot n — the draw is per fslot, stored on the boundary AC slot
+// (n·k), so this reads Slots[n·k]. Under segregation (Segregated): the argument is the AC slot
+// itself — every slot is a round with its own draw, read from Slots[slot]. Nil if the node
+// aggregates nothing or the slot is out of range.
+func (v View) FinalityAggregations(slot int) []int {
 	k := v.a.Params.AcSlotsPerFinalitySlot
 	if k <= 0 {
 		return nil
 	}
-	boundary := n * k
-	if boundary < 0 || boundary >= len(v.a.Slots) {
+	idx := slot
+	if !v.a.Segregated() {
+		idx = slot * k
+	}
+	if idx < 0 || idx >= len(v.a.Slots) {
 		return nil
 	}
 	var out []int
-	for s, aggs := range v.a.Slots[boundary].FinalityAggregators {
+	for s, aggs := range v.a.Slots[idx].FinalityAggregators {
 		for _, r := range aggs {
 			if r.Node == v.node {
 				out = append(out, s) // subnets ascend, so out is sorted
