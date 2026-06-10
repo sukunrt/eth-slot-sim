@@ -131,8 +131,11 @@ func (n *Node) Start(ctx context.Context) error {
 		pubsub.WithNoAuthor(),
 		// 4096: the decoupled finality-attestation burst (~10k votes/subnet at one
 		// instant) overflowed 1000 — ~70 votes died at their publisher in the n1000 run.
+		// The validate (inbound) queue matches: with the capped batched verifier the
+		// backlog now waits in this queue, and 1000 would drop the burst's tail instead
+		// of delaying it.
 		pubsub.WithPeerOutboundQueueSize(4096),
-		pubsub.WithValidateQueueSize(1000),
+		pubsub.WithValidateQueueSize(4096),
 		pubsub.WithMaxMessageSize(maxMessageSize),
 	}
 	if n.RPCLogger != nil {
