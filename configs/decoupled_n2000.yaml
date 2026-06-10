@@ -1,11 +1,12 @@
-# Decoupled consensus run ladder, rung 2: 100 nodes, ~10k validators (tiered skew, V
-# emergent ≈ 100·N), 2 finality subnets. k=10 AC slots per finality slot; 20 AC slots =
-# 2 finality slots of 120s. Same realism template as decoupled_n4000.yaml (128 columns,
-# custody floor 8, offset 2s + jitter 0.5s, spec ac_vote_size/fs_aggregators 512/16).
-# ~10k finality attestations per finality slot. Runs locally or on the remote box.
+# Decoupled consensus run ladder, rung 5: 2000 nodes, ~200k validators (tiered skew, V
+# emergent ≈ 100·N), 20 finality subnets (~10k validators each). k=10 AC slots per
+# finality slot; 20 AC slots = 2 finality slots of 120s. Same realism template as
+# decoupled_n4000.yaml (128 columns, custody floor 8, offset 2s + jitter 0.5s, spec
+# ac_vote_size/fs_aggregators 512/16). ~200k finality attestations per finality slot —
+# heavy; run with `simctl run --remote sukun@ethp2p`.
 topology:
-  num_nodes: 100
-  degree: 16
+  num_nodes: 2000
+  degree: 80
   type: random
   seed: 42
   super_node_fraction: 0.5 # the full-custody backbone is drawn from the supernodes
@@ -17,7 +18,7 @@ gossipsub:
 
 attestation:
   enabled: false           # OFF: this block only supplies the AC-vote deadline (attestation_due_ms)
-  validators: 10000        # ignored under tiered (V is emergent ≈ 10k)
+  validators: 200000       # ignored under tiered (V is emergent ≈ 200k)
   committees: 1            # ignored under decoupled (no attestation committees)
   committee_size: 8        # ignored under decoupled
   attestation_due_ms: 4000 # the AC-vote deadline (reused; no new knob)
@@ -37,7 +38,7 @@ decoupled_consensus:
   enabled: true
   ac_vote_size: 512                      # spec default: VRF-selected validators voting on the AC each slot
   ac_slots_per_finality_slot: 10         # k: finality slot = 120s
-  fs_subnets: 2                          # finality subnets, validator-partitioned (stable node receiver core)
+  fs_subnets: 20                         # finality subnets, validator-partitioned (stable node receiver core)
   fs_aggregators: 16                     # spec default: aggregator validators per subnet per finality slot
   finality_slot_aggregation_fraction: 50 # % of the finality slot when aggregates publish
   fc_vote_offset_ms: 1000                # offset into the finality slot for the vote burst
@@ -51,7 +52,7 @@ block_size: 131072       # 128 KiB
 verify_delay_ms: 10
 offset_ms: 2000   # proposer publishes ~2s into the slot (mainnet-ish block arrival)
 jitter_ms: 500    # publish lands in [offset, offset+jitter) = [2.0s, 2.5s)
-startup_seconds: 150     # boot + dial + join stagger + settle (n1000-style bring-up)
-stop_time_minutes: 10    # 150 startup + 240 run + 30 drain = 420s, with margin
-log_level: warning       # keep Shadow's own log small
+startup_seconds: 240     # 2000 hosts at degree 80: extra dial + settle margin
+stop_time_minutes: 14    # 240 startup + 240 run + 30 drain = 510s, with margin
+log_level: warning       # 2000 hosts: keep Shadow's own log small
 seed: 1
