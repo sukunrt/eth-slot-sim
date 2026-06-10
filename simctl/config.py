@@ -112,9 +112,18 @@ class DecoupledConsensusConfig(BaseModel):
     ac_vote_size: int = 512  # VRF-selected validators voting on the AC each slot (one global topic); ≤ V
     ac_slots_per_finality_slot: int = 10  # k: a finality slot spans k AC slots
     fs_subnets: int = 40  # finality subnets, validator-partitioned (stable node receiver core); ≤ N
-    fs_aggregators: int = 16  # aggregator validators per subnet per finality slot (whole-set)
-    finality_slot_aggregation_fraction: int = 50  # % of the finality slot when aggregates publish
-    fc_vote_offset_ms: int = 1000  # offset into the finality slot for the per-validator vote burst
+    fs_aggregators: int = 16  # aggregator validators per subnet per finality slot (whole-set);
+    # per subnet PER ROUND when segregated
+    finality_slot_aggregation_fraction: int = 50  # % of the finality slot when aggregates publish;
+    # IGNORED under validator_segregation (round_aggregation_fraction replaces it)
+    fc_vote_offset_ms: int = 1000  # offset into the finality slot for the per-validator vote burst;
+    # reinterpreted as an offset into the AC slot when segregated
+    # Validator segregation (validator-segregation-spec.md): k round groups, one per AC slot —
+    # round s % k's validators vote in slot s, and per-slot aggregators publish cell-scaled
+    # aggregates at round_aggregation_fraction% of the AC slot (the last 100−f% is the
+    # aggregate-dissemination window).
+    validator_segregation: bool = False
+    round_aggregation_fraction: int = 67  # % of the AC slot when round aggregates publish
 
 
 class RegularTierConfig(BaseModel):
@@ -213,7 +222,11 @@ class SimConfig(BaseModel):
     @model_validator(mode="after")
     def _check_decoupled_consensus(self) -> "SimConfig":
         dc = self.decoupled_consensus
-        if dc is None or not dc.enabled:
+        if dc is None:
+            return self
+        if dc.validator_segregation and not dc.enabled:
+            raise ValueError("validator_segregation requires decoupled_consensus.enabled")
+        if not dc.enabled:
             return self
         # Decoupled reuses the attestation block for V + attestation_due_ms (the AC-vote deadline),
         # so it must be present — but the OLD attestation emit is off (the AC vote replaces it).
@@ -243,11 +256,18 @@ class SimConfig(BaseModel):
                 )
         if dc.fs_subnets > n:
             raise ValueError(f"fs_subnets ({dc.fs_subnets}) > N ({n})")
-        if not 0 < dc.finality_slot_aggregation_fraction < 100:
-            raise ValueError("finality_slot_aggregation_fraction must be in (0, 100)")
-        # The per-validator vote burst must precede the aggregation deadline within the finality slot.
-        agg_ms = dc.finality_slot_aggregation_fraction * dc.ac_slots_per_finality_slot * \
-            self.slot_duration_seconds * 1000 // 100
+        # The per-validator vote burst must precede the aggregation deadline. Segregated: a
+        # per-AC-slot bound (round_aggregation_fraction% of one slot — much tighter than base's
+        # per-fslot one; the base fraction knob is ignored). Base: within the finality slot.
+        if dc.validator_segregation:
+            if not 0 < dc.round_aggregation_fraction < 100:
+                raise ValueError("round_aggregation_fraction must be in (0, 100)")
+            agg_ms = dc.round_aggregation_fraction * self.slot_duration_seconds * 1000 // 100
+        else:
+            if not 0 < dc.finality_slot_aggregation_fraction < 100:
+                raise ValueError("finality_slot_aggregation_fraction must be in (0, 100)")
+            agg_ms = dc.finality_slot_aggregation_fraction * dc.ac_slots_per_finality_slot * \
+                self.slot_duration_seconds * 1000 // 100
         if dc.fc_vote_offset_ms >= agg_ms:
             raise ValueError(
                 f"fc_vote_offset_ms ({dc.fc_vote_offset_ms}) must be < the aggregation deadline ({agg_ms} ms)"

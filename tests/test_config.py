@@ -309,6 +309,64 @@ def test_decoupled_disabled_skips_validation(tmp_path):
     assert cfg.decoupled_consensus.enabled is False
 
 
+# --- validator segregation ----------------------------------------------------
+
+
+def _segregated_body(extra=""):
+    return (
+        "  ac_vote_size: 8\n  ac_slots_per_finality_slot: 2\n  fs_subnets: 2\n  fs_aggregators: 2\n"
+        "  validator_segregation: true\n" + extra
+    )
+
+
+def test_segregation_defaults():
+    dc = config.DecoupledConsensusConfig()
+    assert dc.validator_segregation is False
+    assert dc.round_aggregation_fraction == 67
+
+
+def test_segregated_loads(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml(dc_body=_segregated_body()))
+    cfg = config.load_config(p)
+    assert cfg.decoupled_consensus.validator_segregation is True
+    assert cfg.decoupled_consensus.round_aggregation_fraction == 67
+
+
+def test_segregation_requires_enabled(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml(dc_body="  enabled: false\n" + _segregated_body()))
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_round_fraction_bounds(tmp_path):
+    for frac in (0, 100):
+        p = tmp_path / "c.yaml"
+        p.write_text(_decoupled_yaml(dc_body=_segregated_body(f"  round_aggregation_fraction: {frac}\n")))
+        with pytest.raises(Exception):
+            config.load_config(p)
+
+
+def test_vote_offset_must_precede_round_deadline(tmp_path):
+    # Per-AC-slot bound: fc_vote_offset_ms < round_aggregation_fraction% · slot (67%·12s = 8040ms).
+    p = tmp_path / "c.yaml"
+    p.write_text(_decoupled_yaml(dc_body=_segregated_body("  fc_vote_offset_ms: 9000\n")))
+    with pytest.raises(Exception):
+        config.load_config(p)
+
+
+def test_base_fraction_ignored_when_segregated(tmp_path):
+    # finality_slot_aggregation_fraction is ignored under segregation — even a value that would
+    # fail the base checks loads fine.
+    p = tmp_path / "c.yaml"
+    p.write_text(
+        _decoupled_yaml(dc_body=_segregated_body("  finality_slot_aggregation_fraction: 0\n"))
+    )
+    cfg = config.load_config(p)
+    assert cfg.decoupled_consensus.validator_segregation is True
+
+
 def test_validator_distribution_tiered_needs_supers(tmp_path):
     p = tmp_path / "c.yaml"
     p.write_text(
