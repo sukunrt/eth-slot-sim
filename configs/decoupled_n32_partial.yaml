@@ -1,0 +1,56 @@
+# Decoupled consensus over the PARTIAL-MESSAGE transport (partial-attestation-spec.md):
+# decoupled_n32.yaml with attestation.transport: partial — the finality votes ride the
+# gossipsub partial-messages extension (AC votes stay classic). Same schedule, comparable runs.
+topology:
+  num_nodes: 32
+  degree: 6                # K: target peers per node
+  type: random
+  seed: 42
+  super_node_fraction: 0.5 # the full-custody backbone is drawn from the supernodes
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+attestation:
+  transport: partial
+  enabled: false           # OFF: this block only supplies the AC-vote deadline (attestation_due_ms)
+  validators: 320          # ignored under tiered (V is emergent ≈ 320)
+  committees: 1            # ignored under decoupled (no attestation committees)
+  committee_size: 8        # ignored under decoupled
+  attestation_due_ms: 4000 # the AC-vote deadline (reused; no new knob)
+
+data_columns:
+  enabled: true            # columns gate the AC vote (the "availability" chain)
+  num_columns: 8
+  blobs: 6
+  custody_floor: 8
+  full_custody_fraction: 0.5
+  column_backbone_floor: 3
+  verify_service_ms: 3
+  verify_parallelism_super: 16
+  verify_parallelism_regular: 4
+
+decoupled_consensus:
+  enabled: true
+  ac_vote_size: 8                        # VRF-selected validators voting on the AC each slot (global topic)
+  ac_slots_per_finality_slot: 2          # k
+  fs_subnets: 2                          # finality subnets, validator-partitioned (stable node receiver core)
+  fs_aggregators: 2                      # aggregator validators per subnet per finality slot (whole-set sample)
+  finality_slot_aggregation_fraction: 50 # % of the finality slot when aggregates publish
+  fc_vote_offset_ms: 1000                # offset into the finality slot for the vote burst
+
+validator_distribution:
+  type: tiered             # skewed hosting: V emergent ≈ 16·1.45 + 16·18.5 ≈ 320
+  super:
+    min: 1
+    max: 100
+    mean: 18.5
+
+num_slots: 5
+slot_duration_seconds: 12
+block_size: 131072
+verify_delay_ms: 10
+offset_ms: 0
+jitter_ms: 2000
