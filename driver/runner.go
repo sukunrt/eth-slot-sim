@@ -397,7 +397,7 @@ func (r *NodeRunner) armFinality(slot int, slotStart time.Time, view schedule.Vi
 		return
 	}
 	if (slot+1)%r.k == 0 { // the AC slot before a boundary: warm up finality slot (slot+1)/k
-		r.prejoinFinality((slot+1)/r.k, view)
+		go r.prejoinFinality((slot+1)/r.k, view) // off the slot path (see armRound)
 	}
 	if slot%r.k != 0 {
 		return
@@ -451,8 +451,13 @@ func (r *NodeRunner) armRound(slot int, slotStart time.Time, view schedule.View)
 	if slot == 0 {
 		r.prejoinFinality(0, view)
 	}
+	// The next round's warm-up runs OFF the slot path: prejoinFinality ends in a synchronous
+	// Dial barrier (waves of handshakes — seconds on hosts with duties across many subnets),
+	// and anything sequenced after it here slips past its offset: this round's 1s vote fired
+	// at p50 2.7s at n4000. The goroutine has the full slot to finish; only slot 0 above must
+	// pre-join inline (its own round votes 1s later and needs the topic joins done).
 	if slot+1 < len(r.sched.Slots) { // nothing to warm past the last slot
-		r.prejoinFinality(slot+1, view)
+		go r.prejoinFinality(slot+1, view)
 	}
 	r.mu.Lock()
 	fs := r.finals[slot]
