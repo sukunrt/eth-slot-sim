@@ -1,0 +1,52 @@
+# Decoupled consensus, 100 nodes x 100 validators each (uniform hosting, V = 10000),
+# 2 finality subnets, k=10 (two 120s finality slots over 20 AC slots) — the CLASSIC
+# transport side of the classic-vs-partial comparison (see decoupled_n100u_partial.yaml).
+topology:
+  num_nodes: 100
+  degree: 16
+  type: random
+  seed: 42
+  super_node_fraction: 0.5 # the full-custody backbone is drawn from the supernodes
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+attestation:
+  enabled: false           # OFF: this block only supplies the AC-vote deadline (attestation_due_ms)
+  validators: 10000        # uniform hosting: exactly 100 keys per node
+  committees: 1            # ignored under decoupled (no attestation committees)
+  committee_size: 8        # ignored under decoupled
+  attestation_due_ms: 4000 # the AC-vote deadline (reused; no new knob)
+
+data_columns:
+  enabled: true            # columns gate the AC vote (the "availability" chain)
+  num_columns: 128         # mainnet column universe; custody_floor 8 ⇒ sparse column subnets
+  blobs: 6
+  custody_floor: 8
+  full_custody_fraction: 0.5
+  column_backbone_floor: 3
+  verify_service_ms: 3
+  verify_parallelism_super: 16
+  verify_parallelism_regular: 4
+
+decoupled_consensus:
+  enabled: true
+  ac_vote_size: 512                      # spec default: VRF-selected validators voting on the AC each slot
+  ac_slots_per_finality_slot: 10         # k: finality slot = 120s
+  fs_subnets: 2                          # finality subnets, validator-partitioned (stable node receiver core)
+  fs_aggregators: 16                     # spec default: aggregator validators per subnet per finality slot
+  finality_slot_aggregation_fraction: 50 # % of the finality slot when aggregates publish
+  fc_vote_offset_ms: 1000                # offset into the finality slot for the vote burst
+
+num_slots: 20
+slot_duration_seconds: 12
+block_size: 131072       # 128 KiB
+verify_delay_ms: 10
+offset_ms: 2000   # proposer publishes ~2s into the slot (mainnet-ish block arrival)
+jitter_ms: 500    # publish lands in [offset, offset+jitter) = [2.0s, 2.5s)
+startup_seconds: 150     # boot + dial + join stagger + settle (n1000-style bring-up)
+stop_time_minutes: 10    # 150 startup + 240 run + 30 drain = 420s, with margin
+log_level: warning       # keep Shadow's own log small
+seed: 1
