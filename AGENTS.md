@@ -79,11 +79,8 @@ go generate ./pb     # after editing .proto files
 
 ## Where to read more
 
-- `decoupled-consensus-spec.md` (implementation spec), `decoupled-consensus.md` (the brief),
-  `validator-segregation-spec.md` (per-AC-slot finality rounds, a delta on the decoupled spec),
-  plus per-phase specs: `attestation-spec.md`, `data-columns-spec.md`,
-  `sync-committee-spec.md`, `phase1-spec.md`, `partial-attestation-spec.md` (partial-message
-  transport for the attestation + finality-vote floods).
 - `improvements.md` — maintainability backlog + **the naming glossary** (spec ↔
   schedule.json ↔ Go names for the same concepts; check it before renaming anything).
 - `run.md` — the remote Shadow run playbook.
+- `ladder-results.md` — run-ladder results. The per-phase implementation specs the code
+  comments cite (`*-spec.md`) were removed once implemented; see the repo history for them.
