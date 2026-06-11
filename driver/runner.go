@@ -34,19 +34,19 @@ type DecoupledParams struct {
 
 // NodeRunner is one node's stateful per-slot orchestrator. It owns the slot loop AND
 // is the node's OnReceive sink, so it can couple block arrival to attestation emit
-// while keeping Node and Validator pure. The multi-node Driver builds N; the Shadow
+// while keeping Node and Proposer pure. The multi-node Driver builds N; the Shadow
 // binary builds 1.
 type NodeRunner struct {
 	num       int
 	nd        *node.Node
-	val       *validator.Validator
+	proposer  *validator.Proposer
 	sched     *schedule.Assignment // nil ⇒ block-only (Phase 1)
 	attest    bool                 // emit attestations (with sched set but false ⇒ columns-only)
 	sync      bool                 // emit sync-committee messages + contributions (members only)
 	decoupled bool                 // emit AC votes + finality votes/aggregates (replaces attest/sync)
 	tracer    metrics.Tracer
 	slotDur   time.Duration
-	due       time.Duration // attestation / AC-vote deadline, offset into the slot
+	blockDue  time.Duration // attestation / AC-vote deadline, offset into the slot
 	aggDue    time.Duration // aggregate emit, offset into the slot (0 ⇒ no aggregates)
 	prep      time.Duration // Δ_prep before emitting on block receipt
 	seed      uint64        // seeds the per-slot subnet-peer dial choice
@@ -94,30 +94,48 @@ type finalityState struct {
 	aggSubnets    []int
 	aggSubscribed []string
 	aggDialed     []int
-	aggTimer      *time.Timer // fires at finalitySlotStart(n) + fcAggFraction%·k·slotDur
+	aggTimer      *time.Timer // publishes the aggregates at the deadline (aggregators only)
 	aggOnce       sync.Once   // one aggregate burst per finality slot
-	dropOnce      sync.Once   // teardown: at the aggregation deadline, or reap as the fallback
+	dropTimer     *time.Timer // tears the pre-join state down at the deadline (its own timer)
+	dropOnce      sync.Once   // teardown: at the drop deadline, or reap as the fallback
 	sealTimer     *time.Timer // partial transport: seals the round's buckets at the deadline
 }
 
 // slotState is the per-(node, slot) coupling holder.
 type slotState struct {
-	deadline   time.Time
-	duties     []schedule.AttestDuty
-	subscribed map[int]bool // the node's stable subnets (the partial member/fanout split)
-	dialed     []int        // extra peers dialed this slot, dropped at slot end
-	timer      *time.Timer
-	emitOnce   sync.Once
+	deadline time.Time
+	// attestationDuties: this slot's attest duties (attest path); acVoteDuties: the AC-vote duties
+	// (decoupled path) — mutually exclusive. attestationSubnetsSubscribed: the node's stable member
+	// subnets (the partial member/fanout split).
+	attestationDuties            []schedule.AttestDuty
+	acVoteDuties                 []schedule.ACVoteDuty
+	attestationSubnetsSubscribed map[int]bool
 
-	seen       bool
-	seenAt     time.Time
-	seenOrigin int
+	dialed       []int         // extra peers dialed this slot (off-path), dropped towards slot end
+	dialReady    chan struct{} // closed when the async dial finishes; emit waits before fan-out
+	dialTimer    *time.Timer   // drops the dials towards slot end (off endSlot's path)
+	dropDialOnce sync.Once     // the dialTimer and endSlot share one disconnect
+	timer        *time.Timer
 
-	// Sync-committee membership this slot (set at beginSlot from view.SyncSubnet). A member
+	blockSeen       bool
+	blockSeenAt     time.Time
+	blockSeenOrigin int
+
+	// The slot's single attestation/AC vote: claimed atomically (under r.mu) by whichever path
+	// fires first — the early block vote on readiness, or the deadline's prior-head fallback.
+	// alreadyVoted is the claim guard; votedForSlotBlock records whether it was for the slot's
+	// block (else the prior head), which the emit reads to set votedOrigin.
+	alreadyVoted      bool
+	votedForSlotBlock bool
+
+	// Sync-committee membership this slot (set in setupSlot from view.SyncSubnet). A member
 	// emits one message on syncSubnet at min(block_seen, deadline); a non-member emits none.
-	syncSubnet   int
-	syncMember   bool
-	syncEmitOnce sync.Once
+	// syncAlreadyVoted / syncVotedForSlotBlock are the sync vote's claim + decision (the sync
+	// twin of alreadyVoted; sync votes head un-gated by columns).
+	syncSubnet            int
+	syncMember            bool
+	syncAlreadyVoted      bool
+	syncVotedForSlotBlock bool
 
 	// Column custody gate (active when custody is non-empty). columnsComplete starts true
 	// when there's nothing to wait for (columns off ⇒ empty custody), so the gate is a no-op.
@@ -146,16 +164,16 @@ type slotState struct {
 // peer set (so per-slot subnet dials it adds on top can be dropped). pp (nil ⇒ classic)
 // switches the attestation-class floods to the partial transport — a transport, not a phase,
 // so it needs attest or dc on, and the node's Partial options set.
-func NewRunner(num int, nd *node.Node, val *validator.Validator, sched *schedule.Assignment, attest, sync bool,
-	tracer metrics.Tracer, slotDur, due, aggDue, prep time.Duration, seed uint64, basePeers []int,
+func NewRunner(num int, nd *node.Node, proposer *validator.Proposer, sched *schedule.Assignment, attest, sync bool,
+	tracer metrics.Tracer, slotDur, blockDue, aggDue, prep time.Duration, seed uint64, basePeers []int,
 	dc *DecoupledParams, pp *PartialParams) *NodeRunner {
 	base := make(map[int]bool, len(basePeers))
 	for _, p := range basePeers {
 		base[p] = true
 	}
 	r := &NodeRunner{
-		num: num, nd: nd, val: val, sched: sched, attest: attest, sync: sync, tracer: tracer,
-		slotDur: slotDur, due: due, aggDue: aggDue, prep: prep, seed: seed, base: base,
+		num: num, nd: nd, proposer: proposer, sched: sched, attest: attest, sync: sync, tracer: tracer,
+		slotDur: slotDur, blockDue: blockDue, aggDue: aggDue, prep: prep, seed: seed, base: base,
 		slots: make(map[int]*slotState),
 	}
 	if dc != nil {
@@ -235,76 +253,89 @@ func (r *NodeRunner) Prepare() {
 	}
 }
 
-// Run executes numSlots slots from runStart: per slot publish block duties, dial this
-// slot's subnet peers, arm the attestation deadline, and clean up at slot end.
+// Run paces one setup per slot start from runStart. beginSlot is non-blocking — every slot's work
+// (dials, emits, the finality pre-join, cleanup) runs in goroutines and timers — so the loop never
+// drifts off the slot clock. It returns at the last slot's end; the Driver then drains in-flight
+// receives.
 func (r *NodeRunner) Run(ctx context.Context, runStart time.Time, numSlots int) {
 	r.runCtx = ctx
 	for slot := range numSlots {
 		slotStart := runStart.Add(time.Duration(slot) * r.slotDur)
-		ss := r.beginSlot(slot, slotStart)
-		time.Sleep(time.Until(slotStart.Add(r.slotDur)))
-		r.endSlot(slot, ss)
+		time.Sleep(time.Until(slotStart))
+		r.beginSlot(slot, slotStart)
 	}
+	time.Sleep(time.Until(runStart.Add(time.Duration(numSlots) * r.slotDur)))
 }
 
-// beginSlot sets up this slot's coupling state when the node attests and/or syncs: it dials 2
-// subscribers of each attest-duty subnet it doesn't subscribe (so a fan-out publish has somewhere
-// to land), records sync membership, and arms the shared deadline timer — all before the block
-// publish, so a proposer that also votes can self-vote. The block publish itself runs unconditionally.
-func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
+// beginSlot kicks this slot's setup OFF the Run loop and returns at once: it MUST NOT block. All of
+// setupSlot — schedule reads, the fan-out dials, timer arming, the finality pre-join, the block
+// publishes — runs in its own goroutine (and the timers it arms), so a slow handshake or a heavy
+// schedule read never stalls the slot clock or the next slot's start.
+func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) {
+	go r.setupSlot(slot, slotStart)
+}
+
+// setupSlot builds this slot's coupling state when the node attests/syncs/decouples: it kicks off
+// the fan-out dials (off-path — emit awaits them), records sync membership, and arms the shared
+// deadline timer, all before the block publishes so a proposer that also votes can self-vote. The
+// block publishes run unconditionally; slot-end cleanup is armed last, as a timer.
+func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 	var ss *slotState
 	if r.sched != nil && (r.attest || r.sync || r.decoupled) {
 		view := r.sched.Node(r.num)
-		ss = &slotState{deadline: slotStart.Add(r.due)}
+		ss = &slotState{deadline: slotStart.Add(r.blockDue)}
 		if r.attest {
-			ss.duties = view.AttestDuties(slot)
-			if r.sched.NumColumns > 0 {
-				ss.custody = view.CustodyColumns()
-			}
-
+			ss.attestationDuties = view.AttestDuties(slot)
 			subscribed := map[int]bool{}
 			for _, s := range view.SubscribedSubnets() {
 				subscribed[s] = true
 			}
-			ss.subscribed = subscribed // emit's partial branch splits member vs fanout on it
-			needDial := map[int]bool{}
-			for _, d := range ss.duties {
+			ss.attestationSubnetsSubscribed = subscribed
+
+			needsDial := false
+			for _, d := range ss.attestationDuties {
 				if !subscribed[d.Subnet] {
-					needDial[d.Subnet] = true
+					needsDial = true
+					break
 				}
 			}
-			picked := map[int]bool{}
-			for subnet := range needDial {
-				if err := r.nd.Join(validator.AttestationTopic(subnet)); err != nil {
-					slog.Error("join duty subnet failed", "node", r.num, "subnet", subnet, "err", err)
-				}
-				n := 0
-				for _, peer := range r.shuffledSubscribers(slot, subnet) {
-					if n >= 2 {
-						break
-					}
-					if peer == r.num || r.base[peer] || picked[peer] {
-						continue
-					}
-					picked[peer] = true
-					ss.dialed = append(ss.dialed, peer)
-					n++
+
+			if needsDial {
+				ss.dialReady = make(chan struct{})
+				go r.dialDuties(slot, ss)
+				ss.dialTimer = time.AfterFunc(time.Until(slotStart.Add(r.slotDur)),
+					func() { r.dropDials(ss) })
+			}
+
+			// Aggregate phase: if this node aggregates any committee this slot, arm a timer to
+			// publish its M aggregates at the aggregate deadline (fixed offset, no coupling).
+			if r.aggDue > 0 {
+				ss.aggSubnets = view.AggregateSubnets(slot)
+				if len(ss.aggSubnets) > 0 {
+					ss.aggTimer = time.AfterFunc(time.Until(slotStart.Add(r.aggDue)), func() {
+						r.emitAggregate(slot, ss)
+					})
 				}
 			}
-			r.nd.Dial(ss.dialed) // synchronous: connections are up before the slot proceeds
 		} else if r.decoupled {
 			// The AC vote is the column-gated attestation, retargeted: duties come from the per-slot
 			// VRF draw, the vote rides the global topic (subscribed in Prepare — no per-subnet dial),
 			// and columns gate it exactly as for attestations.
-			ss.duties = view.ACVoteDuties(slot)
+			ss.acVoteDuties = view.ACVoteDuties(slot)
+		}
+
+		// Custody is the DA gate's input — the node's columns it must hold to vote block, the same
+		// for the attestation and the AC vote. A sync-only run votes un-gated, so it needs none.
+		if r.attest || r.decoupled {
 			ss.custody = view.CustodyColumns()
 		}
-		// The column gate only blocks the attestation vote; with no custody (columns off, or a
-		// sync-only run that doesn't attest) it's trivially complete.
+
+		// With no custody (columns off, or a sync-only run) the gate is trivially complete.
 		ss.columnsComplete = len(ss.custody) == 0
 		if !ss.columnsComplete {
 			ss.haveColumn = make(map[int]bool, len(ss.custody))
 		}
+
 		if r.sync { // this node's stable sync membership (a member emits one message on its subnet)
 			ss.syncSubnet, ss.syncMember = view.SyncSubnet()
 		}
@@ -312,18 +343,8 @@ func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 		r.mu.Lock()
 		r.slots[slot] = ss
 		r.mu.Unlock()
-		ss.timer = time.AfterFunc(time.Until(ss.deadline), func() { r.onDeadline(slot, ss) })
+		ss.timer = time.AfterFunc(time.Until(ss.deadline), func() { r.onBlockDeadline(slot, ss) })
 
-		// Aggregate phase: if this node aggregates any committee this slot, arm a timer to
-		// publish its M aggregates at the aggregate deadline (fixed offset, no coupling).
-		if r.attest && r.aggDue > 0 {
-			ss.aggSubnets = view.AggregateSubnets(slot)
-			if len(ss.aggSubnets) > 0 {
-				ss.aggTimer = time.AfterFunc(time.Until(slotStart.Add(r.aggDue)), func() {
-					r.emitAggregate(slot, ss)
-				})
-			}
-		}
 		// Sync contribution phase: if this node aggregates any sync subnet this slot, arm a timer
 		// to publish its contributions at the contribution deadline (reuses aggDue; fixed offset).
 		if r.sync && r.aggDue > 0 {
@@ -336,15 +357,23 @@ func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) *slotState {
 		}
 		// Finality chain: the aggregator pre-join (slot before a boundary) and, at a boundary, this
 		// node's fixed-time per-validator vote burst + (if an aggregator) its aggregate. FC state
-		// lives in r.finals, not ss, so it survives the intervening per-AC-slot endSlot pruning.
+		// lives in r.finals, not ss, so it survives the intervening per-AC-slot endSlot pruning. The
+		// two FC shapes are wholly separate paths: per-AC-slot rounds when segregated, per-finality-
+		// slot when base.
 		if r.decoupled {
-			r.armFinality(slot, slotStart, view)
+			if r.segregated {
+				r.armFinalitySubRound(slot, slotStart, view)
+			} else {
+				r.armFinality(slot, slotStart, view)
+			}
 		}
 	}
-	for _, duty := range r.val.Duties(slot) {
-		go r.publishBlock(slotStart.Add(duty.At), duty.Msg)
+	for _, blk := range r.proposer.BlocksToPublish(slot) {
+		go r.publishBlock(slotStart.Add(blk.At), blk.Msg)
 	}
-	return ss
+	if ss != nil { // slot-end cleanup runs off a timer, not the Run loop (which has moved on)
+		time.AfterFunc(time.Until(slotStart.Add(r.slotDur)), func() { r.endSlot(slot, ss) })
+	}
 }
 
 // shuffledSubscribers returns subnet's subscribers in a seeded order (so the 2 dialed are
@@ -358,6 +387,63 @@ func (r *NodeRunner) shuffledSubscribers(slot, subnet int) []int {
 	return order
 }
 
+// dialDuties joins each non-member duty subnet and dials 2 of its subscribers, so a fan-out
+// attestation publish has somewhere to land. It runs off the slot path (r.nd.Dial is a synchronous
+// handshake barrier); it records the dialed peers under the lock — before dialing, so a racing
+// disconnect still sees the full set — then closes ss.dialReady, which emit's fan-out waits on.
+// Subnets are walked in duty order (the seeded peer pick stays reproducible across runs/backends).
+func (r *NodeRunner) dialDuties(slot int, ss *slotState) {
+	defer close(ss.dialReady)
+	var dialed []int
+	picked, seen := map[int]bool{}, map[int]bool{}
+	for _, d := range ss.attestationDuties {
+		if ss.attestationSubnetsSubscribed[d.Subnet] || seen[d.Subnet] {
+			continue
+		}
+		seen[d.Subnet] = true
+		if err := r.nd.Join(validator.AttestationTopic(d.Subnet)); err != nil {
+			slog.Error("join duty subnet failed", "node", r.num, "subnet", d.Subnet, "err", err)
+		}
+		n := 0
+		for _, peer := range r.shuffledSubscribers(slot, d.Subnet) {
+			if n >= 2 {
+				break
+			}
+			if peer == r.num || r.base[peer] || picked[peer] {
+				continue
+			}
+			picked[peer] = true
+			dialed = append(dialed, peer)
+			n++
+		}
+	}
+	r.mu.Lock()
+	ss.dialed = dialed
+	r.mu.Unlock()
+	r.nd.Dial(dialed) // synchronous handshakes, but off the slot path
+}
+
+// dropDials disconnects this slot's fan-out dials, once. The dialTimer fires it towards slot end;
+// endSlot calls it as the backstop. Once-guarded so the two never double-close, reading ss.dialed
+// under the lock so it sees whatever dialDuties recorded.
+func (r *NodeRunner) dropDials(ss *slotState) {
+	ss.dropDialOnce.Do(func() {
+		r.mu.Lock()
+		dialed := ss.dialed
+		r.mu.Unlock()
+		r.nd.Disconnect(dialed)
+	})
+}
+
+// awaitDials blocks until this slot's fan-out dials are up (dialDuties closed ss.dialReady), so a
+// fan-out publish lands on a formed mesh. A nil channel (no dials needed this slot) returns at once.
+// Callers must run off the receive loop — emit reaches it only via a goroutine or a timer.
+func (r *NodeRunner) awaitDials(ss *slotState) {
+	if ss.dialReady != nil {
+		<-ss.dialReady
+	}
+}
+
 // endSlot stops the deadline timer, disconnects this slot's extra dials, and prunes the
 // slot state so connections and state don't leak across a multi-slot run.
 func (r *NodeRunner) endSlot(slot int, ss *slotState) {
@@ -365,13 +451,16 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 		return
 	}
 	ss.timer.Stop()
+	if ss.dialTimer != nil {
+		ss.dialTimer.Stop()
+	}
 	if ss.aggTimer != nil {
 		ss.aggTimer.Stop()
 	}
 	if ss.syncAggTimer != nil {
 		ss.syncAggTimer.Stop()
 	}
-	r.nd.Disconnect(ss.dialed)
+	r.dropDials(ss) // backstop: drop the fan-out dials if the dialTimer hasn't already
 	r.mu.Lock()
 	delete(r.slots, slot)
 	r.mu.Unlock()
@@ -384,18 +473,13 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 	}
 }
 
-// armFinality drives the finality chain at each AC slot: the pre-join at the slot before a
-// boundary (vote fan-out warm-up + aggregator subscribe), and — at a boundary (slot % k == 0) —
-// this node's per-validator vote burst plus the aggregation deadline. The boundary slot's
-// slotStart IS finalitySlotStart(n), so the FC timers are armed off it directly. State lives in
-// r.finals (created by the pre-join; at n=0 the pre-join runs here, there being no previous slot)
-// and spans k AC slots. Under segregation it dispatches to armRound instead — every slot is a
-// round.
+// armFinality drives the BASE finality chain at each AC slot (the segregated shape is armRound, a
+// wholly separate path the caller picks): the pre-join at the slot before a boundary (vote fan-out
+// warm-up + aggregator subscribe), and — at a boundary (slot % k == 0) — this node's per-validator
+// vote burst plus the aggregation deadline. The boundary slot's slotStart IS finalitySlotStart(n),
+// so the FC timers are armed off it directly. State lives in r.finals (created by the pre-join; at
+// n=0 the pre-join runs here, there being no previous slot) and spans k AC slots.
 func (r *NodeRunner) armFinality(slot int, slotStart time.Time, view schedule.View) {
-	if r.segregated {
-		r.armRound(slot, slotStart, view)
-		return
-	}
 	if (slot+1)%r.k == 0 { // the AC slot before a boundary: warm up finality slot (slot+1)/k
 		go r.prejoinFinality((slot+1)/r.k, view) // off the slot path (see armRound)
 	}
@@ -415,39 +499,40 @@ func (r *NodeRunner) armFinality(slot int, slotStart time.Time, view schedule.Vi
 	fs.voteTimer = time.AfterFunc(time.Until(slotStart.Add(r.fcVoteOffset)), func() {
 		r.emitFinalityVotes(n, fs)
 	})
-	// The aggregation deadline publishes the aggregates and tears the pre-join state down (the
-	// foreign subscribes and both dial sets). fracDur = fcAggFraction% · k · slotDur (multiply
-	// before divide) — a one-shot timer k/2 AC slots in the future; it fires independently of the
-	// per-AC-slot Run sleep, surviving the intervening endSlots because it lives in r.finals.
-	// With no aggregation phase (fraction 0) the teardown falls back to reapFinality.
-	needsDeadline := len(fs.aggSubnets) > 0 ||
-		(r.fcAggFraction > 0 && len(fs.voteDialed)+len(fs.aggDialed) > 0)
-	if needsDeadline {
-		fracDur := time.Duration(r.fcAggFraction) * time.Duration(r.k) * r.slotDur / 100
+	// Two independent one-shot timers at the aggregation deadline (fracDur = fcAggFraction% · k ·
+	// slotDur, multiply before divide — k/2 AC slots out, firing independently of the per-AC-slot
+	// Run sleep, surviving the intervening endSlots because they live in r.finals): an aggregator
+	// publishes its aggregates; every node that pre-joined network state drops it at the flood's
+	// semantic end. With no aggregation phase (fraction 0) the drop falls back to reapFinality.
+	fracDur := time.Duration(r.fcAggFraction) * time.Duration(r.k) * r.slotDur / 100
+	if len(fs.aggSubnets) > 0 {
 		fs.aggTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
 			r.emitFinalityAggregate(n, fs)
 		})
 	}
-	// Partial transport: the aggregation deadline is the vote flood's semantic end — seal the
-	// round's buckets on EVERY node then, so the next round's pre-joined aggregators (fresh
-	// mesh members) get no backlog push classic would never deliver. Stragglers still count
-	// until the reap prunes.
+	if r.fcAggFraction > 0 && fs.hasPrejoinState() {
+		fs.dropTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
+			r.dropFinality(fs)
+		})
+	}
+	// Partial transport: the deadline is the vote flood's semantic end — seal the round's buckets
+	// on EVERY node then, so the next round's pre-joined aggregators (fresh mesh members) get no
+	// backlog push classic would never deliver. Stragglers still count until the reap prunes.
 	if r.partial && r.fcAggFraction > 0 {
-		fracDur := time.Duration(r.fcAggFraction) * time.Duration(r.k) * r.slotDur / 100
 		fs.sealTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
 			r.nd.SealPartial(node.KindFinalityVote, n)
 		})
 	}
 }
 
-// armRound drives the per-AC-slot finality round (validator segregation): every slot pre-joins
+// armFinalitySubRound drives the per-AC-slot finality round (validator segregation): every slot pre-joins
 // the NEXT slot's round (slot 0 also prepares itself, there being no previous slot), then arms
 // this round's vote burst at slotStart + fcVoteOffset and its aggregation deadline at
 // roundAggFraction% of the slot — both inside this AC slot, so the timers fire before this
 // slot's endSlot reaps the state. The per-slot pre-join overlaps the previous round's teardown
 // (its deadline) every slot; dropFinality's sparing covers that, exactly as it covers the base
 // k=2-at-50% coincidence.
-func (r *NodeRunner) armRound(slot int, slotStart time.Time, view schedule.View) {
+func (r *NodeRunner) armFinalitySubRound(slot int, slotStart time.Time, view schedule.View) {
 	if slot == 0 {
 		r.prejoinFinality(0, view)
 	}
@@ -468,18 +553,23 @@ func (r *NodeRunner) armRound(slot int, slotStart time.Time, view schedule.View)
 	fs.voteTimer = time.AfterFunc(time.Until(slotStart.Add(r.fcVoteOffset)), func() {
 		r.emitFinalityVotes(slot, fs)
 	})
-	needsDeadline := len(fs.aggSubnets) > 0 ||
-		(r.roundAggFraction > 0 && len(fs.voteDialed)+len(fs.aggDialed) > 0)
-	if needsDeadline {
-		fracDur := time.Duration(r.roundAggFraction) * r.slotDur / 100
+	// Publish and teardown are independent one-shot timers at the deadline (see armFinality): an
+	// aggregator publishes; anyone who pre-joined network state drops it. reapFinality is the
+	// teardown fallback when the agg phase is off.
+	fracDur := time.Duration(r.roundAggFraction) * r.slotDur / 100
+	if len(fs.aggSubnets) > 0 {
 		fs.aggTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
 			r.emitFinalityAggregate(slot, fs)
 		})
 	}
+	if r.roundAggFraction > 0 && fs.hasPrejoinState() {
+		fs.dropTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
+			r.dropFinality(fs)
+		})
+	}
 	// Partial transport: seal the round's buckets at the per-slot deadline (see armFinality).
 	if r.partial && r.roundAggFraction > 0 {
-		fracDur := time.Duration(r.roundAggFraction) * r.slotDur / 100
-		fs.sealTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
+		fs.sealTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur).Add(200*time.Millisecond)), func() {
 			r.nd.SealPartial(node.KindFinalityVote, slot)
 		})
 	}
@@ -651,11 +741,11 @@ func (r *NodeRunner) emitFinalityVotesPartial(n int, fs *finalityState, at time.
 }
 
 // emitFinalityAggregate publishes one population-scaled aggregate per aggregated subnet on the
-// global topic, at most once per round, then tears the round's pre-join state down. The
-// aggregate's size derives from the schedule's population counts (the subnet draw in base mode,
-// the (round, subnet) cell under segregation), not from collected votes — this cut is
-// dissemination-only (the votes' fork-choice content is a planned extension), so it is
-// fixed-time. n is the round key: the finality slot in base mode, the AC slot under segregation.
+// global topic, at most once per round. The aggregate's size derives from the schedule's
+// population counts (the subnet draw in base mode, the (round, subnet) cell under segregation),
+// not from collected votes — this cut is dissemination-only (the votes' fork-choice content is a
+// planned extension), so it is fixed-time. n is the round key: the finality slot in base mode, the
+// AC slot under segregation. Teardown of the pre-join state is the separate dropTimer, not here.
 func (r *NodeRunner) emitFinalityAggregate(n int, fs *finalityState) {
 	fs.aggOnce.Do(func() {
 		at := time.Now()
@@ -667,17 +757,22 @@ func (r *NodeRunner) emitFinalityAggregate(n int, fs *finalityState) {
 					"node", r.num, "finality_slot", n, "subnet", subnet, "err", err)
 			}
 		}
-		r.dropFinality(fs)
 	})
+}
+
+// hasPrejoinState reports whether prejoinFinality set up any network state for this round (fan-out
+// dials, aggregation dials, or foreign aggregation subscribes) that dropFinality must release.
+func (fs *finalityState) hasPrejoinState() bool {
+	return len(fs.voteDialed) > 0 || len(fs.aggDialed) > 0 || len(fs.aggSubscribed) > 0
 }
 
 // dropFinality tears down a finality slot's pre-join state: unsubscribes the aggregation-only
 // (foreign) subnets and disconnects both dial sets — sparing whatever another LIVE finality
 // state still lists. The sparing matters because the deadline can coincide with the next
 // finality slot's pre-join (k=2 at 50% lands exactly on it), and a node aggregating the same
-// subnet — or dialing the same peers — twice in a row must not lose what it just set up. Runs
-// at the aggregation deadline, after the aggregates publish; reapFinality is the fallback when
-// no deadline timer was armed.
+// subnet — or dialing the same peers — twice in a row must not lose what it just set up. Fired by
+// the dropTimer at the aggregation deadline; reapFinality is the fallback when no dropTimer was
+// armed (agg phase off).
 func (r *NodeRunner) dropFinality(fs *finalityState) {
 	fs.dropOnce.Do(func() {
 		keepTopic, keepPeer := map[string]bool{}, map[int]bool{}
@@ -741,6 +836,9 @@ func (r *NodeRunner) reapFinality(slot int) {
 	if fs.aggTimer != nil {
 		fs.aggTimer.Stop()
 	}
+	if fs.dropTimer != nil {
+		fs.dropTimer.Stop()
+	}
 	if fs.sealTimer != nil {
 		fs.sealTimer.Stop()
 	}
@@ -802,8 +900,8 @@ func (r *NodeRunner) onBlockProcessed(slot, origin int, at time.Time) {
 		r.mu.Unlock()
 		return
 	}
-	if !ss.seen {
-		ss.seen, ss.seenAt, ss.seenOrigin = true, at, origin
+	if !ss.blockSeen {
+		ss.blockSeen, ss.blockSeenAt, ss.blockSeenOrigin = true, at, origin
 	}
 	r.mu.Unlock()
 	r.tryEarlyEmit(slot, ss)
@@ -844,42 +942,46 @@ func (r *NodeRunner) markColumnsComplete(slot int, at time.Time) {
 	r.mu.Unlock()
 }
 
-// tryEarlyEmit attempts this node's early vote-block attestation. The gate: vote block only
-// once the block is processed AND all custody columns are in, emitted at
-// max(block, columns_complete)+Δ_prep and only if that lands by the deadline (else the
-// deadline timer votes prior head). Reuses the pure emitDecision by feeding it the gated
-// readiness and the later of the two times; emitOnce collapses the racing block/column/
-// deadline attempts into one emission.
+// tryEarlyEmit attempts this node's early block vote. The gate: vote block only once the block is
+// processed AND all custody columns are in, emitted at max(block, columns_complete)+Δ_prep and only
+// if that lands by the deadline. If so it claims the slot's vote here, atomically — so the deadline
+// just votes prior head when nothing was claimed. Called on every block/column event; the first one
+// that finds the node ready-in-time wins the claim, the rest no-op.
 func (r *NodeRunner) tryEarlyEmit(slot int, ss *slotState) {
 	if !r.attest && !r.decoupled { // a sync-only run has a slotState but no column-gated vote
 		return
 	}
 	r.mu.Lock()
-	ready := ss.seen && ss.columnsComplete
-	processed := laterOf(ss.seenAt, ss.columnsCompleteAt)
-	seenOrigin, deadline := ss.seenOrigin, ss.deadline
-	r.mu.Unlock()
-
-	emitAt, voteBlock := emitDecision(ready, processed, deadline, r.prep)
-	if !voteBlock {
+	if ss.alreadyVoted { // claimed by an earlier event or the deadline
+		r.mu.Unlock()
 		return
 	}
+	ready := ss.blockSeen && ss.columnsComplete
+	processed := laterOf(ss.blockSeenAt, ss.columnsCompleteAt)
+	emitAt, voteBlock := emitDecision(ready, processed, ss.deadline, r.prep)
+	if !voteBlock { // not ready in time — leave the vote for the deadline (prior head)
+		r.mu.Unlock()
+		return
+	}
+	ss.alreadyVoted, ss.votedForSlotBlock = true, true
+	r.mu.Unlock()
+
 	if d := time.Until(emitAt); d > 0 { // honor Δ_prep before emitting
-		time.AfterFunc(d, func() { r.emitGated(slot, ss, seenOrigin) })
+		time.AfterFunc(d, func() { r.emitGated(slot, ss) })
 	} else {
-		r.emitGated(slot, ss, seenOrigin)
+		go r.emitGated(slot, ss) // off the receive loop: emit may await the dials
 	}
 }
 
-// emitGated dispatches the column-gated vote to the active phase's emitter: the AC vote (one
-// global topic) under decoupled, else the per-subnet attestation. Both share ss.emitOnce, so a
-// slot emits exactly one (attest and decoupled are mutually exclusive).
-func (r *NodeRunner) emitGated(slot int, ss *slotState, votedOrigin int) {
+// emitGated dispatches the claimed vote to the active phase's emitter: the AC vote (one global
+// topic) under decoupled, else the per-subnet attestation. The decision (block vs prior head) was
+// recorded in ss by the claim, so the emitter reads it; attest and decoupled are exclusive.
+func (r *NodeRunner) emitGated(slot int, ss *slotState) {
 	if r.decoupled {
-		r.emitACVote(slot, ss, votedOrigin)
+		r.emitACVote(slot, ss)
 		return
 	}
-	r.emit(slot, ss, votedOrigin)
+	r.emit(slot, ss)
 }
 
 // trySyncEmit attempts this member's sync-committee message — the head vote, emitted at
@@ -894,44 +996,51 @@ func (r *NodeRunner) trySyncEmit(slot int, ss *slotState) {
 		return
 	}
 	r.mu.Lock()
-	seen, seenAt, origin, deadline := ss.seen, ss.seenAt, ss.seenOrigin, ss.deadline
-	r.mu.Unlock()
-	emitAt, voteHead := emitDecision(seen, seenAt, deadline, r.prep)
-	if !voteHead {
+	if ss.syncAlreadyVoted {
+		r.mu.Unlock()
 		return
 	}
+	emitAt, voteHead := emitDecision(ss.blockSeen, ss.blockSeenAt, ss.deadline, r.prep)
+	if !voteHead { // not in time — leave the sync vote for the deadline (prior head)
+		r.mu.Unlock()
+		return
+	}
+	ss.syncAlreadyVoted, ss.syncVotedForSlotBlock = true, true
+	r.mu.Unlock()
+
 	if d := time.Until(emitAt); d > 0 { // honor Δ_prep before emitting
-		time.AfterFunc(d, func() { r.emitSyncMessage(slot, ss, origin) })
+		time.AfterFunc(d, func() { r.emitSyncMessage(slot, ss) })
 	} else {
-		r.emitSyncMessage(slot, ss, origin)
+		r.emitSyncMessage(slot, ss)
 	}
 }
 
-// onDeadline emits this slot's attestations if not already emitted, re-deriving the vote from
-// block-seen + custody-complete state (so a block/column recorded exactly at the deadline
-// still votes block); otherwise it votes prior head — a node with the block but a missing
-// custody column votes prior, the column phase's measurable effect on the slot.
-func (r *NodeRunner) onDeadline(slot int, ss *slotState) {
-	r.mu.Lock()
-	ready := ss.seen && ss.columnsComplete
-	processed := laterOf(ss.seenAt, ss.columnsCompleteAt)
-	origin, seen, seenAt := ss.seenOrigin, ss.seen, ss.seenAt
-	r.mu.Unlock()
+// onBlockDeadline casts this slot's vote for the prior head if the early path never claimed a block
+// vote — the column phase's measurable effect: a node with the block but a missing custody column
+// reaches here unclaimed and votes prior. If the early path already claimed (block), this no-ops.
+// The claim is atomic (under r.mu), so the deadline and the early path never both emit.
+func (r *NodeRunner) onBlockDeadline(slot int, ss *slotState) {
 	if r.attest || r.decoupled {
-		_, voteBlock := emitDecision(ready, processed, ss.deadline, r.prep)
-		votedOrigin := -1
-		if voteBlock {
-			votedOrigin = origin
+		r.mu.Lock()
+		voteParent := !ss.alreadyVoted
+		if voteParent { // claim the prior-head vote; leave an early block claim untouched
+			ss.alreadyVoted, ss.votedForSlotBlock = true, false
 		}
-		r.emitGated(slot, ss, votedOrigin)
+		r.mu.Unlock()
+		if voteParent {
+			r.emitGated(slot, ss)
+		}
 	}
 	if r.sync && ss.syncMember { // sync votes head on block-seen alone (un-gated by columns)
-		_, voteHead := emitDecision(seen, seenAt, ss.deadline, r.prep)
-		votedOrigin := -1
-		if voteHead {
-			votedOrigin = origin
+		r.mu.Lock()
+		voteParent := !ss.syncAlreadyVoted
+		if voteParent {
+			ss.syncAlreadyVoted, ss.syncVotedForSlotBlock = true, false
 		}
-		r.emitSyncMessage(slot, ss, votedOrigin)
+		r.mu.Unlock()
+		if voteParent {
+			r.emitSyncMessage(slot, ss)
+		}
 	}
 }
 
@@ -943,43 +1052,53 @@ func laterOf(a, b time.Time) time.Time {
 	return a
 }
 
-// emit publishes one attestation per duty, at most once per slot (the emit-once guard).
-// votedOrigin is the voted block's origin (>=0) or -1 for the prior head.
-func (r *NodeRunner) emit(slot int, ss *slotState, votedOrigin int) {
-	ss.emitOnce.Do(func() {
-		at := time.Now()
-		votedBlock := votedOrigin >= 0
-		if r.partial {
-			r.emitPartial(slot, ss, votedOrigin, votedBlock, at)
-			return
+// emit publishes one attestation per duty. The claim (tryEarlyEmit / onBlockDeadline) already
+// guaranteed it runs at most once, so there's no emit-once guard here — it reads the recorded
+// decision: votedForSlotBlock ⇒ the block's origin, else -1 for the prior head.
+func (r *NodeRunner) emit(slot int, ss *slotState) {
+	r.awaitDials(ss) // the fan-out needs the warm-up dials up (see setupSlot/dialDuties)
+	at := time.Now()
+	votedBlock := ss.votedForSlotBlock
+	votedOrigin := r.votedOrigin(ss)
+	if r.partial {
+		r.emitPartial(slot, ss, votedOrigin, votedBlock, at)
+		return
+	}
+	for _, d := range ss.attestationDuties {
+		topic := validator.AttestationTopic(d.Subnet)
+		if err := r.nd.Join(topic); err != nil {
+			slog.Error("join subnet failed", "node", r.num, "subnet", d.Subnet, "err", err)
+			continue
 		}
-		for _, d := range ss.duties {
-			topic := validator.AttestationTopic(d.Subnet)
-			if err := r.nd.Join(topic); err != nil {
-				slog.Error("join subnet failed", "node", r.num, "subnet", d.Subnet, "err", err)
-				continue
-			}
-			msg := validator.MakeAttestation(slot, d.Subnet, d.Val, r.num, votedOrigin)
-			r.tracer.OnPublish(metrics.AttestID(slot, d.Subnet, d.Val, r.num), votedBlock, at)
-			if err := r.nd.Publish(r.runCtx, topic, msg.Payload); err != nil {
-				slog.Error("publish attestation failed", "node", r.num, "slot", slot, "subnet", d.Subnet, "err", err)
-			}
+		msg := validator.MakeAttestation(slot, d.Subnet, d.Val, r.num, votedOrigin)
+		r.tracer.OnPublish(metrics.AttestID(slot, d.Subnet, d.Val, r.num), votedBlock, at)
+		if err := r.nd.Publish(r.runCtx, topic, msg.Payload); err != nil {
+			slog.Error("publish attestation failed", "node", r.num, "slot", slot, "subnet", d.Subnet, "err", err)
 		}
-	})
+	}
+}
+
+// votedOrigin maps the recorded attestation/AC vote decision to a wire origin: the block's origin
+// when the slot voted block, else -1 (the prior head).
+func (r *NodeRunner) votedOrigin(ss *slotState) int {
+	if ss.votedForSlotBlock {
+		return ss.blockSeenOrigin
+	}
+	return -1
 }
 
 // emitPartial is emit's partial-transport twin: identical instants and OnPublish records, but
 // the votes enter the partial manager — publishLocal on subscribed duty subnets (the tick loop
-// pushes them to the mesh) and ONE eager fanout batch per non-member duty subnet (beginSlot's
+// pushes them to the mesh) and ONE eager fanout batch per non-member duty subnet (dialDuties'
 // Join + dial-2 warmup already gave the fanout somewhere to land). All of one emit's duties
 // share votedOrigin, so each subnet has exactly one vote bucket here; the fork against other
 // nodes' differing votes lives in the attestation_data bytes.
 func (r *NodeRunner) emitPartial(slot int, ss *slotState, votedOrigin int, votedBlock bool, at time.Time) {
 	sig := validator.MakePartialSignature(r.sigSize)
 	fanout := map[int][]int{} // non-member duty subnet → positions
-	for _, d := range ss.duties {
+	for _, d := range ss.attestationDuties {
 		r.tracer.OnPublish(metrics.AttestID(slot, d.Subnet, d.Val, r.num), votedBlock, at)
-		if ss.subscribed[d.Subnet] {
+		if ss.attestationSubnetsSubscribed[d.Subnet] {
 			data := validator.MakePartialAttData(slot, d.Subnet, votedOrigin, r.attDataSize)
 			r.nd.PublishLocalPartial(validator.AttestationTopic(d.Subnet), slot, d.Position, sig, data)
 			continue
@@ -998,44 +1117,42 @@ func (r *NodeRunner) emitPartial(slot int, ss *slotState, votedOrigin int, voted
 	}
 }
 
-// emitACVote publishes one AC vote per duty on the single global availability-vote topic, at most
-// once per slot — the no-aggregation, no-subnet twin of emit (the AC vote is the column-gated
-// attestation, retargeted). votedOrigin is the voted block's origin (>=0) or -1 for the prior head.
-func (r *NodeRunner) emitACVote(slot int, ss *slotState, votedOrigin int) {
-	ss.emitOnce.Do(func() {
-		at := time.Now()
-		votedBlock := votedOrigin >= 0
-		for _, d := range ss.duties {
-			msg := validator.MakeACVote(slot, d.Val, r.num, votedOrigin)
-			r.tracer.OnPublish(metrics.ACVoteID(slot, d.Val, r.num), votedBlock, at)
-			if err := r.nd.Publish(r.runCtx, validator.AvailabilityVoteTopic, msg.Payload); err != nil {
-				slog.Error("publish AC vote failed", "node", r.num, "slot", slot, "val", d.Val, "err", err)
-			}
+// emitACVote publishes one AC vote per duty on the single global availability-vote topic — the
+// no-aggregation, no-subnet twin of emit (the AC vote is the column-gated attestation, retargeted).
+// The claim guaranteed a single emission; it reads the recorded decision (see votedOrigin).
+func (r *NodeRunner) emitACVote(slot int, ss *slotState) {
+	at := time.Now()
+	votedBlock := ss.votedForSlotBlock
+	votedOrigin := r.votedOrigin(ss)
+	for _, d := range ss.acVoteDuties {
+		msg := validator.MakeACVote(slot, d.Val, r.num, votedOrigin)
+		r.tracer.OnPublish(metrics.ACVoteID(slot, d.Val, r.num), votedBlock, at)
+		if err := r.nd.Publish(r.runCtx, validator.AvailabilityVoteTopic, msg.Payload); err != nil {
+			slog.Error("publish AC vote failed", "node", r.num, "slot", slot, "val", d.Val, "err", err)
 		}
-	})
+	}
 }
 
-// emitSyncMessage publishes this member's one sync-committee message on its subnet, at most once
-// per slot (the sync-emit-once guard collapses the racing block-receipt and deadline attempts).
-// votedOrigin is the voted block's origin (>=0) or -1 for the prior head. A no-op for a non-member.
-func (r *NodeRunner) emitSyncMessage(slot int, ss *slotState, votedOrigin int) {
-	if !ss.syncMember {
+// emitSyncMessage publishes this member's one sync-committee message on its subnet. The claim
+// (trySyncEmit / onBlockDeadline) already guaranteed a single emission, so there's no guard here;
+// it reads syncVotedForSlotBlock — head ⇒ the block's origin, else -1 for the prior head.
+func (r *NodeRunner) emitSyncMessage(slot int, ss *slotState) {
+	voteHead := ss.syncVotedForSlotBlock
+	votedOrigin := -1
+	if voteHead {
+		votedOrigin = ss.blockSeenOrigin
+	}
+	at := time.Now()
+	topic := validator.SyncMessageTopic(ss.syncSubnet)
+	if err := r.nd.Join(topic); err != nil { // already subscribed at bring-up; idempotent
+		slog.Error("join sync subnet failed", "node", r.num, "subnet", ss.syncSubnet, "err", err)
 		return
 	}
-	ss.syncEmitOnce.Do(func() {
-		at := time.Now()
-		voteHead := votedOrigin >= 0
-		topic := validator.SyncMessageTopic(ss.syncSubnet)
-		if err := r.nd.Join(topic); err != nil { // already subscribed at bring-up; idempotent
-			slog.Error("join sync subnet failed", "node", r.num, "subnet", ss.syncSubnet, "err", err)
-			return
-		}
-		msg := validator.MakeSyncMessage(slot, ss.syncSubnet, r.num, votedOrigin)
-		r.tracer.OnPublish(metrics.SyncMessageID(slot, ss.syncSubnet, r.num), voteHead, at)
-		if err := r.nd.Publish(r.runCtx, topic, msg.Payload); err != nil {
-			slog.Error("publish sync message failed", "node", r.num, "slot", slot, "subnet", ss.syncSubnet, "err", err)
-		}
-	})
+	msg := validator.MakeSyncMessage(slot, ss.syncSubnet, r.num, votedOrigin)
+	r.tracer.OnPublish(metrics.SyncMessageID(slot, ss.syncSubnet, r.num), voteHead, at)
+	if err := r.nd.Publish(r.runCtx, topic, msg.Payload); err != nil {
+		slog.Error("publish sync message failed", "node", r.num, "slot", slot, "subnet", ss.syncSubnet, "err", err)
+	}
 }
 
 // emitAggregate publishes one aggregate for each committee this node aggregates this slot, on

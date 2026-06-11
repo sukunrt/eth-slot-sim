@@ -309,17 +309,24 @@ func (v View) SyncAggregateSubnets(slot int) []int {
 	return out
 }
 
+// ACVoteDuty is one availability-chain vote a node owes: which validator. The AC vote rides one
+// global topic (no subnet) and is content-free until the coupling decides it — so unlike AttestDuty
+// it carries only Val.
+type ACVoteDuty struct {
+	Val int
+}
+
 // ACVoteDuties returns the availability-chain votes this node owes this slot — one per hosted
-// validator in the slot's VRF draw (k>1 possible). The AC vote is on one global topic, so Subnet is
-// unused (left zero); only Val is meaningful. Empty when the node holds none of the slot's voters.
-func (v View) ACVoteDuties(slot int) []AttestDuty {
+// validator in the slot's VRF draw (k>1 possible). Empty when the node holds none of the slot's
+// voters.
+func (v View) ACVoteDuties(slot int) []ACVoteDuty {
 	if slot < 0 || slot >= len(v.a.Slots) {
 		return nil
 	}
-	var duties []AttestDuty
+	var duties []ACVoteDuty
 	for _, r := range v.a.Slots[slot].ACVoters {
 		if r.Node == v.node {
-			duties = append(duties, AttestDuty{Val: r.Val})
+			duties = append(duties, ACVoteDuty{Val: r.Val})
 		}
 	}
 	return duties

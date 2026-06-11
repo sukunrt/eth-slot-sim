@@ -3,7 +3,8 @@
 /slot-sim
 
 # simctl run outputs
-/runs/
+runs/
+runs-local/
 
 # Python
 .venv/

@@ -149,7 +149,7 @@ func main() {
 		decoupled = &driver.DecoupledParams{K: *acK, FCVoteOffset: *fcVoteOffset, FCAggFraction: *fcAggFraction,
 			Segregated: *fcSegregated, RoundAggFraction: *fcRoundAggFrac}
 	}
-	val := validator.New(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
+	proposer := validator.NewProposer(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
 		rand.New(rand.NewPCG(*seed, uint64(*nodeNum))), proposers)
 	nd := &node.Node{
 		Num: *nodeNum, Host: newShadowHost(*nodeNum), Network: &shadowNetwork{},
@@ -194,7 +194,7 @@ func main() {
 		log.Fatalf("-transport=%q, want classic or partial", *transport)
 	}
 	peers := parseIntList(*peerNumsStr)
-	runner := driver.NewRunner(*nodeNum, nd, val, sched, attest, syncEmit, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers, decoupled, pp)
+	runner := driver.NewRunner(*nodeNum, nd, proposer, sched, attest, syncEmit, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers, decoupled, pp)
 	runner.Attach() // sets nd.OnReceive before JoinTopics
 
 	ctx := context.Background()

@@ -111,7 +111,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 	// runner's attest flag gates attestation emission, so a committee can disseminate columns
 	// without emitting attestations. Block-only runs pass a nil Schedule.
 	for i := range n {
-		val := validator.New(i, n, cfg.BlockSize, cfg.Offset, cfg.Jitter,
+		proposer := validator.NewProposer(i, n, cfg.BlockSize, cfg.Offset, cfg.Jitter,
 			rand.New(rand.NewPCG(cfg.Seed, uint64(i))), proposers)
 		nd := &node.Node{
 			Num: i, Host: nw.Host(i), Network: nw,
@@ -141,7 +141,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		if cfg.Decoupled != nil {
 			attest, sync = false, false
 		}
-		r := NewRunner(i, nd, val, cfg.Schedule, attest, sync, tracer, cfg.SlotDuration, cfg.AttestationDue,
+		r := NewRunner(i, nd, proposer, cfg.Schedule, attest, sync, tracer, cfg.SlotDuration, cfg.AttestationDue,
 			cfg.AggregateDue, cfg.Prep, cfg.Seed, nw.Peers(i), cfg.Decoupled, cfg.Partial)
 		r.Attach()
 		d.nodes[i] = nd

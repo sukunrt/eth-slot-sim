@@ -17,7 +17,7 @@ import (
 func TestPublishReceiveIdentityRoundTrip(t *testing.T) {
 	at := time.Unix(1, 0)
 	// makeBlock is unexported; a 1-node Validator proposes every slot.
-	blockMsg := validator.New(0, 1, 64, 0, 0, rand.New(rand.NewPCG(1, 2)), nil).Duties(3)[0].Msg
+	blockMsg := validator.NewProposer(0, 1, 64, 0, 0, rand.New(rand.NewPCG(1, 2)), nil).BlocksToPublish(3)[0].Msg
 
 	cases := []struct {
 		name   string

@@ -32,7 +32,7 @@ func TestNodeRunnerRecordsColumn(t *testing.T) {
 		rec := metrics.NewRecorder()
 		nodes := make([]*node.Node, 2)
 		for i := range nodes {
-			val := validator.New(i, 2, 1024, 0, 0, rand.New(rand.NewPCG(1, uint64(i))), nil)
+			val := validator.NewProposer(i, 2, 1024, 0, 0, rand.New(rand.NewPCG(1, uint64(i))), nil)
 			nd := &node.Node{
 				Num: i, Host: nw.Host(i), Network: nw,
 				VerifyDelay: func() time.Duration { return 0 },
