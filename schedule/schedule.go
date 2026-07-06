@@ -181,16 +181,6 @@ func (a *Assignment) FinalitySubscribersOf(subnet int) []int {
 	return a.FinalitySubscribers[subnet]
 }
 
-// ProposerSchedule returns the per-slot block proposer (a supernode), one entry per slot in
-// slot order — the schedule the Validator obeys instead of the cyclic slot%N rule. Both
-// backends read it from the same schedule.json, so they propose identically.
-func (a *Assignment) ProposerSchedule() []int {
-	out := make([]int, len(a.Slots))
-	for i, sp := range a.Slots {
-		out[i] = sp.Proposer
-	}
-	return out
-}
 
 // AttestDuty is one attestation a node owes: which validator, on which subnet, at which
 // committee position — the partial transport's wire identity (the committee seat for standard
@@ -210,6 +200,11 @@ type View struct {
 
 // Node returns the view of the assignment for one node.
 func (a *Assignment) Node(node int) View { return View{a: a, node: node} }
+
+// Proposes reports whether this node publishes slot's block — the per-slot proposer the
+// Python generator drew (a supernode). Both backends read it from the same schedule.json,
+// so they propose identically.
+func (v View) Proposes(slot int) bool { return v.a.Slots[slot].Proposer == v.node }
 
 // AttestDuties returns the attestations node owes this slot — one per hosted validator
 // seated in one of the slot's committees (k>1 possible on the same subnet).

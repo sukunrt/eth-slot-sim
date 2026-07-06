@@ -65,8 +65,8 @@ func TestLoadFixtureContract(t *testing.T) {
 	}
 
 	// Proposer survived the round-trip (one per slot, in range).
-	if got, want := a.ProposerSchedule(), []int{a.Slots[0].Proposer}; !slices.Equal(got, want) {
-		t.Fatalf("ProposerSchedule() = %v, want %v", got, want)
+	if !a.Node(a.Slots[0].Proposer).Proposes(0) {
+		t.Fatalf("node %d does not propose slot 0", a.Slots[0].Proposer)
 	}
 	for _, sp := range a.Slots {
 		if sp.Proposer < 0 || sp.Proposer >= a.Params.N {
@@ -412,9 +412,9 @@ func TestSegregatedFinalityVoteDuties(t *testing.T) {
 	}
 }
 
-// ProposerSchedule exposes the per-slot block proposer the Python generator wrote (a
-// supernode), one entry per slot, in slot order.
-func TestProposerSchedule(t *testing.T) {
+// View.Proposes follows the per-slot block proposer the Python generator wrote (a
+// supernode): exactly that node proposes the slot, and no other node does.
+func TestViewProposes(t *testing.T) {
 	a := &Assignment{
 		Params: Params{N: 6, NumSlots: 3},
 		Slots: []SlotPlan{
@@ -423,8 +423,12 @@ func TestProposerSchedule(t *testing.T) {
 			{Slot: 2, Proposer: 5},
 		},
 	}
-	if got, want := a.ProposerSchedule(), []int{5, 2, 5}; !slices.Equal(got, want) {
-		t.Fatalf("ProposerSchedule() = %v, want %v", got, want)
+	for slot, want := range []int{5, 2, 5} {
+		for n := range a.Params.N {
+			if got := a.Node(n).Proposes(slot); got != (n == want) {
+				t.Fatalf("node %d Proposes(%d) = %v, want proposer %d", n, slot, got, want)
+			}
+		}
 	}
 }
 

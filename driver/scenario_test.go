@@ -13,7 +13,6 @@ import (
 	"github.com/ethp2p/slot-sim/netsim"
 	"github.com/ethp2p/slot-sim/node"
 	"github.com/ethp2p/slot-sim/schedule"
-	"github.com/ethp2p/slot-sim/validator"
 )
 
 // scenario builds N nodes + NodeRunners over a committee assignment by hand (not via the
@@ -68,10 +67,6 @@ func buildScenarioWith(t *testing.T, a *schedule.Assignment, due time.Duration, 
 
 	s := &scenario{a: a, nw: nw, slotDur: slotDur}
 	for i := range n {
-		// A small publish offset keeps the proposer off the exact instant the settle
-		// unparks every goroutine (which drops the first flood).
-		val := validator.NewProposer(i, n, 1024, 200*time.Millisecond, 0,
-			rand.New(rand.NewPCG(1, uint64(i))), a.ProposerSchedule())
 		nd := &node.Node{
 			Num: i, Host: nw.Host(i), Network: nw,
 			VerifyDelay:       func() time.Duration { return 0 },
@@ -88,8 +83,11 @@ func buildScenarioWith(t *testing.T, a *schedule.Assignment, due time.Duration, 
 		if pp != nil {
 			nd.Partial = &node.PartialOpts{Seed: 1, Resolver: driver.NewPartialResolver(a)}
 		}
-		r := driver.NewRunner(i, nd, val, nw.Peers(i), tracer, driver.RunnerConfig{
+		// A small publish offset keeps the proposer off the exact instant the settle
+		// unparks every goroutine (which drops the first flood).
+		r := driver.NewRunner(i, nd, nw.Peers(i), tracer, driver.RunnerConfig{
 			Schedule: a, Attest: attest, Sync: sync,
+			NumNodes: n, BlockSize: 1024, Offset: 200 * time.Millisecond,
 			SlotDuration: slotDur, AttestationDue: due, Seed: 1, Decoupled: dc, Partial: pp,
 		})
 		r.Attach()

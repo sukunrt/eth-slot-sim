@@ -34,12 +34,14 @@ type DecoupledParams struct {
 
 // NodeRunner is one node's stateful per-slot orchestrator. It owns the slot loop AND
 // is the node's OnReceive sink, so it can couple block arrival to attestation emit
-// while keeping Node and Proposer pure. The multi-node Driver builds N; the Shadow
-// binary builds 1.
+// while keeping Node pure. The multi-node Driver builds N; the Shadow binary builds 1.
 type NodeRunner struct {
 	num       int
 	nd        *node.Node
-	proposer  *validator.Proposer
+	numNodes  int                  // fleet size (the cyclic proposer fallback when sched is nil)
+	blockSize int                  // proposed-block payload bytes
+	offset    time.Duration        // block publish offset into the slot
+	jitter    time.Duration        // block publish lands in [offset, offset+jitter)
 	sched     *schedule.Assignment // nil ⇒ block-only (Phase 1)
 	attest    bool                 // emit attestations (with sched set but false ⇒ columns-only)
 	sync      bool                 // emit sync-committee messages + contributions (members only)
@@ -164,11 +166,18 @@ type RunnerConfig struct {
 	Attest   bool                 // emit attestations; Schedule set with Attest false ⇒ columns-only
 	Sync     bool                 // emit sync-committee messages + contributions (members only)
 
+	// Block proposal: the Schedule's per-slot proposer (cyclic slot%NumNodes when Schedule is
+	// nil) publishes a BlockSize-byte block at Offset + rand(0, Jitter) into the slot.
+	NumNodes  int
+	BlockSize int
+	Offset    time.Duration
+	Jitter    time.Duration
+
 	SlotDuration   time.Duration
 	AttestationDue time.Duration // attestation / AC-vote deadline, offset into the slot
 	AggregateDue   time.Duration // aggregate emit, offset into the slot (0 ⇒ no aggregate phase)
 	Prep           time.Duration // Δ_prep before emitting on block receipt
-	Seed           uint64        // seeds the per-slot subnet-peer dial choice
+	Seed           uint64        // seeds the per-slot subnet-peer dial choice + the block jitter
 
 	// Decoupled (nil ⇒ off) turns on the decoupled-consensus phase, which suppresses
 	// attestation/sync emit (the AC vote replaces attestations). Partial (nil ⇒ classic)
@@ -178,17 +187,18 @@ type RunnerConfig struct {
 	Partial   *PartialParams
 }
 
-// NewRunner builds a runner for one node: num/nd/proposer identify it, basePeers is its
-// long-lived peer set (so per-slot subnet dials added on top can be dropped), and cfg carries
-// the run-wide knobs shared by every runner in the run.
-func NewRunner(num int, nd *node.Node, proposer *validator.Proposer, basePeers []int,
+// NewRunner builds a runner for one node: num/nd identify it, basePeers is its long-lived
+// peer set (so per-slot subnet dials added on top can be dropped), and cfg carries the
+// run-wide knobs shared by every runner in the run.
+func NewRunner(num int, nd *node.Node, basePeers []int,
 	tracer metrics.Tracer, cfg RunnerConfig) *NodeRunner {
 	base := make(map[int]bool, len(basePeers))
 	for _, p := range basePeers {
 		base[p] = true
 	}
 	r := &NodeRunner{
-		num: num, nd: nd, proposer: proposer, sched: cfg.Schedule, attest: cfg.Attest,
+		num: num, nd: nd, numNodes: cfg.NumNodes, blockSize: cfg.BlockSize,
+		offset: cfg.Offset, jitter: cfg.Jitter, sched: cfg.Schedule, attest: cfg.Attest,
 		sync: cfg.Sync, tracer: tracer, slotDur: cfg.SlotDuration, blockDue: cfg.AttestationDue,
 		aggDue: cfg.AggregateDue, prep: cfg.Prep, seed: cfg.Seed, base: base,
 		slots: make(map[int]*slotState),
@@ -385,12 +395,34 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 			}
 		}
 	}
-	for _, blk := range r.proposer.BlocksToPublish(slot) {
-		go r.publishBlock(slotStart.Add(blk.At), blk.Msg)
+	if r.proposes(slot) {
+		msg := validator.MakeBlock(slot, r.num, r.blockSize)
+		go r.publishBlock(slotStart.Add(r.blockPublishAt(slot)), msg)
 	}
 	if ss != nil { // slot-end cleanup runs off a timer, not the Run loop (which has moved on)
 		time.AfterFunc(time.Until(slotStart.Add(r.slotDur)), func() { r.endSlot(slot, ss) })
 	}
+}
+
+// proposes reports whether this node publishes slot's block: the schedule's per-slot proposer
+// when a schedule is set, else the cyclic slot%N rule (block-only runs).
+func (r *NodeRunner) proposes(slot int) bool {
+	if r.sched != nil {
+		return r.sched.Node(r.num).Proposes(slot)
+	}
+	return slot%r.numNodes == r.num
+}
+
+// blockPublishAt draws the block's publish instant, offset + rand(0, jitter) into the slot.
+// The rng is derived from (seed, node, slot) so the draw is deterministic regardless of how
+// the per-slot setup goroutines interleave.
+func (r *NodeRunner) blockPublishAt(slot int) time.Duration {
+	at := r.offset
+	if r.jitter > 0 {
+		rng := rand.New(rand.NewPCG(r.seed, uint64(r.num)<<32|uint64(slot)))
+		at += time.Duration(rng.Int64N(int64(r.jitter)))
+	}
+	return at
 }
 
 // shuffledSubscribers returns subnet's subscribers in a seeded order (so the 2 dialed are

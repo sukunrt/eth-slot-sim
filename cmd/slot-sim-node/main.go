@@ -36,7 +36,6 @@ import (
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
 	"github.com/ethp2p/slot-sim/schedule"
-	"github.com/ethp2p/slot-sim/validator"
 )
 
 const (
@@ -118,16 +117,14 @@ func main() {
 
 	tracer := metrics.NewSlogTracer(slog.NewJSONHandler(os.Stdout, nil))
 	var sched *schedule.Assignment
-	var proposers []int // supernode proposer schedule; nil ⇒ cyclic (block-only)
 	if *schedulePath != "" {
+		// The schedule always drives the proposer draw (even block-only); the phase flags gate
+		// everything else it carries (attestations, sync, decoupled, columns).
 		c, err := schedule.Load(*schedulePath)
 		if err != nil {
 			log.Fatalf("load schedule %s: %v", *schedulePath, err)
 		}
-		proposers = c.ProposerSchedule() // supernode block schedule (used even when block-only)
-		if *attestations || *syncOn || *decoupledOn || c.NumColumns > 0 {
-			sched = c // drives attestations, sync, decoupled, and/or columns; the flags gate emission
-		}
+		sched = c
 	}
 	// Decoupled consensus replaces attestations + sync (the AC vote stands in for the attestation).
 	attest, syncEmit := *attestations, *syncOn
@@ -149,8 +146,6 @@ func main() {
 		decoupled = &driver.DecoupledParams{K: *acK, FCVoteOffset: *fcVoteOffset, FCAggFraction: *fcAggFraction,
 			Segregated: *fcSegregated, RoundAggFraction: *fcRoundAggFrac}
 	}
-	proposer := validator.NewProposer(*nodeNum, *numNodes, *blockSize, *offset, *jitter,
-		rand.New(rand.NewPCG(*seed, uint64(*nodeNum))), proposers)
 	nd := &node.Node{
 		Num: *nodeNum, Host: newShadowHost(*nodeNum), Network: &shadowNetwork{},
 		VerifyDelay:       func() time.Duration { return *verifyDelay },
@@ -194,8 +189,9 @@ func main() {
 		log.Fatalf("-transport=%q, want classic or partial", *transport)
 	}
 	peers := parseIntList(*peerNumsStr)
-	runner := driver.NewRunner(*nodeNum, nd, proposer, peers, tracer, driver.RunnerConfig{
+	runner := driver.NewRunner(*nodeNum, nd, peers, tracer, driver.RunnerConfig{
 		Schedule: sched, Attest: attest, Sync: syncEmit,
+		NumNodes: *numNodes, BlockSize: *blockSize, Offset: *offset, Jitter: *jitter,
 		SlotDuration: *slotDur, AttestationDue: *attDue, AggregateDue: *aggDue, Prep: *prep,
 		Seed: *seed, Decoupled: decoupled, Partial: pp,
 	})

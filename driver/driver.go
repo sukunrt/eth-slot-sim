@@ -1,15 +1,14 @@
 // Package driver is the orchestration half of the simulator: it owns the slot
 // clock, builds the passive Nodes over a Fabric, and runs one stateful NodeRunner
-// per node. The runner consults the node's Validator for block duties and its
-// committee slice for attest duties, issues publishes, and is the node's OnReceive
-// sink — so it sees both the block arriving and the duty firing, the seam the
-// block→attestation coupling needs. Node and Validator stay pure. The single-node
-// Shadow binary builds one NodeRunner directly, without the multi-node Driver.
+// per node. The runner consults the schedule for its duties (proposing, attesting,
+// custody, ...), issues publishes, and is the node's OnReceive sink — so it sees
+// both the block arriving and the duty firing, the seam the block→attestation
+// coupling needs. Node stays pure. The single-node Shadow binary builds one
+// NodeRunner directly, without the multi-node Driver.
 package driver
 
 import (
 	"context"
-	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
 	"github.com/ethp2p/slot-sim/schedule"
-	"github.com/ethp2p/slot-sim/validator"
 )
 
 // Fabric is the per-node network substrate the Driver builds on: it resolves
@@ -87,8 +85,8 @@ type Driver struct {
 	slotDur time.Duration
 }
 
-// New builds one passive Node + one Validator + one NodeRunner per host on nw,
-// wiring each runner as its node's OnReceive sink.
+// New builds one passive Node + one NodeRunner per host on nw, wiring each
+// runner as its node's OnReceive sink.
 func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 	n := nw.Len()
 	d := &Driver{
@@ -97,10 +95,6 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		tracer:  tracer,
 		nw:      nw,
 		slotDur: cfg.SlotDuration,
-	}
-	var proposers []int // supernode proposer schedule; nil ⇒ cyclic (block-only)
-	if cfg.Schedule != nil {
-		proposers = cfg.Schedule.ProposerSchedule()
 	}
 	// One read-only resolver serves the whole fleet (NewRunner enforces the phase requirement).
 	var resolver node.PartialResolver
@@ -112,6 +106,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 	// without emitting attestations. Block-only runs pass a nil Schedule.
 	rcfg := RunnerConfig{
 		Schedule: cfg.Schedule, Attest: cfg.Attest, Sync: cfg.Sync,
+		NumNodes: n, BlockSize: cfg.BlockSize, Offset: cfg.Offset, Jitter: cfg.Jitter,
 		SlotDuration: cfg.SlotDuration, AttestationDue: cfg.AttestationDue,
 		AggregateDue: cfg.AggregateDue, Prep: cfg.Prep, Seed: cfg.Seed,
 		Decoupled: cfg.Decoupled, Partial: cfg.Partial,
@@ -122,8 +117,6 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		rcfg.Attest, rcfg.Sync = false, false
 	}
 	for i := range n {
-		proposer := validator.NewProposer(i, n, cfg.BlockSize, cfg.Offset, cfg.Jitter,
-			rand.New(rand.NewPCG(cfg.Seed, uint64(i))), proposers)
 		nd := &node.Node{
 			Num: i, Host: nw.Host(i), Network: nw,
 			VerifyDelay:       cfg.VerifyDelay,
@@ -146,7 +139,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		if cfg.Partial != nil {
 			nd.Partial = cfg.Partial.NodeOpts(cfg.Seed, resolver)
 		}
-		r := NewRunner(i, nd, proposer, nw.Peers(i), tracer, rcfg)
+		r := NewRunner(i, nd, nw.Peers(i), tracer, rcfg)
 		r.Attach()
 		d.nodes[i] = nd
 		d.runners[i] = r

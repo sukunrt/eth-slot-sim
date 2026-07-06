@@ -2,7 +2,6 @@ package driver_test
 
 import (
 	"context"
-	"math/rand/v2"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -32,14 +31,13 @@ func TestNodeRunnerRecordsSyncMessage(t *testing.T) {
 		rec := metrics.NewRecorder()
 		nodes := make([]*node.Node, 2)
 		for i := range nodes {
-			val := validator.NewProposer(i, 2, 1024, 0, 0, rand.New(rand.NewPCG(1, uint64(i))), nil)
 			nd := &node.Node{
 				Num: i, Host: nw.Host(i), Network: nw,
 				VerifyDelay: func() time.Duration { return 0 },
 				D:           8, Dlo: 6, Dhi: 12,
 			}
-			driver.NewRunner(i, nd, val, nw.Peers(i), rec,
-				driver.RunnerConfig{SlotDuration: 12 * time.Second, Seed: 1}).Attach()
+			driver.NewRunner(i, nd, nw.Peers(i), rec, driver.RunnerConfig{
+				NumNodes: 2, BlockSize: 1024, SlotDuration: 12 * time.Second, Seed: 1}).Attach()
 			nodes[i] = nd
 		}
 
@@ -103,14 +101,13 @@ func TestNodeRunnerRecordsSyncContribution(t *testing.T) {
 		rec := metrics.NewRecorder()
 		nodes := make([]*node.Node, 2)
 		for i := range nodes {
-			val := validator.NewProposer(i, 2, 1024, 0, 0, rand.New(rand.NewPCG(1, uint64(i))), nil)
 			nd := &node.Node{
 				Num: i, Host: nw.Host(i), Network: nw,
 				VerifyDelay: func() time.Duration { return 0 },
 				D:           8, Dlo: 6, Dhi: 12,
 			}
-			driver.NewRunner(i, nd, val, nw.Peers(i), rec,
-				driver.RunnerConfig{SlotDuration: 12 * time.Second, Seed: 1}).Attach()
+			driver.NewRunner(i, nd, nw.Peers(i), rec, driver.RunnerConfig{
+				NumNodes: 2, BlockSize: 1024, SlotDuration: 12 * time.Second, Seed: 1}).Attach()
 			nodes[i] = nd
 		}
 

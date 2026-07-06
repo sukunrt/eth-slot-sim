@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"math/rand/v2"
 	"testing"
 	"time"
 
@@ -16,8 +15,7 @@ import (
 // in Attester) — that asymmetry is what the loopback skip relies on.
 func TestPublishReceiveIdentityRoundTrip(t *testing.T) {
 	at := time.Unix(1, 0)
-	// makeBlock is unexported; a 1-node Validator proposes every slot.
-	blockMsg := validator.NewProposer(0, 1, 64, 0, 0, rand.New(rand.NewPCG(1, 2)), nil).BlocksToPublish(3)[0].Msg
+	blockMsg := validator.MakeBlock(3, 0, 64)
 
 	cases := []struct {
 		name   string
