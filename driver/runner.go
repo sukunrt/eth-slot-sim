@@ -237,6 +237,18 @@ func NewRunner(nd *node.Node, view schedule.View, basePeers []int,
 			panic("driver: the plan draws sync aggregators but AggregateDue is unset")
 		}
 	}
+	// Same rule for the finality chain: the plan decides who aggregates, the fraction only
+	// says when. Aggregators drawn with no valid fraction would publish at slot start and tear
+	// the pre-join down before the vote burst — refuse instead.
+	if dc := cfg.Decoupled; dc != nil && view.HasFinalityAggregators {
+		frac := dc.FCAggFraction
+		if dc.Segregated {
+			frac = dc.RoundAggFraction
+		}
+		if frac <= 0 || frac >= 100 {
+			panic("driver: the plan draws finality aggregators but the aggregation fraction is not in (0,100)")
+		}
+	}
 	if pp := cfg.Partial; pp != nil {
 		if !cfg.Attest && cfg.Decoupled == nil {
 			panic("driver: the partial transport requires the attestation phase or decoupled consensus")
@@ -577,7 +589,7 @@ func (r *NodeRunner) armFinality(slot int, slotStart time.Time) {
 			r.emitFinalityAggregate(n, fs)
 		})
 	}
-	if r.fcAggFraction > 0 && fs.hasPrejoinState() {
+	if r.view.HasFinalityAggregators && fs.hasPrejoinState() {
 		fs.dropTimer = time.AfterFunc(time.Until(aggregationDueAt), func() {
 			r.dropFinality(fs)
 		})
@@ -585,7 +597,7 @@ func (r *NodeRunner) armFinality(slot int, slotStart time.Time) {
 	// Partial transport: the deadline is the vote flood's semantic end — seal the round's buckets
 	// on EVERY node then, so the next round's pre-joined aggregators (fresh mesh members) get no
 	// backlog push classic would never deliver. Stragglers still count until the reap prunes.
-	if r.partial && r.fcAggFraction > 0 {
+	if r.partial && r.view.HasFinalityAggregators {
 		fs.sealTimer = time.AfterFunc(time.Until(aggregationDueAt), func() {
 			r.nd.SealPartial(node.KindFinalityVote, n)
 		})
@@ -627,13 +639,13 @@ func (r *NodeRunner) armFinalitySubRound(slot int, slotStart time.Time) {
 			r.emitFinalityAggregate(slot, fs)
 		})
 	}
-	if r.roundAggFraction > 0 && fs.hasPrejoinState() {
+	if r.view.HasFinalityAggregators && fs.hasPrejoinState() {
 		fs.dropTimer = time.AfterFunc(time.Until(aggregationDueAt), func() {
 			r.dropFinality(fs)
 		})
 	}
 	// Partial transport: seal the round's buckets at the per-slot deadline (see armFinality).
-	if r.partial && r.roundAggFraction > 0 {
+	if r.partial && r.view.HasFinalityAggregators {
 		fs.sealTimer = time.AfterFunc(time.Until(aggregationDueAt.Add(200*time.Millisecond)), func() {
 			r.nd.SealPartial(node.KindFinalityVote, slot)
 		})

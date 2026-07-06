@@ -303,3 +303,17 @@ func TestDecoupledFinalityAggregatePreJoin(t *testing.T) {
 		}
 	})
 }
+
+// A plan that draws finality aggregators with no valid aggregation fraction would publish at
+// slot start and tear the pre-join down before the vote burst — the runner refuses to build.
+func TestFinalityAggregatorsWithoutFractionPanic(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("want panic: finality aggregators drawn but the aggregation fraction unset")
+		}
+	}()
+	a := decoupledFCAggAssignment(8, 8, 2,
+		[][]int{{0, 2, 4, 6}, {1, 3, 5, 7}}, [][]int{{0, 3}, {1, 2}}, 2)
+	dc := &driver.DecoupledParams{K: 2, FCVoteOffset: time.Second} // FCAggFraction unset
+	buildDecoupledScenario(t, a, 4*time.Second, nil, metrics.NewRecorder(), 4, dc)
+}
