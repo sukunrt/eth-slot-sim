@@ -189,8 +189,12 @@ func main() {
 		log.Fatalf("-transport=%q, want classic or partial", *transport)
 	}
 	peers := parseIntList(*peerNumsStr)
-	runner := driver.NewRunner(*nodeNum, nd, peers, tracer, driver.RunnerConfig{
-		Schedule: sched, Attest: attest, Sync: syncEmit,
+	var view schedule.View // zero ⇒ block-only (no -schedule)
+	if sched != nil {
+		view = sched.Node(*nodeNum)
+	}
+	runner := driver.NewRunner(nd, view, peers, tracer, driver.RunnerConfig{
+		Attest: attest, Sync: syncEmit,
 		NumNodes: *numNodes, BlockSize: *blockSize, Offset: *offset, Jitter: *jitter,
 		SlotDuration: *slotDur, AttestationDue: *attDue, AggregateDue: *aggDue, Prep: *prep,
 		Seed: *seed, Decoupled: decoupled, Partial: pp,

@@ -85,8 +85,8 @@ func buildScenarioWith(t *testing.T, a *schedule.Assignment, due time.Duration, 
 		}
 		// A small publish offset keeps the proposer off the exact instant the settle
 		// unparks every goroutine (which drops the first flood).
-		r := driver.NewRunner(i, nd, nw.Peers(i), tracer, driver.RunnerConfig{
-			Schedule: a, Attest: attest, Sync: sync,
+		r := driver.NewRunner(nd, a.Node(i), nw.Peers(i), tracer, driver.RunnerConfig{
+			Attest: attest, Sync: sync,
 			NumNodes: n, BlockSize: 1024, Offset: 200 * time.Millisecond,
 			SlotDuration: slotDur, AttestationDue: due, Seed: 1, Decoupled: dc, Partial: pp,
 		})

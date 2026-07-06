@@ -10,6 +10,7 @@ import (
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/netsim"
 	"github.com/ethp2p/slot-sim/node"
+	"github.com/ethp2p/slot-sim/schedule"
 	"github.com/ethp2p/slot-sim/validator"
 )
 
@@ -36,7 +37,7 @@ func TestNodeRunnerRecordsSyncMessage(t *testing.T) {
 				VerifyDelay: func() time.Duration { return 0 },
 				D:           8, Dlo: 6, Dhi: 12,
 			}
-			driver.NewRunner(i, nd, nw.Peers(i), rec, driver.RunnerConfig{
+			driver.NewRunner(nd, schedule.View{}, nw.Peers(i), rec, driver.RunnerConfig{
 				NumNodes: 2, BlockSize: 1024, SlotDuration: 12 * time.Second, Seed: 1}).Attach()
 			nodes[i] = nd
 		}
@@ -106,7 +107,7 @@ func TestNodeRunnerRecordsSyncContribution(t *testing.T) {
 				VerifyDelay: func() time.Duration { return 0 },
 				D:           8, Dlo: 6, Dhi: 12,
 			}
-			driver.NewRunner(i, nd, nw.Peers(i), rec, driver.RunnerConfig{
+			driver.NewRunner(nd, schedule.View{}, nw.Peers(i), rec, driver.RunnerConfig{
 				NumNodes: 2, BlockSize: 1024, SlotDuration: 12 * time.Second, Seed: 1}).Attach()
 			nodes[i] = nd
 		}

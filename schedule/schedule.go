@@ -192,7 +192,11 @@ type AttestDuty struct {
 	Position int
 }
 
-// View narrows the assignment to one node's slice (what a single host runs).
+// View narrows the assignment to one node's slice (what a single host runs). It is the only
+// handle a NodeRunner holds on the plan: self-scoped duty lookups plus a few delegating
+// global accessors, so a runner can never ask about another node's duties. The zero View is
+// the "no schedule" sentinel (block-only runs) — IsZero-gate before any duty lookup; the
+// global accessors below tolerate it and return zero values.
 type View struct {
 	a    *Assignment
 	node int
@@ -200,6 +204,57 @@ type View struct {
 
 // Node returns the view of the assignment for one node.
 func (a *Assignment) Node(node int) View { return View{a: a, node: node} }
+
+// IsZero reports the no-schedule sentinel (a block-only run: proposers are cyclic, no duties).
+func (v View) IsZero() bool { return v.a == nil }
+
+// NumColumns is the column-subnet count (0 ⇒ the column phase is off, or no schedule).
+func (v View) NumColumns() int {
+	if v.a == nil {
+		return 0
+	}
+	return v.a.NumColumns
+}
+
+// NumSlots is the plan's slot count (0 with no schedule).
+func (v View) NumSlots() int {
+	if v.a == nil {
+		return 0
+	}
+	return len(v.a.Slots)
+}
+
+// Subscribers delegates to the global subnet-membership table (who to dial for a fan-out).
+func (v View) Subscribers(subnet int) []int {
+	if v.a == nil {
+		return nil
+	}
+	return v.a.Subscribers(subnet)
+}
+
+// FinalitySubscribersOf delegates to the global finality-subnet membership table.
+func (v View) FinalitySubscribersOf(subnet int) []int {
+	if v.a == nil {
+		return nil
+	}
+	return v.a.FinalitySubscribersOf(subnet)
+}
+
+// ValidatorsPerSubnet is the global per-finality-subnet draw count (sizes base-mode aggregates).
+func (v View) ValidatorsPerSubnet() []int {
+	if v.a == nil {
+		return nil
+	}
+	return v.a.ValidatorsPerSubnet
+}
+
+// ValidatorsPerRoundSubnet is the global (round, subnet) cell count (sizes round aggregates).
+func (v View) ValidatorsPerRoundSubnet() [][]int {
+	if v.a == nil {
+		return nil
+	}
+	return v.a.ValidatorsPerRoundSubnet
+}
 
 // Proposes reports whether this node publishes slot's block — the per-slot proposer the
 // Python generator drew (a supernode). Both backends read it from the same schedule.json,

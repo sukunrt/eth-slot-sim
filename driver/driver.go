@@ -105,7 +105,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 	// runner's attest flag gates attestation emission, so a committee can disseminate columns
 	// without emitting attestations. Block-only runs pass a nil Schedule.
 	rcfg := RunnerConfig{
-		Schedule: cfg.Schedule, Attest: cfg.Attest, Sync: cfg.Sync,
+		Attest: cfg.Attest, Sync: cfg.Sync,
 		NumNodes: n, BlockSize: cfg.BlockSize, Offset: cfg.Offset, Jitter: cfg.Jitter,
 		SlotDuration: cfg.SlotDuration, AttestationDue: cfg.AttestationDue,
 		AggregateDue: cfg.AggregateDue, Prep: cfg.Prep, Seed: cfg.Seed,
@@ -139,7 +139,11 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		if cfg.Partial != nil {
 			nd.Partial = cfg.Partial.NodeOpts(cfg.Seed, resolver)
 		}
-		r := NewRunner(i, nd, nw.Peers(i), tracer, rcfg)
+		var view schedule.View // zero ⇒ block-only
+		if cfg.Schedule != nil {
+			view = cfg.Schedule.Node(i)
+		}
+		r := NewRunner(nd, view, nw.Peers(i), tracer, rcfg)
 		r.Attach()
 		d.nodes[i] = nd
 		d.runners[i] = r
