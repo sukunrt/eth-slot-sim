@@ -89,18 +89,19 @@ type finalityState struct {
 	voteTimer  *time.Timer           // fires at finalitySlotStart(n) + fcVoteOffset
 	voteOnce   sync.Once             // one FC vote burst per finality slot
 
-	// Aggregation state (set at the pre-join). aggSubnets = the subnets this node aggregates
-	// (validator-sampled from the ENTIRE set, so generally foreign); aggSubscribed = the topics it
-	// Subscribe'd for the duty (the foreign ones); aggDialed = the subnet peers dialed so those
-	// meshes have somewhere to graft. All of it is torn down at the aggregation deadline.
-	aggSubnets    []int
-	aggSubscribed []string
-	aggDialed     []int
-	aggTimer      *time.Timer // publishes the aggregates at the deadline (aggregators only)
-	aggOnce       sync.Once   // one aggregate burst per finality slot
-	dropTimer     *time.Timer // tears the pre-join state down at the deadline (its own timer)
-	dropOnce      sync.Once   // teardown: at the drop deadline, or reap as the fallback
-	sealTimer     *time.Timer // partial transport: seals the round's buckets at the deadline
+	// Aggregation state (set at the pre-join). aggregateSubnets = the subnets this node
+	// aggregates (validator-sampled from the ENTIRE set, so generally foreign);
+	// aggregateSubscribed = the topics it Subscribe'd for the duty (the foreign ones);
+	// aggregateDialed = the subnet peers dialed so those meshes have somewhere to graft. All of
+	// it is torn down at the aggregation deadline.
+	aggregateSubnets    []int
+	aggregateSubscribed []string
+	aggregateDialed     []int
+	aggregateTimer      *time.Timer // publishes the aggregates at the deadline (aggregators only)
+	aggregateOnce       sync.Once   // one aggregate burst per finality slot
+	dropTimer           *time.Timer // tears the pre-join state down at the deadline (its own timer)
+	dropOnce            sync.Once   // teardown: at the drop deadline, or reap as the fallback
+	sealTimer           *time.Timer // partial transport: seals the round's buckets at the deadline
 }
 
 // slotState is the per-(node, slot) coupling holder.
@@ -564,19 +565,20 @@ func (r *NodeRunner) armFinality(slot int, slotStart time.Time) {
 	fs.voteTimer = time.AfterFunc(time.Until(slotStart.Add(r.fcVoteOffset)), func() {
 		r.emitFinalityVotes(n, fs)
 	})
-	// Two independent one-shot timers at the aggregation deadline (fracDur = fcAggFraction% · k ·
+	// Two independent one-shot timers at the aggregation deadline (fcAggFraction% · k ·
 	// slotDur, multiply before divide — k/2 AC slots out, firing independently of the per-AC-slot
 	// Run sleep, surviving the intervening endSlots because they live in r.finals): an aggregator
 	// publishes its aggregates; every node that pre-joined network state drops it at the flood's
 	// semantic end. With no aggregation phase (fraction 0) the drop falls back to reapFinality.
-	fracDur := time.Duration(r.fcAggFraction) * time.Duration(r.finalityRoundSize) * r.slotDur / 100
-	if len(fs.aggSubnets) > 0 {
-		fs.aggTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
+	aggregationDueAt := slotStart.Add(
+		time.Duration(r.fcAggFraction) * time.Duration(r.finalityRoundSize) * r.slotDur / 100)
+	if len(fs.aggregateSubnets) > 0 {
+		fs.aggregateTimer = time.AfterFunc(time.Until(aggregationDueAt), func() {
 			r.emitFinalityAggregate(n, fs)
 		})
 	}
 	if r.fcAggFraction > 0 && fs.hasPrejoinState() {
-		fs.dropTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
+		fs.dropTimer = time.AfterFunc(time.Until(aggregationDueAt), func() {
 			r.dropFinality(fs)
 		})
 	}
@@ -584,7 +586,7 @@ func (r *NodeRunner) armFinality(slot int, slotStart time.Time) {
 	// on EVERY node then, so the next round's pre-joined aggregators (fresh mesh members) get no
 	// backlog push classic would never deliver. Stragglers still count until the reap prunes.
 	if r.partial && r.fcAggFraction > 0 {
-		fs.sealTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
+		fs.sealTimer = time.AfterFunc(time.Until(aggregationDueAt), func() {
 			r.nd.SealPartial(node.KindFinalityVote, n)
 		})
 	}
@@ -619,20 +621,20 @@ func (r *NodeRunner) armFinalitySubRound(slot int, slotStart time.Time) {
 	// Publish and teardown are independent one-shot timers at the deadline (see armFinality): an
 	// aggregator publishes; anyone who pre-joined network state drops it. reapFinality is the
 	// teardown fallback when the agg phase is off.
-	fracDur := time.Duration(r.roundAggFraction) * r.slotDur / 100
-	if len(fs.aggSubnets) > 0 {
-		fs.aggTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
+	aggregationDueAt := slotStart.Add(time.Duration(r.roundAggFraction) * r.slotDur / 100)
+	if len(fs.aggregateSubnets) > 0 {
+		fs.aggregateTimer = time.AfterFunc(time.Until(aggregationDueAt), func() {
 			r.emitFinalityAggregate(slot, fs)
 		})
 	}
 	if r.roundAggFraction > 0 && fs.hasPrejoinState() {
-		fs.dropTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
+		fs.dropTimer = time.AfterFunc(time.Until(aggregationDueAt), func() {
 			r.dropFinality(fs)
 		})
 	}
 	// Partial transport: seal the round's buckets at the per-slot deadline (see armFinality).
 	if r.partial && r.roundAggFraction > 0 {
-		fs.sealTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur).Add(200*time.Millisecond)), func() {
+		fs.sealTimer = time.AfterFunc(time.Until(aggregationDueAt.Add(200*time.Millisecond)), func() {
 			r.nd.SealPartial(node.KindFinalityVote, slot)
 		})
 	}
@@ -686,15 +688,15 @@ func (r *NodeRunner) prejoinFinality(n int) {
 			dutySubnets = append(dutySubnets, d.Subnet)
 		}
 	}
-	var voteDialed, aggDialed []int
+	var voteDialed, aggregateDialed []int
 	for _, subnet := range dutySubnets {
 		voteDialed = append(voteDialed, dialTwo(subnet)...)
 	}
-	var aggSubscribed []string
+	var aggregateSubscribed []string
 	for _, subnet := range aggSubnets {
-		aggDialed = append(aggDialed, dialTwo(subnet)...)
+		aggregateDialed = append(aggregateDialed, dialTwo(subnet)...)
 		if subnet != own { // a stable member already subscribes (Prepare); it must not drop that
-			aggSubscribed = append(aggSubscribed, validator.FinalityVoteTopic(subnet))
+			aggregateSubscribed = append(aggregateSubscribed, validator.FinalityVoteTopic(subnet))
 		}
 	}
 
@@ -703,7 +705,8 @@ func (r *NodeRunner) prejoinFinality(n int) {
 	// slot), and dropFinality spares whatever a live state lists — in either firing order the
 	// idempotent Join/Subscribe below then leaves this slot warmed up.
 	fs := &finalityState{duties: duties, ownSubnet: own, voteDialed: voteDialed,
-		aggSubnets: aggSubnets, aggSubscribed: aggSubscribed, aggDialed: aggDialed}
+		aggregateSubnets: aggSubnets, aggregateSubscribed: aggregateSubscribed,
+		aggregateDialed: aggregateDialed}
 	r.mu.Lock()
 	r.finals[n] = fs
 	r.mu.Unlock()
@@ -713,8 +716,8 @@ func (r *NodeRunner) prejoinFinality(n int) {
 			slog.Error("join finality duty subnet failed", "node", r.num, "subnet", subnet, "err", err)
 		}
 	}
-	r.nd.Dial(slices.Concat(voteDialed, aggDialed)) // synchronous: up before the boundary
-	for _, topic := range aggSubscribed {
+	r.nd.Dial(slices.Concat(voteDialed, aggregateDialed)) // synchronous: up before the boundary
+	for _, topic := range aggregateSubscribed {
 		if err := r.nd.Subscribe(topic); err != nil {
 			slog.Error("subscribe aggregation subnet failed", "node", r.num, "topic", topic, "err", err)
 		}
@@ -812,9 +815,9 @@ func (r *NodeRunner) emitFinalityVotesPartial(n int, fs *finalityState, at time.
 // planned extension), so it is fixed-time. n is the round key: the finality slot in base mode, the
 // AC slot under segregation. Teardown of the pre-join state is the separate dropTimer, not here.
 func (r *NodeRunner) emitFinalityAggregate(n int, fs *finalityState) {
-	fs.aggOnce.Do(func() {
+	fs.aggregateOnce.Do(func() {
 		at := time.Now()
-		for _, subnet := range fs.aggSubnets {
+		for _, subnet := range fs.aggregateSubnets {
 			msg := validator.MakeFinalityAggregate(n, subnet, r.num, r.validatorsPerCell(n, subnet))
 			r.tracer.OnPublish(metrics.FinalityAggregateID(n, subnet, r.num), false, at)
 			if err := r.nd.Publish(r.runCtx, validator.FinalityAggregateTopic, msg.Payload); err != nil {
@@ -828,7 +831,7 @@ func (r *NodeRunner) emitFinalityAggregate(n int, fs *finalityState) {
 // hasPrejoinState reports whether prejoinFinality set up any network state for this round (fan-out
 // dials, aggregation dials, or foreign aggregation subscribes) that dropFinality must release.
 func (fs *finalityState) hasPrejoinState() bool {
-	return len(fs.voteDialed) > 0 || len(fs.aggDialed) > 0 || len(fs.aggSubscribed) > 0
+	return len(fs.voteDialed) > 0 || len(fs.aggregateDialed) > 0 || len(fs.aggregateSubscribed) > 0
 }
 
 // dropFinality tears down a finality slot's pre-join state: unsubscribes the aggregation-only
@@ -846,21 +849,21 @@ func (r *NodeRunner) dropFinality(fs *finalityState) {
 			if live == fs {
 				continue
 			}
-			for _, topic := range live.aggSubscribed {
+			for _, topic := range live.aggregateSubscribed {
 				keepTopic[topic] = true
 			}
-			for _, p := range slices.Concat(live.voteDialed, live.aggDialed) {
+			for _, p := range slices.Concat(live.voteDialed, live.aggregateDialed) {
 				keepPeer[p] = true
 			}
 		}
 		r.mu.Unlock()
-		for _, topic := range fs.aggSubscribed {
+		for _, topic := range fs.aggregateSubscribed {
 			if !keepTopic[topic] {
 				r.nd.Unsubscribe(topic)
 			}
 		}
 		var drop []int
-		for _, p := range slices.Concat(fs.voteDialed, fs.aggDialed) {
+		for _, p := range slices.Concat(fs.voteDialed, fs.aggregateDialed) {
 			if !keepPeer[p] {
 				drop = append(drop, p)
 			}
@@ -898,8 +901,8 @@ func (r *NodeRunner) reapFinality(slot int) {
 	if fs.voteTimer != nil {
 		fs.voteTimer.Stop()
 	}
-	if fs.aggTimer != nil {
-		fs.aggTimer.Stop()
+	if fs.aggregateTimer != nil {
+		fs.aggregateTimer.Stop()
 	}
 	if fs.dropTimer != nil {
 		fs.dropTimer.Stop()
