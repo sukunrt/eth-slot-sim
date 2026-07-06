@@ -360,13 +360,11 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 			ss.acVoteDuties = r.view.ACVoteDuties(slot)
 		}
 
-		// Custody is the DA gate's input — the node's columns it must hold to vote block, the same
-		// for the attestation and the AC vote. A sync-only run votes un-gated, so it needs none.
-		if r.attest || r.decoupled {
-			ss.custody = r.view.CustodyColumns()
-		}
-
-		// With no custody (columns off, or a sync-only run) the gate is trivially complete.
+		// The DA gate: this node's custody columns (from the column phase; empty ⇒ gate
+		// trivially complete). Only the vote paths wait on it — the attestation and the AC
+		// vote emit block only once all custody is in (tryEarlyEmit); sync votes head
+		// un-gated by design, isolating the DA gate's effect.
+		ss.custody = r.view.CustodyColumns()
 		ss.columnsComplete = len(ss.custody) == 0
 		if !ss.columnsComplete {
 			ss.haveColumn = make(map[int]bool, len(ss.custody))
