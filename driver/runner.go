@@ -387,23 +387,15 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 	// un-gated by design, isolating the DA gate's effect.
 	ss.custody = r.view.CustodyColumns
 	ss.columnsComplete = len(ss.custody) == 0
-	if !ss.columnsComplete {
-		ss.haveColumn = make(map[int]bool, len(ss.custody))
-	}
+	ss.haveColumn = make(map[int]bool, len(ss.custody))
 
-	if r.sync { // this node's stable sync membership (a member emits one message on its subnet)
-		ss.syncSubnet, ss.syncMember = r.view.SyncSubnet, r.view.SyncMember
-	}
-
-	r.mu.Lock()
-	r.slots[slot] = ss
-	r.mu.Unlock()
-	// The deadline dispatches per phase inside onBlockDeadline; with no vote phase on it no-ops.
-	ss.timer = time.AfterFunc(time.Until(ss.deadline), func() { r.onBlockDeadline(slot, ss) })
-
-	// Sync contribution phase: if this node aggregates any sync subnet this slot, arm a timer
-	// to publish its contributions at the aggregation deadline (shared with aggregates).
 	if r.sync {
+		// This node's stable sync membership (a member emits one message on its subnet).
+		ss.syncSubnet, ss.syncMember = r.view.SyncSubnet, r.view.SyncMember
+
+		// Sync contribution phase: if this node aggregates any sync subnet this slot, arm a
+		// timer to publish its contributions at the aggregation deadline (shared with
+		// aggregates).
 		ss.syncAggSubnets = r.view.SyncAggregateSubnets[slot]
 		if len(ss.syncAggSubnets) > 0 {
 			ss.syncAggTimer = time.AfterFunc(time.Until(slotStart.Add(r.aggDue)), func() {
@@ -411,6 +403,12 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 			})
 		}
 	}
+
+	r.mu.Lock()
+	r.slots[slot] = ss
+	r.mu.Unlock()
+	// The deadline dispatches per phase inside onBlockDeadline; with no vote phase on it no-ops.
+	ss.timer = time.AfterFunc(time.Until(ss.deadline), func() { r.onBlockDeadline(slot, ss) })
 	if r.proposes(slot) {
 		msg := validator.MakeBlock(slot, r.num, r.blockSize)
 		go r.publishBlock(slotStart.Add(r.blockPublishAt(slot)), msg)
