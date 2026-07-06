@@ -197,11 +197,23 @@ func NewRunner(num int, nd *node.Node, basePeers []int,
 		base[p] = true
 	}
 	r := &NodeRunner{
-		num: num, nd: nd, numNodes: cfg.NumNodes, blockSize: cfg.BlockSize,
-		offset: cfg.Offset, jitter: cfg.Jitter, sched: cfg.Schedule, attest: cfg.Attest,
-		sync: cfg.Sync, tracer: tracer, slotDur: cfg.SlotDuration, blockDue: cfg.AttestationDue,
-		aggDue: cfg.AggregateDue, prep: cfg.Prep, seed: cfg.Seed, base: base,
-		slots: make(map[int]*slotState),
+		num:       num,
+		nd:        nd,
+		numNodes:  cfg.NumNodes,
+		blockSize: cfg.BlockSize,
+		offset:    cfg.Offset,
+		jitter:    cfg.Jitter,
+		sched:     cfg.Schedule,
+		attest:    cfg.Attest,
+		sync:      cfg.Sync,
+		tracer:    tracer,
+		slotDur:   cfg.SlotDuration,
+		blockDue:  cfg.AttestationDue,
+		aggDue:    cfg.AggregateDue,
+		prep:      cfg.Prep,
+		seed:      cfg.Seed,
+		base:      base,
+		slots:     make(map[int]*slotState),
 	}
 	if dc := cfg.Decoupled; dc != nil {
 		r.decoupled = true
