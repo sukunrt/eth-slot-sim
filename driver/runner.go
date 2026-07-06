@@ -426,13 +426,21 @@ func (r *NodeRunner) proposes(slot int) bool {
 	return slot%r.numNodes == r.num
 }
 
+// Stream keys for the runner's per-purpose PCG draws: PCG takes one uint64 stream, so the
+// purpose salt keeps the three families of draws disjoint and the shift packs the two (small)
+// identifiers injectively. Every draw is a pure function of (run seed, purpose, identity) —
+// independent of goroutine interleaving and identical across both backends.
+const (
+	jitterStream       = 1 << 60 // block publish jitter, |num<<32|slot
+	dialStream         = 2 << 60 // attestation fan-out dial order, |slot<<32|subnet
+	finalityDialStream = 3 << 60 // finality pre-join dial order, |round<<32|subnet
+)
+
 // blockPublishAt draws the block's publish instant, offset + rand(0, jitter) into the slot.
-// The rng is derived from (seed, node, slot) so the draw is deterministic regardless of how
-// the per-slot setup goroutines interleave.
 func (r *NodeRunner) blockPublishAt(slot int) time.Duration {
 	at := r.offset
 	if r.jitter > 0 {
-		rng := rand.New(rand.NewPCG(r.seed, uint64(r.num)<<32|uint64(slot)))
+		rng := rand.New(rand.NewPCG(r.seed, jitterStream|uint64(r.num)<<32|uint64(slot)))
 		at += time.Duration(rng.Int64N(int64(r.jitter)))
 	}
 	return at
@@ -447,7 +455,7 @@ func (r *NodeRunner) shuffledSubscribers(slot, subnet int) []int {
 	}
 	order := make([]int, len(subs))
 	copy(order, subs)
-	rng := rand.New(rand.NewPCG(r.seed, uint64(slot)*1_000_003+uint64(subnet)))
+	rng := rand.New(rand.NewPCG(r.seed, dialStream|uint64(slot)<<32|uint64(subnet)))
 	rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
 	return order
 }
@@ -726,7 +734,7 @@ func (r *NodeRunner) shuffledFinalitySubscribers(n, subnet int) []int {
 	}
 	order := make([]int, len(subs))
 	copy(order, subs)
-	rng := rand.New(rand.NewPCG(r.seed, uint64(n)*1_000_003+uint64(subnet)))
+	rng := rand.New(rand.NewPCG(r.seed, finalityDialStream|uint64(n)<<32|uint64(subnet)))
 	rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
 	return order
 }
