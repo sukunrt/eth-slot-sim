@@ -110,6 +110,17 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 	// The committee drives attestations (when cfg.Attest) and/or columns (NumColumns > 0); the
 	// runner's attest flag gates attestation emission, so a committee can disseminate columns
 	// without emitting attestations. Block-only runs pass a nil Schedule.
+	rcfg := RunnerConfig{
+		Schedule: cfg.Schedule, Attest: cfg.Attest, Sync: cfg.Sync,
+		SlotDuration: cfg.SlotDuration, AttestationDue: cfg.AttestationDue,
+		AggregateDue: cfg.AggregateDue, Prep: cfg.Prep, Seed: cfg.Seed,
+		Decoupled: cfg.Decoupled, Partial: cfg.Partial,
+	}
+	// Decoupled consensus replaces attestations + sync, so force both emit flags off when it's on
+	// (the runner's mutual-exclusion invariant: a slot emits an AC vote OR an attestation, never both).
+	if cfg.Decoupled != nil {
+		rcfg.Attest, rcfg.Sync = false, false
+	}
 	for i := range n {
 		proposer := validator.NewProposer(i, n, cfg.BlockSize, cfg.Offset, cfg.Jitter,
 			rand.New(rand.NewPCG(cfg.Seed, uint64(i))), proposers)
@@ -135,14 +146,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		if cfg.Partial != nil {
 			nd.Partial = cfg.Partial.NodeOpts(cfg.Seed, resolver)
 		}
-		// Decoupled consensus replaces attestations + sync, so force both emit flags off when it's on
-		// (the runner's mutual-exclusion invariant: a slot emits an AC vote OR an attestation, never both).
-		attest, sync := cfg.Attest, cfg.Sync
-		if cfg.Decoupled != nil {
-			attest, sync = false, false
-		}
-		r := NewRunner(i, nd, proposer, cfg.Schedule, attest, sync, tracer, cfg.SlotDuration, cfg.AttestationDue,
-			cfg.AggregateDue, cfg.Prep, cfg.Seed, nw.Peers(i), cfg.Decoupled, cfg.Partial)
+		r := NewRunner(i, nd, proposer, nw.Peers(i), tracer, rcfg)
 		r.Attach()
 		d.nodes[i] = nd
 		d.runners[i] = r

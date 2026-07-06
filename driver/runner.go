@@ -155,35 +155,52 @@ type slotState struct {
 	syncAggEmitOnce sync.Once
 }
 
-// NewRunner builds a runner for one node. sched may be nil (block-only). attest gates
-// attestation emission: sched set with attest false is a columns-only run (disseminate +
-// measure columns, no vote). sync gates sync-committee emission (messages + contributions), for
-// member nodes only; it arms the shared deadline timer alongside attest. aggDue 0 disables the
-// aggregate phase. dc (nil ⇒ off) turns on the decoupled-consensus phase, which suppresses
-// attestation/sync emit (the AC vote replaces attestations). basePeers is the node's long-lived
-// peer set (so per-slot subnet dials it adds on top can be dropped). pp (nil ⇒ classic)
-// switches the attestation-class floods to the partial transport — a transport, not a phase,
-// so it needs attest or dc on, and the node's Partial options set.
-func NewRunner(num int, nd *node.Node, proposer *validator.Proposer, sched *schedule.Assignment, attest, sync bool,
-	tracer metrics.Tracer, slotDur, blockDue, aggDue, prep time.Duration, seed uint64, basePeers []int,
-	dc *DecoupledParams, pp *PartialParams) *NodeRunner {
+// RunnerConfig is the run-wide half of a runner's construction — identical for every node in a
+// run, so the Driver builds one and hands it to all N runners (the per-node half — num, node,
+// proposer, basePeers — stays positional on NewRunner). Field names mirror driver.Config; the
+// zero value is a block-only runner.
+type RunnerConfig struct {
+	Schedule *schedule.Assignment // nil ⇒ block-only (Phase 1)
+	Attest   bool                 // emit attestations; Schedule set with Attest false ⇒ columns-only
+	Sync     bool                 // emit sync-committee messages + contributions (members only)
+
+	SlotDuration   time.Duration
+	AttestationDue time.Duration // attestation / AC-vote deadline, offset into the slot
+	AggregateDue   time.Duration // aggregate emit, offset into the slot (0 ⇒ no aggregate phase)
+	Prep           time.Duration // Δ_prep before emitting on block receipt
+	Seed           uint64        // seeds the per-slot subnet-peer dial choice
+
+	// Decoupled (nil ⇒ off) turns on the decoupled-consensus phase, which suppresses
+	// attestation/sync emit (the AC vote replaces attestations). Partial (nil ⇒ classic)
+	// switches the attestation-class floods to the partial transport — a transport, not a
+	// phase, so it needs Attest or Decoupled on, and the node's Partial options set.
+	Decoupled *DecoupledParams
+	Partial   *PartialParams
+}
+
+// NewRunner builds a runner for one node: num/nd/proposer identify it, basePeers is its
+// long-lived peer set (so per-slot subnet dials added on top can be dropped), and cfg carries
+// the run-wide knobs shared by every runner in the run.
+func NewRunner(num int, nd *node.Node, proposer *validator.Proposer, basePeers []int,
+	tracer metrics.Tracer, cfg RunnerConfig) *NodeRunner {
 	base := make(map[int]bool, len(basePeers))
 	for _, p := range basePeers {
 		base[p] = true
 	}
 	r := &NodeRunner{
-		num: num, nd: nd, proposer: proposer, sched: sched, attest: attest, sync: sync, tracer: tracer,
-		slotDur: slotDur, blockDue: blockDue, aggDue: aggDue, prep: prep, seed: seed, base: base,
+		num: num, nd: nd, proposer: proposer, sched: cfg.Schedule, attest: cfg.Attest,
+		sync: cfg.Sync, tracer: tracer, slotDur: cfg.SlotDuration, blockDue: cfg.AttestationDue,
+		aggDue: cfg.AggregateDue, prep: cfg.Prep, seed: cfg.Seed, base: base,
 		slots: make(map[int]*slotState),
 	}
-	if dc != nil {
+	if dc := cfg.Decoupled; dc != nil {
 		r.decoupled = true
 		r.k, r.fcVoteOffset, r.fcAggFraction = dc.K, dc.FCVoteOffset, dc.FCAggFraction
 		r.segregated, r.roundAggFraction = dc.Segregated, dc.RoundAggFraction
 		r.finals = make(map[int]*finalityState)
 	}
-	if pp != nil {
-		if !attest && dc == nil {
+	if pp := cfg.Partial; pp != nil {
+		if !cfg.Attest && cfg.Decoupled == nil {
 			panic("driver: the partial transport requires the attestation phase or decoupled consensus")
 		}
 		if nd.Partial == nil {

@@ -88,7 +88,10 @@ func buildScenarioWith(t *testing.T, a *schedule.Assignment, due time.Duration, 
 		if pp != nil {
 			nd.Partial = &node.PartialOpts{Seed: 1, Resolver: driver.NewPartialResolver(a)}
 		}
-		r := driver.NewRunner(i, nd, val, a, attest, sync, tracer, slotDur, due, 0, 0, 1, nw.Peers(i), dc, pp)
+		r := driver.NewRunner(i, nd, val, nw.Peers(i), tracer, driver.RunnerConfig{
+			Schedule: a, Attest: attest, Sync: sync,
+			SlotDuration: slotDur, AttestationDue: due, Seed: 1, Decoupled: dc, Partial: pp,
+		})
 		r.Attach()
 		if suppressBlock[i] {
 			orig := nd.OnReceive

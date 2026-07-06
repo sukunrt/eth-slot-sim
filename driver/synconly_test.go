@@ -38,7 +38,8 @@ func TestNodeRunnerRecordsSyncMessage(t *testing.T) {
 				VerifyDelay: func() time.Duration { return 0 },
 				D:           8, Dlo: 6, Dhi: 12,
 			}
-			driver.NewRunner(i, nd, val, nil, false, false, rec, 12*time.Second, 0, 0, 0, 1, nw.Peers(i), nil, nil).Attach()
+			driver.NewRunner(i, nd, val, nw.Peers(i), rec,
+				driver.RunnerConfig{SlotDuration: 12 * time.Second, Seed: 1}).Attach()
 			nodes[i] = nd
 		}
 
@@ -108,7 +109,8 @@ func TestNodeRunnerRecordsSyncContribution(t *testing.T) {
 				VerifyDelay: func() time.Duration { return 0 },
 				D:           8, Dlo: 6, Dhi: 12,
 			}
-			driver.NewRunner(i, nd, val, nil, false, false, rec, 12*time.Second, 0, 0, 0, 1, nw.Peers(i), nil, nil).Attach()
+			driver.NewRunner(i, nd, val, nw.Peers(i), rec,
+				driver.RunnerConfig{SlotDuration: 12 * time.Second, Seed: 1}).Attach()
 			nodes[i] = nd
 		}
 

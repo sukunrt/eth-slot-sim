@@ -194,7 +194,11 @@ func main() {
 		log.Fatalf("-transport=%q, want classic or partial", *transport)
 	}
 	peers := parseIntList(*peerNumsStr)
-	runner := driver.NewRunner(*nodeNum, nd, proposer, sched, attest, syncEmit, tracer, *slotDur, *attDue, *aggDue, *prep, *seed, peers, decoupled, pp)
+	runner := driver.NewRunner(*nodeNum, nd, proposer, peers, tracer, driver.RunnerConfig{
+		Schedule: sched, Attest: attest, Sync: syncEmit,
+		SlotDuration: *slotDur, AttestationDue: *attDue, AggregateDue: *aggDue, Prep: *prep,
+		Seed: *seed, Decoupled: decoupled, Partial: pp,
+	})
 	runner.Attach() // sets nd.OnReceive before JoinTopics
 
 	ctx := context.Background()
