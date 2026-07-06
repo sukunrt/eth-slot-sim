@@ -65,7 +65,7 @@ func TestLoadFixtureContract(t *testing.T) {
 	}
 
 	// Proposer survived the round-trip (one per slot, in range).
-	if !a.Node(a.Slots[0].Proposer).Proposes(0) {
+	if !a.Node(a.Slots[0].Proposer).Proposes[0] {
 		t.Fatalf("node %d does not propose slot 0", a.Slots[0].Proposer)
 	}
 	for _, sp := range a.Slots {
@@ -107,11 +107,11 @@ func TestLoadFixtureContract(t *testing.T) {
 	for node := range a.Params.N {
 		v := a.Node(node)
 		for slot := range a.Params.NumSlots {
-			if got, want := v.AttestDuties(slot), rawDuties(a, node, slot); !slices.Equal(got, want) {
+			if got, want := v.AttestDuties[slot], rawDuties(a, node, slot); !slices.Equal(got, want) {
 				t.Fatalf("node %d slot %d duties = %v, want %v", node, slot, got, want)
 			}
 		}
-		for _, subnet := range v.SubscribedSubnets() {
+		for _, subnet := range v.SubscribedSubnets {
 			if !slices.Contains(a.SubnetSubscribers[subnet], node) {
 				t.Fatalf("node %d SubscribedSubnets includes %d but isn't a member", node, subnet)
 			}
@@ -197,13 +197,14 @@ func TestLoadDecoupledFixtureContract(t *testing.T) {
 
 	// Accessors agree with the raw structure.
 	for node := range p.N {
-		s, member := a.Node(node).FinalitySubnet()
-		if !member || !slices.Contains(a.FinalitySubscribers[s], node) {
-			t.Fatalf("node %d FinalitySubnet = (%d,%v) inconsistent with FinalitySubscribers", node, s, member)
+		v := a.Node(node)
+		if !v.FinalityMember || !slices.Contains(a.FinalitySubscribers[v.FinalitySubnet], node) {
+			t.Fatalf("node %d FinalitySubnet = (%d,%v) inconsistent with FinalitySubscribers",
+				node, v.FinalitySubnet, v.FinalityMember)
 		}
 		// One duty per hosted validator (uniform v%N here), on its drawn subnet, at its cell
 		// rank (the rank itself is pinned by position_test.go).
-		duties := a.Node(node).FinalityVoteDuties(0) // base mode: the slot arg is ignored
+		duties := a.Node(node).FinalityVoteDuties[0] // base mode: every round is identical
 		var wantDuties []AttestDuty
 		for val := node; val < p.V; val += p.N {
 			wantDuties = append(wantDuties, AttestDuty{
@@ -225,7 +226,7 @@ func TestLoadDecoupledFixtureContract(t *testing.T) {
 					}
 				}
 			}
-			if got := a.Node(node).FinalityAggregations(n); !slices.Equal(got, want) {
+			if got := a.Node(node).FinalityAggregations[n]; !slices.Equal(got, want) {
 				t.Fatalf("node %d FinalityAggregations(%d) = %v, want %v", node, n, got, want)
 			}
 		}
@@ -318,13 +319,13 @@ func TestLoadSegregatedFixtureContract(t *testing.T) {
 						Subnet: a.FinalitySubnetOf[val], Val: val, Position: a.FinalityPosition(val)})
 				}
 			}
-			if got := a.Node(node).FinalityVoteDuties(slot); !slices.Equal(got, want) {
+			if got := a.Node(node).FinalityVoteDuties[slot]; !slices.Equal(got, want) {
 				t.Fatalf("node %d FinalityVoteDuties(%d) = %v, want %v", node, slot, got, want)
 			}
 		}
 		var fslotVals []int
 		for slot := range k {
-			for _, d := range a.Node(node).FinalityVoteDuties(slot) {
+			for _, d := range a.Node(node).FinalityVoteDuties[slot] {
 				fslotVals = append(fslotVals, d.Val)
 			}
 		}
@@ -351,14 +352,14 @@ func TestLoadSegregatedFixtureContract(t *testing.T) {
 					}
 				}
 			}
-			if got := a.Node(node).FinalityAggregations(slot); !slices.Equal(got, want) {
+			if got := a.Node(node).FinalityAggregations[slot]; !slices.Equal(got, want) {
 				t.Fatalf("node %d FinalityAggregations(%d) = %v, want %v", node, slot, got, want)
 			}
 		}
 	}
 }
 
-// Under segregation FinalityVoteDuties filters the hosted validators by round (slot % k), in
+// Under segregation finalityVoteDuties (the derivation View materializes) filters the hosted validators by round (slot % k), in
 // both the uniform and the ValidatorCounts hosting models; a base (non-segregated) assignment
 // ignores the slot argument entirely. Duty positions are the (subnet[, round]) cell ranks
 // (pinned in position_test.go). Each section builds a fresh Assignment — the rank tables are
@@ -374,27 +375,27 @@ func TestSegregatedFinalityVoteDuties(t *testing.T) {
 	}
 	// Uniform hosting (v % N): node 0 hosts vals 0 (round 0) and 3 (round 0).
 	a := segregated()
-	if got := a.Node(0).FinalityVoteDuties(0); !slices.Equal(got, []AttestDuty{
+	if got := a.finalityVoteDuties(0, 0); !slices.Equal(got, []AttestDuty{
 		{Subnet: 1, Val: 0, Position: 0}, {Subnet: 1, Val: 3, Position: 1},
 	}) {
 		t.Fatalf("node0 FinalityVoteDuties(0) = %v, want [(1,0,p0) (1,3,p1)]", got)
 	}
-	if got := a.Node(0).FinalityVoteDuties(1); got != nil {
+	if got := a.finalityVoteDuties(0, 1); got != nil {
 		t.Fatalf("node0 FinalityVoteDuties(1) = %v, want nil (both vals are round 0)", got)
 	}
 	// Round arithmetic uses slot % k: slot 2 is round 0 again.
-	if got := a.Node(0).FinalityVoteDuties(2); len(got) != 2 {
+	if got := a.finalityVoteDuties(0, 2); len(got) != 2 {
 		t.Fatalf("node0 FinalityVoteDuties(2) = %v, want round-0 duties again", got)
 	}
 	// ValidatorCounts hosting: node 0 hosts vals 0,1,2 — rounds 0,1,0.
 	a = segregated()
 	a.ValidatorCounts = []int{3, 1, 2}
-	if got := a.Node(0).FinalityVoteDuties(1); !slices.Equal(got, []AttestDuty{
+	if got := a.finalityVoteDuties(0, 1); !slices.Equal(got, []AttestDuty{
 		{Subnet: 0, Val: 1, Position: 0},
 	}) {
 		t.Fatalf("node0 counts FinalityVoteDuties(1) = %v, want [(0,1,p0)]", got)
 	}
-	if got := a.Node(0).FinalityVoteDuties(0); !slices.Equal(got, []AttestDuty{
+	if got := a.finalityVoteDuties(0, 0); !slices.Equal(got, []AttestDuty{
 		{Subnet: 1, Val: 0, Position: 0}, {Subnet: 0, Val: 2, Position: 0},
 	}) {
 		t.Fatalf("node0 counts FinalityVoteDuties(0) = %v, want [(1,0,p0) (0,2,p0)]", got)
@@ -404,7 +405,7 @@ func TestSegregatedFinalityVoteDuties(t *testing.T) {
 	a = segregated()
 	a.FinalityRoundOf = nil
 	for _, slot := range []int{0, 1, 7} {
-		if got := a.Node(0).FinalityVoteDuties(slot); !slices.Equal(got, []AttestDuty{
+		if got := a.finalityVoteDuties(0, slot); !slices.Equal(got, []AttestDuty{
 			{Subnet: 1, Val: 0, Position: 0}, {Subnet: 1, Val: 3, Position: 1},
 		}) {
 			t.Fatalf("base node0 FinalityVoteDuties(%d) = %v, want all duties", slot, got)
@@ -425,7 +426,7 @@ func TestViewProposes(t *testing.T) {
 	}
 	for slot, want := range []int{5, 2, 5} {
 		for n := range a.Params.N {
-			if got := a.Node(n).Proposes(slot); got != (n == want) {
+			if got := a.Node(n).Proposes[slot]; got != (n == want) {
 				t.Fatalf("node %d Proposes(%d) = %v, want proposer %d", n, slot, got, want)
 			}
 		}
@@ -461,16 +462,16 @@ func TestLiteralAssignmentAccessors(t *testing.T) {
 	}
 
 	// k>1: node 0 holds two attesters on subnet 0 ⇒ two duties.
-	if got := a.Node(0).AttestDuties(0); len(got) != 2 {
+	if got := a.Node(0).AttestDuties[0]; len(got) != 2 {
 		t.Fatalf("node0 duties = %v, want 2 (k>1 on one subnet)", got)
 	}
 	if got := a.Subscribers(0); !slices.Equal(got, []int{1, 2, 3}) {
 		t.Fatalf("Subscribers(0) = %v, want [1 2 3]", got)
 	}
-	if got := a.Node(2).SubscribedSubnets(); !slices.Equal(got, []int{0, 1}) {
+	if got := a.Node(2).SubscribedSubnets; !slices.Equal(got, []int{0, 1}) {
 		t.Fatalf("node2 SubscribedSubnets = %v, want [0 1]", got)
 	}
-	if got := a.Node(0).SubscribedSubnets(); !slices.Equal(got, []int{1}) {
+	if got := a.Node(0).SubscribedSubnets; !slices.Equal(got, []int{1}) {
 		t.Fatalf("node0 SubscribedSubnets = %v, want [1]", got)
 	}
 }
@@ -493,24 +494,24 @@ func TestCustodyColumns(t *testing.T) {
 		Slots: []SlotPlan{{Slot: 0, Proposer: 0}},
 	}
 
-	if !a.Node(0).IsFullCustody() || !a.Node(1).IsFullCustody() {
+	if !a.Node(0).FullCustody || !a.Node(1).FullCustody {
 		t.Fatal("nodes 0,1 should be full-custody")
 	}
-	if a.Node(2).IsFullCustody() {
+	if a.Node(2).FullCustody {
 		t.Fatal("node 2 should not be full-custody")
 	}
 	// Full-custody node holds every column.
-	if got := a.Node(0).CustodyColumns(); !slices.Equal(got, []int{0, 1, 2, 3}) {
+	if got := a.Node(0).CustodyColumns; !slices.Equal(got, []int{0, 1, 2, 3}) {
 		t.Fatalf("node0 custody = %v, want all 4 columns", got)
 	}
 	// Ordinary nodes hold their column_subscribers membership (sorted).
-	if got := a.Node(2).CustodyColumns(); !slices.Equal(got, []int{0, 2}) {
+	if got := a.Node(2).CustodyColumns; !slices.Equal(got, []int{0, 2}) {
 		t.Fatalf("node2 custody = %v, want [0 2]", got)
 	}
-	if got := a.Node(4).CustodyColumns(); !slices.Equal(got, []int{2, 3}) {
+	if got := a.Node(4).CustodyColumns; !slices.Equal(got, []int{2, 3}) {
 		t.Fatalf("node4 custody = %v, want [2 3]", got)
 	}
-	if got := a.Node(3).CustodyColumns(); !slices.Equal(got, []int{1}) {
+	if got := a.Node(3).CustodyColumns; !slices.Equal(got, []int{1}) {
 		t.Fatalf("node3 custody = %v, want [1]", got)
 	}
 	// ColumnSubscribersOf returns a column's custodier set; out-of-range ⇒ nil.
@@ -537,13 +538,13 @@ func TestSyncMembership(t *testing.T) {
 	}
 	// SyncSubnet: members map to their one subnet; non-members return (-1,false).
 	for node, want := range map[int]int{0: 0, 2: 0, 4: 1, 5: 1} {
-		if got, member := a.Node(node).SyncSubnet(); !member || got != want {
-			t.Fatalf("node %d SyncSubnet = (%d,%v), want (%d,true)", node, got, member, want)
+		if v := a.Node(node); !v.SyncMember || v.SyncSubnet != want {
+			t.Fatalf("node %d SyncSubnet = (%d,%v), want (%d,true)", node, v.SyncSubnet, v.SyncMember, want)
 		}
 	}
 	for _, node := range []int{1, 3} {
-		if got, member := a.Node(node).SyncSubnet(); member || got != -1 {
-			t.Fatalf("node %d SyncSubnet = (%d,%v), want (-1,false)", node, got, member)
+		if v := a.Node(node); v.SyncMember || v.SyncSubnet != -1 {
+			t.Fatalf("node %d SyncSubnet = (%d,%v), want (-1,false)", node, v.SyncSubnet, v.SyncMember)
 		}
 	}
 	// SyncSubscribersOf: a subnet's member set; out-of-range ⇒ nil.
@@ -554,14 +555,14 @@ func TestSyncMembership(t *testing.T) {
 		t.Fatalf("SyncSubscribersOf(9) = %v, want nil", got)
 	}
 	// SyncAggregateSubnets: the subnets whose aggregator set includes the node.
-	if got := a.Node(5).SyncAggregateSubnets(0); !slices.Equal(got, []int{1}) {
+	if got := a.Node(5).SyncAggregateSubnets[0]; !slices.Equal(got, []int{1}) {
 		t.Fatalf("node5 SyncAggregateSubnets = %v, want [1]", got)
 	}
-	if got := a.Node(0).SyncAggregateSubnets(0); !slices.Equal(got, []int{0}) {
+	if got := a.Node(0).SyncAggregateSubnets[0]; !slices.Equal(got, []int{0}) {
 		t.Fatalf("node0 SyncAggregateSubnets = %v, want [0]", got)
 	}
 	// A member that isn't an aggregator this slot aggregates nothing.
-	if got := a.Node(2).SyncAggregateSubnets(0); got != nil {
+	if got := a.Node(2).SyncAggregateSubnets[0]; got != nil {
 		t.Fatalf("node2 SyncAggregateSubnets = %v, want nil", got)
 	}
 }
@@ -597,32 +598,32 @@ func TestDecoupledMembership(t *testing.T) {
 	}
 
 	// ACVoteDuties: node 0 votes vals 0 and 6 in slot 0 (k>1), node 1 votes val 7; non-voters get nil.
-	if got := a.Node(0).ACVoteDuties(0); len(got) != 2 || got[0].Val != 0 || got[1].Val != 6 {
+	if got := a.Node(0).ACVoteDuties[0]; len(got) != 2 || got[0].Val != 0 || got[1].Val != 6 {
 		t.Fatalf("node0 ACVoteDuties(0) = %+v, want vals [0 6]", got)
 	}
-	if got := a.Node(2).ACVoteDuties(0); got != nil {
+	if got := a.Node(2).ACVoteDuties[0]; got != nil {
 		t.Fatalf("node2 ACVoteDuties(0) = %+v, want nil (not a voter)", got)
 	}
-	if got := a.Node(2).ACVoteDuties(1); len(got) != 1 || got[0].Val != 2 {
+	if got := a.Node(2).ACVoteDuties[1]; len(got) != 1 || got[0].Val != 2 {
 		t.Fatalf("node2 ACVoteDuties(1) = %+v, want val [2]", got)
 	}
 
 	// FinalitySubnet: every node maps to its one subnet; there are no non-members (partition).
 	for node, want := range map[int]int{0: 0, 2: 0, 4: 0, 1: 1, 3: 1, 5: 1} {
-		if got, member := a.Node(node).FinalitySubnet(); !member || got != want {
-			t.Fatalf("node %d FinalitySubnet = (%d,%v), want (%d,true)", node, got, member, want)
+		if v := a.Node(node); !v.FinalityMember || v.FinalitySubnet != want {
+			t.Fatalf("node %d FinalitySubnet = (%d,%v), want (%d,true)", node, v.FinalitySubnet, v.FinalityMember, want)
 		}
 	}
 
 	// FinalityVoteDuties: one (val, subnet) pair per hosted validator (uniform v%N), the subnet
 	// from finality_subnet_of — a node's keys can land on several subnets. Positions are the
 	// subnet cells' ranks: subnet0 = {0,2,4,7,8,10}, subnet1 = {1,3,5,6,9,11}.
-	if got := a.Node(0).FinalityVoteDuties(0); !slices.Equal(got, []AttestDuty{
+	if got := a.Node(0).FinalityVoteDuties[0]; !slices.Equal(got, []AttestDuty{
 		{Subnet: 0, Val: 0, Position: 0}, {Subnet: 1, Val: 6, Position: 3},
 	}) {
 		t.Fatalf("node0 FinalityVoteDuties = %v, want [(0,0,p0) (1,6,p3)]", got)
 	}
-	if got := a.Node(5).FinalityVoteDuties(0); !slices.Equal(got, []AttestDuty{
+	if got := a.Node(5).FinalityVoteDuties[0]; !slices.Equal(got, []AttestDuty{
 		{Subnet: 1, Val: 5, Position: 2}, {Subnet: 1, Val: 11, Position: 5},
 	}) {
 		t.Fatalf("node5 FinalityVoteDuties = %v, want [(1,5,p2) (1,11,p5)]", got)
@@ -638,17 +639,17 @@ func TestDecoupledMembership(t *testing.T) {
 
 	// FinalityAggregations(0): the boundary slot is 0*k=0. Node 0 aggregates both subnets (its
 	// two refs on subnet 1 dedup to one duty); node 3 only subnet 1; node 2 none.
-	if got := a.Node(0).FinalityAggregations(0); !slices.Equal(got, []int{0, 1}) {
+	if got := a.Node(0).FinalityAggregations[0]; !slices.Equal(got, []int{0, 1}) {
 		t.Fatalf("node0 FinalityAggregations(0) = %v, want [0 1]", got)
 	}
-	if got := a.Node(3).FinalityAggregations(0); !slices.Equal(got, []int{1}) {
+	if got := a.Node(3).FinalityAggregations[0]; !slices.Equal(got, []int{1}) {
 		t.Fatalf("node3 FinalityAggregations(0) = %v, want [1]", got)
 	}
-	if got := a.Node(2).FinalityAggregations(0); got != nil {
+	if got := a.Node(2).FinalityAggregations[0]; got != nil {
 		t.Fatalf("node2 FinalityAggregations(0) = %v, want nil", got)
 	}
-	if got := a.Node(0).FinalityAggregations(7); got != nil {
-		t.Fatalf("FinalityAggregations(7) = %v, want nil (out of range)", got)
+	if got := len(a.Node(0).FinalityAggregations); got != 1 {
+		t.Fatalf("len(FinalityAggregations) = %d, want 1 round (2 slots / k=2)", got)
 	}
 }
 
@@ -669,7 +670,7 @@ func TestFinalityVoteDutiesWithCounts(t *testing.T) {
 	}
 	var all []int
 	for node, w := range want {
-		got := a.Node(node).FinalityVoteDuties(0) // base mode: the slot arg is ignored
+		got := a.finalityVoteDuties(node, 0) // base mode: the slot arg is ignored
 		if !slices.Equal(got, w) {
 			t.Fatalf("node%d FinalityVoteDuties = %v, want %v", node, got, w)
 		}
@@ -696,13 +697,13 @@ func TestAggregateSubnets(t *testing.T) {
 			Aggregators: [][]int{{0, 2}, {0, 3}}, // node 0 aggregates both committees
 		}},
 	}
-	if got := a.Node(0).AggregateSubnets(0); !slices.Equal(got, []int{0, 1}) {
+	if got := a.Node(0).AggregateSubnets[0]; !slices.Equal(got, []int{0, 1}) {
 		t.Fatalf("node0 AggregateSubnets = %v, want [0 1]", got)
 	}
-	if got := a.Node(2).AggregateSubnets(0); !slices.Equal(got, []int{0}) {
+	if got := a.Node(2).AggregateSubnets[0]; !slices.Equal(got, []int{0}) {
 		t.Fatalf("node2 AggregateSubnets = %v, want [0]", got)
 	}
-	if got := a.Node(1).AggregateSubnets(0); got != nil {
+	if got := a.Node(1).AggregateSubnets[0]; got != nil {
 		t.Fatalf("node1 AggregateSubnets = %v, want nil (aggregates nothing)", got)
 	}
 }

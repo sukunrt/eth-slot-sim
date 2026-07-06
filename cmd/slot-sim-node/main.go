@@ -146,6 +146,10 @@ func main() {
 		decoupled = &driver.DecoupledParams{K: *acK, FCVoteOffset: *fcVoteOffset, FCAggFraction: *fcAggFraction,
 			Segregated: *fcSegregated, RoundAggFraction: *fcRoundAggFrac}
 	}
+	var view schedule.View // zero ⇒ block-only (no -schedule)
+	if sched != nil {
+		view = sched.Node(*nodeNum)
+	}
 	nd := &node.Node{
 		Num: *nodeNum, Host: newShadowHost(*nodeNum), Network: &shadowNetwork{},
 		VerifyDelay:       func() time.Duration { return *verifyDelay },
@@ -154,10 +158,10 @@ func main() {
 		AttestBatchMax: *attestBatchMax,
 		D:              *d, Dlo: *dlo, Dhi: *dhi,
 	}
-	if sched != nil && sched.NumColumns > 0 { // size the column verifier from this node's role
+	if view.NumColumns > 0 { // size the column verifier from this node's role
 		nd.ColVerifyService = func() time.Duration { return *colVerify }
 		nd.ColVerifyParallelism = *colVerifyReg
-		if sched.Node(*nodeNum).IsFullCustody() {
+		if view.FullCustody {
 			nd.ColVerifyParallelism = *colVerifySuper
 		}
 	}
@@ -189,10 +193,6 @@ func main() {
 		log.Fatalf("-transport=%q, want classic or partial", *transport)
 	}
 	peers := parseIntList(*peerNumsStr)
-	var view schedule.View // zero ⇒ block-only (no -schedule)
-	if sched != nil {
-		view = sched.Node(*nodeNum)
-	}
 	runner := driver.NewRunner(nd, view, peers, tracer, driver.RunnerConfig{
 		Attest: attest, Sync: syncEmit,
 		NumNodes: *numNodes, BlockSize: *blockSize, Offset: *offset, Jitter: *jitter,

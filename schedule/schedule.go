@@ -181,7 +181,6 @@ func (a *Assignment) FinalitySubscribersOf(subnet int) []int {
 	return a.FinalitySubscribers[subnet]
 }
 
-
 // AttestDuty is one attestation a node owes: which validator, on which subnet, at which
 // committee position — the partial transport's wire identity (the committee seat for standard
 // attestations, the finality cell rank for finality votes; zero for AC votes, which stay
@@ -192,173 +191,6 @@ type AttestDuty struct {
 	Position int
 }
 
-// View narrows the assignment to one node's slice (what a single host runs). It is the only
-// handle a NodeRunner holds on the plan: self-scoped duty lookups plus a few delegating
-// global accessors, so a runner can never ask about another node's duties. The zero View is
-// the "no schedule" sentinel (block-only runs) — IsZero-gate before any duty lookup; the
-// global accessors below tolerate it and return zero values.
-type View struct {
-	a    *Assignment
-	node int
-}
-
-// Node returns the view of the assignment for one node.
-func (a *Assignment) Node(node int) View { return View{a: a, node: node} }
-
-// IsZero reports the no-schedule sentinel (a block-only run: proposers are cyclic, no duties).
-func (v View) IsZero() bool { return v.a == nil }
-
-// NumColumns is the column-subnet count (0 ⇒ the column phase is off, or no schedule).
-func (v View) NumColumns() int {
-	if v.a == nil {
-		return 0
-	}
-	return v.a.NumColumns
-}
-
-// NumSlots is the plan's slot count (0 with no schedule).
-func (v View) NumSlots() int {
-	if v.a == nil {
-		return 0
-	}
-	return len(v.a.Slots)
-}
-
-// Subscribers delegates to the global subnet-membership table (who to dial for a fan-out).
-func (v View) Subscribers(subnet int) []int {
-	if v.a == nil {
-		return nil
-	}
-	return v.a.Subscribers(subnet)
-}
-
-// FinalitySubscribersOf delegates to the global finality-subnet membership table.
-func (v View) FinalitySubscribersOf(subnet int) []int {
-	if v.a == nil {
-		return nil
-	}
-	return v.a.FinalitySubscribersOf(subnet)
-}
-
-// ValidatorsPerSubnet is the global per-finality-subnet draw count (sizes base-mode aggregates).
-func (v View) ValidatorsPerSubnet() []int {
-	if v.a == nil {
-		return nil
-	}
-	return v.a.ValidatorsPerSubnet
-}
-
-// ValidatorsPerRoundSubnet is the global (round, subnet) cell count (sizes round aggregates).
-func (v View) ValidatorsPerRoundSubnet() [][]int {
-	if v.a == nil {
-		return nil
-	}
-	return v.a.ValidatorsPerRoundSubnet
-}
-
-// Proposes reports whether this node publishes slot's block — the per-slot proposer the
-// Python generator drew (a supernode). Both backends read it from the same schedule.json,
-// so they propose identically.
-func (v View) Proposes(slot int) bool { return v.a.Slots[slot].Proposer == v.node }
-
-// AttestDuties returns the attestations node owes this slot — one per hosted validator
-// seated in one of the slot's committees (k>1 possible on the same subnet).
-func (v View) AttestDuties(slot int) []AttestDuty {
-	var duties []AttestDuty
-	for _, com := range v.a.Slots[slot].Committees {
-		for _, r := range com {
-			if r.Node == v.node {
-				duties = append(duties, AttestDuty{Subnet: r.Subnet, Val: r.Val, Position: r.Position})
-			}
-		}
-	}
-	return duties
-}
-
-// SubscribedSubnets returns the subnets this node subscribes (stable; it meshes on these
-// for the whole run).
-func (v View) SubscribedSubnets() []int {
-	var out []int
-	for subnet, members := range v.a.SubnetSubscribers {
-		if slices.Contains(members, v.node) {
-			out = append(out, subnet)
-		}
-	}
-	return out
-}
-
-// IsFullCustody reports whether this node holds every column — a data-column supernode that
-// forms the relay backbone (drawn from the 1 Gbit supernodes; see data-columns-spec.md §3).
-func (v View) IsFullCustody() bool {
-	return slices.Contains(v.a.FullCustody, v.node)
-}
-
-// CustodyColumns returns the column subnets this node custodies (subscribes + relays), stable
-// for the run. A full-custody node holds all NumColumns; an ordinary node holds the
-// seeded-random subset it drew (its membership in ColumnSubscribers).
-func (v View) CustodyColumns() []int {
-	if v.IsFullCustody() {
-		out := make([]int, v.a.NumColumns)
-		for i := range out {
-			out[i] = i
-		}
-		return out
-	}
-	var out []int
-	for col, members := range v.a.ColumnSubscribers {
-		if slices.Contains(members, v.node) {
-			out = append(out, col)
-		}
-	}
-	return out
-}
-
-// AggregateSubnets returns the subnets this node aggregates this slot — the committees whose
-// aggregator set includes it. It publishes one aggregate on each (on the global aggregate
-// topic). Empty if the node isn't an aggregator this slot.
-func (v View) AggregateSubnets(slot int) []int {
-	if slot < 0 || slot >= len(v.a.Slots) {
-		return nil
-	}
-	sp := v.a.Slots[slot]
-	var out []int
-	for ci, aggs := range sp.Aggregators {
-		if slices.Contains(aggs, v.node) {
-			out = append(out, sp.SubnetOf[ci])
-		}
-	}
-	return out
-}
-
-// SyncSubnet returns this node's sync-committee subnet and whether it is a member. Membership is
-// node-based and stable: a member is on exactly one subnet (round-robin assignment) and emits one
-// message there; a non-member returns (-1, false) and emits none.
-func (v View) SyncSubnet() (subnet int, member bool) {
-	for s, members := range v.a.SyncSubscribers {
-		if slices.Contains(members, v.node) {
-			return s, true
-		}
-	}
-	return -1, false
-}
-
-// SyncAggregateSubnets returns the sync subnets this node aggregates this slot — the subnets whose
-// aggregator set includes it. It publishes one contribution on each (on the global contribution
-// topic). Empty if the node isn't a sync aggregator this slot. SyncAggregators is indexed by
-// subnet directly (unlike attestation Aggregators, which need the SubnetOf map).
-func (v View) SyncAggregateSubnets(slot int) []int {
-	if slot < 0 || slot >= len(v.a.Slots) {
-		return nil
-	}
-	var out []int
-	for subnet, aggs := range v.a.Slots[slot].SyncAggregators {
-		if slices.Contains(aggs, v.node) {
-			out = append(out, subnet)
-		}
-	}
-	return out
-}
-
 // ACVoteDuty is one availability-chain vote a node owes: which validator. The AC vote rides one
 // global topic (no subnet) and is content-free until the coupling decides it — so unlike AttestDuty
 // it carries only Val.
@@ -366,95 +198,201 @@ type ACVoteDuty struct {
 	Val int
 }
 
-// ACVoteDuties returns the availability-chain votes this node owes this slot — one per hosted
-// validator in the slot's VRF draw (k>1 possible). Empty when the node holds none of the slot's
-// voters.
-func (v View) ACVoteDuties(slot int) []ACVoteDuty {
-	if slot < 0 || slot >= len(v.a.Slots) {
-		return nil
-	}
-	var duties []ACVoteDuty
-	for _, r := range v.a.Slots[slot].ACVoters {
-		if r.Node == v.node {
-			duties = append(duties, ACVoteDuty{Val: r.Val})
-		}
-	}
-	return duties
+// View is one node's slice of the plan, materialized once by Assignment.Node: the node's own
+// duties per slot plus the shared membership tables it needs (dial targets, aggregate sizing).
+// Plain data — a test can build one as a literal. It is the only handle a NodeRunner holds on
+// the plan, so a runner can never ask about another node's duties. The zero value (NumSlots 0)
+// is the no-plan sentinel: block-only runs propose cyclically and owe nothing. The shared
+// tables are slice headers into the Assignment, not copies.
+type View struct {
+	NumSlots   int
+	NumColumns int // column-subnet count (0 ⇒ the column phase is off)
+
+	// Per-AC-slot duties, indexed by slot (each len == NumSlots).
+	Proposes             []bool         // this node publishes slot s's block (the Python draw)
+	AttestDuties         [][]AttestDuty // one per hosted validator seated in slot s's committees
+	ACVoteDuties         [][]ACVoteDuty // one per hosted validator in slot s's VRF draw
+	AggregateSubnets     [][]int        // subnets this node aggregates in slot s (one aggregate each)
+	SyncAggregateSubnets [][]int        // sync subnets this node aggregates in slot s (one contribution each)
+
+	// Finality rounds, indexed by the round key n: the finality slot in base mode
+	// (ceil(NumSlots/k) rounds, duties identical every round), the AC slot under segregation
+	// (NumSlots rounds, round n%k's validators only). Nil when the plan has no finality chain.
+	FinalityVoteDuties   [][]AttestDuty // one (val, subnet) per hosted validator voting in round n
+	FinalityAggregations [][]int        // finality subnets this node aggregates in round n (deduped)
+
+	// Stable per-node facts.
+	SubscribedSubnets []int // attestation subnets this node meshes for the whole run
+	CustodyColumns    []int // column subnets this node custodies (all NumColumns when FullCustody)
+	FullCustody       bool  // data-column supernode: holds every column (the relay backbone)
+	SyncSubnet        int   // this node's sync-committee subnet; -1 unless SyncMember
+	SyncMember        bool
+	FinalitySubnet    int // this node's stable finality subnet; -1 unless FinalityMember
+	FinalityMember    bool
+
+	// Shared tables (the whole plan's: dial targets and aggregate sizing).
+	Subscribers              [][]int // Subscribers[subnet] = the nodes subscribing an attestation subnet
+	FinalitySubscribers      [][]int // FinalitySubscribers[subnet] = the nodes on a finality subnet
+	ValidatorsPerSubnet      []int   // per-finality-subnet draw count (sizes base-mode aggregates)
+	ValidatorsPerRoundSubnet [][]int // (round, subnet) cell counts (sizes round aggregates)
 }
 
-// FinalitySubnet returns this node's finality subnet and whether it is a member. Membership is
-// node-based and stable: finality subnets partition ALL N nodes, so under the decoupled phase every
-// node is a member of exactly one subnet; (-1, false) when the phase is off (no membership).
-func (v View) FinalitySubnet() (subnet int, member bool) {
-	for s, members := range v.a.FinalitySubscribers {
-		if slices.Contains(members, v.node) {
-			return s, true
+// Node materializes one node's view of the assignment.
+func (a *Assignment) Node(node int) View {
+	v := View{
+		NumSlots:                 len(a.Slots),
+		NumColumns:               a.NumColumns,
+		FullCustody:              slices.Contains(a.FullCustody, node),
+		SyncSubnet:               -1,
+		FinalitySubnet:           -1,
+		Subscribers:              a.SubnetSubscribers,
+		FinalitySubscribers:      a.FinalitySubscribers,
+		ValidatorsPerSubnet:      a.ValidatorsPerSubnet,
+		ValidatorsPerRoundSubnet: a.ValidatorsPerRoundSubnet,
+	}
+
+	// Stable memberships. Sync subnets cover members only; finality subnets partition all N
+	// nodes (every node is a member when the decoupled phase is on).
+	for subnet, members := range a.SubnetSubscribers {
+		if slices.Contains(members, node) {
+			v.SubscribedSubnets = append(v.SubscribedSubnets, subnet)
 		}
 	}
-	return -1, false
+	if v.FullCustody { // a full-custody node holds every column
+		v.CustodyColumns = make([]int, a.NumColumns)
+		for i := range v.CustodyColumns {
+			v.CustodyColumns[i] = i
+		}
+	} else { // an ordinary node holds its seeded-random membership in ColumnSubscribers
+		for col, members := range a.ColumnSubscribers {
+			if slices.Contains(members, node) {
+				v.CustodyColumns = append(v.CustodyColumns, col)
+			}
+		}
+	}
+	for s, members := range a.SyncSubscribers {
+		if slices.Contains(members, node) {
+			v.SyncSubnet, v.SyncMember = s, true
+			break
+		}
+	}
+	for s, members := range a.FinalitySubscribers {
+		if slices.Contains(members, node) {
+			v.FinalitySubnet, v.FinalityMember = s, true
+			break
+		}
+	}
+
+	// Per-slot duties.
+	v.Proposes = make([]bool, len(a.Slots))
+	v.AttestDuties = make([][]AttestDuty, len(a.Slots))
+	v.ACVoteDuties = make([][]ACVoteDuty, len(a.Slots))
+	v.AggregateSubnets = make([][]int, len(a.Slots))
+	v.SyncAggregateSubnets = make([][]int, len(a.Slots))
+	for s, sp := range a.Slots {
+		v.Proposes[s] = sp.Proposer == node
+		for _, com := range sp.Committees {
+			for _, r := range com {
+				if r.Node == node { // k>1 possible on the same subnet
+					v.AttestDuties[s] = append(v.AttestDuties[s],
+						AttestDuty{Subnet: r.Subnet, Val: r.Val, Position: r.Position})
+				}
+			}
+		}
+		for _, r := range sp.ACVoters {
+			if r.Node == node {
+				v.ACVoteDuties[s] = append(v.ACVoteDuties[s], ACVoteDuty{Val: r.Val})
+			}
+		}
+		// Aggregators is per committee (SubnetOf maps committee → subnet); SyncAggregators is
+		// indexed by subnet directly.
+		for ci, aggs := range sp.Aggregators {
+			if slices.Contains(aggs, node) {
+				v.AggregateSubnets[s] = append(v.AggregateSubnets[s], sp.SubnetOf[ci])
+			}
+		}
+		for subnet, aggs := range sp.SyncAggregators {
+			if slices.Contains(aggs, node) {
+				v.SyncAggregateSubnets[s] = append(v.SyncAggregateSubnets[s], subnet)
+			}
+		}
+	}
+
+	// Finality rounds (present when the plan carries the decoupled chain).
+	if k := a.Params.AcSlotsPerFinalitySlot; k > 0 && len(a.FinalitySubnetOf) > 0 {
+		rounds := (len(a.Slots) + k - 1) / k // finality slots (base mode)
+		if a.Segregated() {
+			rounds = len(a.Slots) // every AC slot is a round
+		}
+		v.FinalityVoteDuties = make([][]AttestDuty, rounds)
+		v.FinalityAggregations = make([][]int, rounds)
+		for n := range rounds {
+			v.FinalityVoteDuties[n] = a.finalityVoteDuties(node, n)
+			v.FinalityAggregations[n] = a.finalityAggregations(node, n)
+		}
+	}
+	return v
 }
 
-// FinalityVoteDuties returns the finality votes this node owes in AC slot `slot` — one
-// (val, subnet) pair per hosted validator, the subnet from FinalitySubnetOf (so one node's keys
-// can land on many subnets; it fans out where it isn't a member). Base mode ignores slot: every
-// hosted validator votes once per finality slot (callers pass the fslot, inert here). Under
-// segregation (Segregated) the duties are the hosted validators whose FinalityRoundOf round is
-// slot % k — each votes in exactly one AC slot of every finality slot. With ValidatorCounts
-// (the Dist seam) hosted ids are contiguous by node: [Σ counts[:node], Σ counts[:node+1]);
-// otherwise uniform V→N: the validators v with v % N == node.
-func (v View) FinalityVoteDuties(slot int) []AttestDuty {
+// finalityVoteDuties returns the finality votes node owes in round `slot` — one (val, subnet)
+// pair per hosted validator, the subnet from FinalitySubnetOf (one node's keys can land on many
+// subnets; it fans out where it isn't a member). Base mode ignores slot: every hosted validator
+// votes once per finality slot. Under segregation the duties are the hosted validators whose
+// FinalityRoundOf round is slot % k. With ValidatorCounts (the Dist seam) hosted ids are
+// contiguous by node: [Σ counts[:node], Σ counts[:node+1]); otherwise uniform V→N: the
+// validators v with v % N == node.
+func (a *Assignment) finalityVoteDuties(node, slot int) []AttestDuty {
 	include := func(int) bool { return true }
-	if v.a.Segregated() {
-		round := slot % v.a.Params.AcSlotsPerFinalitySlot
-		include = func(val int) bool { return v.a.FinalityRoundOf[val] == round }
+	if a.Segregated() {
+		round := slot % a.Params.AcSlotsPerFinalitySlot
+		include = func(val int) bool { return a.FinalityRoundOf[val] == round }
 	}
 	var out []AttestDuty
 	duty := func(val int) {
 		if include(val) {
-			out = append(out, AttestDuty{Subnet: v.a.FinalitySubnetOf[val], Val: val,
-				Position: v.a.FinalityPosition(val)})
+			out = append(out, AttestDuty{Subnet: a.FinalitySubnetOf[val], Val: val,
+				Position: a.FinalityPosition(val)})
 		}
 	}
-	if c := v.a.ValidatorCounts; len(c) > 0 {
+	if c := a.ValidatorCounts; len(c) > 0 {
 		start := 0
-		for _, n := range c[:v.node] {
+		for _, n := range c[:node] {
 			start += n
 		}
-		for val := start; val < start+c[v.node]; val++ {
+		for val := start; val < start+c[node]; val++ {
 			duty(val)
 		}
 		return out
 	}
-	for val := v.node; val < v.a.Params.V; val += v.a.Params.N {
+	for val := node; val < a.Params.V; val += a.Params.N {
 		duty(val)
 	}
 	return out
 }
 
-// FinalityAggregations returns the finality subnets this node aggregates — the subnets with an
-// aggregator ref hosted here, deduped (two selected validators on one node yield one
-// aggregate). Aggregator validators are sampled from the ENTIRE set, so the node is generally
-// NOT a member of these subnets: it pre-joins their meshes one AC slot ahead. Base mode: the
-// argument is the FINALITY slot n — the draw is per fslot, stored on the boundary AC slot
-// (n·k), so this reads Slots[n·k]. Under segregation (Segregated): the argument is the AC slot
-// itself — every slot is a round with its own draw, read from Slots[slot]. Nil if the node
-// aggregates nothing or the slot is out of range.
-func (v View) FinalityAggregations(slot int) []int {
-	k := v.a.Params.AcSlotsPerFinalitySlot
+// finalityAggregations returns the finality subnets node aggregates in round `slot` — the
+// subnets with an aggregator ref hosted here, deduped (two selected validators on one node
+// yield one aggregate). Aggregator validators are sampled from the ENTIRE set, so the node is
+// generally NOT a member of these subnets: it pre-joins their meshes one AC slot ahead. Base
+// mode: the round's draw is stored on the boundary AC slot (slot·k). Under segregation every
+// AC slot is a round with its own draw. Nil if the node aggregates nothing or the round is out
+// of range.
+func (a *Assignment) finalityAggregations(node, slot int) []int {
+	k := a.Params.AcSlotsPerFinalitySlot
 	if k <= 0 {
 		return nil
 	}
 	idx := slot
-	if !v.a.Segregated() {
+	if !a.Segregated() {
 		idx = slot * k
 	}
-	if idx < 0 || idx >= len(v.a.Slots) {
+	if idx < 0 || idx >= len(a.Slots) {
 		return nil
 	}
 	var out []int
-	for s, aggs := range v.a.Slots[idx].FinalityAggregators {
+	for s, aggs := range a.Slots[idx].FinalityAggregators {
 		for _, r := range aggs {
-			if r.Node == v.node {
+			if r.Node == node {
 				out = append(out, s) // subnets ascend, so out is sorted
 				break
 			}

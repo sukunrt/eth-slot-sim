@@ -126,11 +126,15 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 			AttestBatchMax:    cfg.AttestBatchMax,
 			D:                 cfg.D, Dlo: cfg.Dlo, Dhi: cfg.Dhi,
 		}
+		var view schedule.View // zero ⇒ block-only
+		if cfg.Schedule != nil {
+			view = cfg.Schedule.Node(i)
+		}
 		// Size the column verifier from the node's full-custody role (custody applies even when
-		// attestations are off, so it's gated on the committee's columns, not cfg.Attest).
-		if cfg.Schedule != nil && cfg.Schedule.NumColumns > 0 {
+		// attestations are off, so it's gated on the plan's columns, not cfg.Attest).
+		if view.NumColumns > 0 {
 			nd.ColVerifyService = cfg.ColVerifyService
-			if cfg.Schedule.Node(i).IsFullCustody() {
+			if view.FullCustody {
 				nd.ColVerifyParallelism = cfg.ColVerifyParallelismSuper
 			} else {
 				nd.ColVerifyParallelism = cfg.ColVerifyParallelismReg
@@ -138,10 +142,6 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		}
 		if cfg.Partial != nil {
 			nd.Partial = cfg.Partial.NodeOpts(cfg.Seed, resolver)
-		}
-		var view schedule.View // zero ⇒ block-only
-		if cfg.Schedule != nil {
-			view = cfg.Schedule.Node(i)
 		}
 		r := NewRunner(nd, view, nw.Peers(i), tracer, rcfg)
 		r.Attach()

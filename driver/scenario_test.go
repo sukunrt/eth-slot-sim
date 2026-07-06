@@ -76,7 +76,7 @@ func buildScenarioWith(t *testing.T, a *schedule.Assignment, due time.Duration, 
 		}
 		if a.NumColumns > 0 { // size the column verifier from the node's full-custody role
 			nd.ColVerifyParallelism = 4
-			if a.Node(i).IsFullCustody() {
+			if a.Node(i).FullCustody {
 				nd.ColVerifyParallelism = 16
 			}
 		}

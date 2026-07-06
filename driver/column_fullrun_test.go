@@ -50,7 +50,7 @@ func TestColumnFullRunOutputs(t *testing.T) {
 		// Gate outcome: every custodier had all its columns by the deadline ⇒ rate 1.
 		custody := map[int][]int{}
 		for nd := range a.Params.N {
-			custody[nd] = a.Node(nd).CustodyColumns()
+			custody[nd] = a.Node(nd).CustodyColumns
 		}
 		if got := rec.CustodyCompleteRate(0, custody, 4*time.Second); got != 1.0 {
 			t.Fatalf("CustodyCompleteRate = %v, want 1 (all columns delivered in time)", got)
@@ -74,7 +74,7 @@ func TestColumnGateOutcomeSummary(t *testing.T) {
 
 		custody := map[int][]int{}
 		for nd := range a.Params.N {
-			custody[nd] = a.Node(nd).CustodyColumns()
+			custody[nd] = a.Node(nd).CustodyColumns
 		}
 		if got, want := rec.CustodyCompleteRate(0, custody, 4*time.Second), 3.0/4.0; got != want {
 			t.Fatalf("CustodyCompleteRate = %v, want %v (node 1 missing a custody column)", got, want)

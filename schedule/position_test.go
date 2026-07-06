@@ -19,7 +19,7 @@ func TestAttestDutiesCarryPosition(t *testing.T) {
 			SubnetOf: []int{0, 1},
 		}},
 	}
-	if got, want := a.Node(0).AttestDuties(0), []AttestDuty{
+	if got, want := a.Node(0).AttestDuties[0], []AttestDuty{
 		{Subnet: 0, Val: 0, Position: 0}, {Subnet: 0, Val: 4, Position: 1},
 		{Subnet: 1, Val: 2, Position: 1},
 	}; !slices.Equal(got, want) {

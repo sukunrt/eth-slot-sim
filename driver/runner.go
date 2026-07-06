@@ -245,14 +245,14 @@ func (r *NodeRunner) Prepare() {
 				slog.Error("subscribe aggregate topic failed", "node", r.num, "err", err)
 			}
 		}
-		for _, s := range r.view.SubscribedSubnets() {
+		for _, s := range r.view.SubscribedSubnets {
 			if err := r.nd.Subscribe(validator.AttestationTopic(s)); err != nil {
 				slog.Error("subscribe subnet failed", "node", r.num, "subnet", s, "err", err)
 			}
 		}
 	}
-	if r.view.NumColumns() > 0 { // the node's custody column meshes (the DA dissemination phase)
-		for _, c := range r.view.CustodyColumns() {
+	if r.view.NumColumns > 0 { // the node's custody column meshes (the DA dissemination phase)
+		for _, c := range r.view.CustodyColumns {
 			if err := r.nd.Subscribe(validator.ColumnTopic(c)); err != nil {
 				slog.Error("subscribe column failed", "node", r.num, "column", c, "err", err)
 			}
@@ -264,9 +264,9 @@ func (r *NodeRunner) Prepare() {
 		if err := r.nd.Subscribe(validator.SyncContributionTopic); err != nil {
 			slog.Error("subscribe sync contribution topic failed", "node", r.num, "err", err)
 		}
-		if subnet, member := r.view.SyncSubnet(); member {
-			if err := r.nd.Subscribe(validator.SyncMessageTopic(subnet)); err != nil {
-				slog.Error("subscribe sync subnet failed", "node", r.num, "subnet", subnet, "err", err)
+		if r.view.SyncMember {
+			if err := r.nd.Subscribe(validator.SyncMessageTopic(r.view.SyncSubnet)); err != nil {
+				slog.Error("subscribe sync subnet failed", "node", r.num, "subnet", r.view.SyncSubnet, "err", err)
 			}
 		}
 	}
@@ -281,9 +281,9 @@ func (r *NodeRunner) Prepare() {
 		if err := r.nd.Subscribe(validator.FinalityAggregateTopic); err != nil {
 			slog.Error("subscribe finality aggregate topic failed", "node", r.num, "err", err)
 		}
-		if subnet, member := r.view.FinalitySubnet(); member {
-			if err := r.nd.Subscribe(validator.FinalityVoteTopic(subnet)); err != nil {
-				slog.Error("subscribe finality subnet failed", "node", r.num, "subnet", subnet, "err", err)
+		if r.view.FinalityMember {
+			if err := r.nd.Subscribe(validator.FinalityVoteTopic(r.view.FinalitySubnet)); err != nil {
+				slog.Error("subscribe finality subnet failed", "node", r.num, "subnet", r.view.FinalitySubnet, "err", err)
 			}
 		}
 	}
@@ -318,12 +318,12 @@ func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) {
 func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 	var ss *slotState
 	// ss := &slotState{deadline: slotStart.Add(r.blockDue)}
-	if !r.view.IsZero() && (r.attest || r.sync || r.decoupled) {
+	if r.view.NumSlots > 0 && (r.attest || r.sync || r.decoupled) {
 		ss = &slotState{deadline: slotStart.Add(r.blockDue)}
 		if r.attest {
-			ss.attestationDuties = r.view.AttestDuties(slot)
+			ss.attestationDuties = r.view.AttestDuties[slot]
 			subscribed := map[int]bool{}
-			for _, s := range r.view.SubscribedSubnets() {
+			for _, s := range r.view.SubscribedSubnets {
 				subscribed[s] = true
 			}
 			ss.attestationSubnetsSubscribed = subscribed
@@ -346,7 +346,7 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 			// Aggregate phase: if this node aggregates any committee this slot, arm a timer to
 			// publish its M aggregates at the aggregate deadline (fixed offset, no coupling).
 			if r.aggDue > 0 {
-				ss.aggSubnets = r.view.AggregateSubnets(slot)
+				ss.aggSubnets = r.view.AggregateSubnets[slot]
 				if len(ss.aggSubnets) > 0 {
 					ss.aggTimer = time.AfterFunc(time.Until(slotStart.Add(r.aggDue)), func() {
 						r.emitAggregate(slot, ss)
@@ -357,21 +357,21 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 			// The AC vote is the column-gated attestation, retargeted: duties come from the per-slot
 			// VRF draw, the vote rides the global topic (subscribed in Prepare — no per-subnet dial),
 			// and columns gate it exactly as for attestations.
-			ss.acVoteDuties = r.view.ACVoteDuties(slot)
+			ss.acVoteDuties = r.view.ACVoteDuties[slot]
 		}
 
 		// The DA gate: this node's custody columns (from the column phase; empty ⇒ gate
 		// trivially complete). Only the vote paths wait on it — the attestation and the AC
 		// vote emit block only once all custody is in (tryEarlyEmit); sync votes head
 		// un-gated by design, isolating the DA gate's effect.
-		ss.custody = r.view.CustodyColumns()
+		ss.custody = r.view.CustodyColumns
 		ss.columnsComplete = len(ss.custody) == 0
 		if !ss.columnsComplete {
 			ss.haveColumn = make(map[int]bool, len(ss.custody))
 		}
 
 		if r.sync { // this node's stable sync membership (a member emits one message on its subnet)
-			ss.syncSubnet, ss.syncMember = r.view.SyncSubnet()
+			ss.syncSubnet, ss.syncMember = r.view.SyncSubnet, r.view.SyncMember
 		}
 
 		r.mu.Lock()
@@ -382,7 +382,7 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 		// Sync contribution phase: if this node aggregates any sync subnet this slot, arm a timer
 		// to publish its contributions at the contribution deadline (reuses aggDue; fixed offset).
 		if r.sync && r.aggDue > 0 {
-			ss.syncAggSubnets = r.view.SyncAggregateSubnets(slot)
+			ss.syncAggSubnets = r.view.SyncAggregateSubnets[slot]
 			if len(ss.syncAggSubnets) > 0 {
 				ss.syncAggTimer = time.AfterFunc(time.Until(slotStart.Add(r.aggDue)), func() {
 					r.emitSyncContribution(slot, ss)
@@ -414,8 +414,8 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 // proposes reports whether this node publishes slot's block: the view's per-slot proposer
 // when a plan is set, else the cyclic slot%N rule (block-only runs).
 func (r *NodeRunner) proposes(slot int) bool {
-	if !r.view.IsZero() {
-		return r.view.Proposes(slot)
+	if r.view.NumSlots > 0 {
+		return r.view.Proposes[slot]
 	}
 	return slot%r.numNodes == r.num
 }
@@ -435,7 +435,10 @@ func (r *NodeRunner) blockPublishAt(slot int) time.Duration {
 // shuffledSubscribers returns subnet's subscribers in a seeded order (so the 2 dialed are
 // reproducible across runs/backends), keyed by (seed, slot, subnet).
 func (r *NodeRunner) shuffledSubscribers(slot, subnet int) []int {
-	subs := r.view.Subscribers(subnet)
+	var subs []int
+	if subnet >= 0 && subnet < len(r.view.Subscribers) {
+		subs = r.view.Subscribers[subnet]
+	}
 	order := make([]int, len(subs))
 	copy(order, subs)
 	rng := rand.New(rand.NewPCG(r.seed, uint64(slot)*1_000_003+uint64(subnet)))
@@ -597,7 +600,7 @@ func (r *NodeRunner) armFinalitySubRound(slot int, slotStart time.Time) {
 	// and anything sequenced after it here slips past its offset: this round's 1s vote fired
 	// at p50 2.7s at n4000. The goroutine has the full slot to finish; only slot 0 above must
 	// pre-join inline (its own round votes 1s later and needs the topic joins done).
-	if slot+1 < r.view.NumSlots() { // nothing to warm past the last slot
+	if slot+1 < r.view.NumSlots { // nothing to warm past the last slot
 		go r.prejoinFinality(slot + 1)
 	}
 	r.mu.Lock()
@@ -646,14 +649,15 @@ func (r *NodeRunner) armFinalitySubRound(slot int, slotStart time.Time) {
 //     stable member of the subnet skips the subscribe (Prepare already did it).
 //
 // Everything set up here is dropped at the aggregation deadline (or reap). A no-op when the node
-// is not a finality member (phase off / partial assignment).
+// is not a finality member (phase off / partial assignment), or when n is past the run's last
+// round (the base-mode boundary pre-join at the final AC slot warms a round that never comes).
 func (r *NodeRunner) prejoinFinality(n int) {
-	own, member := r.view.FinalitySubnet()
-	if !member {
+	if !r.view.FinalityMember || n >= len(r.view.FinalityVoteDuties) {
 		return
 	}
-	duties := r.view.FinalityVoteDuties(n)
-	aggSubnets := r.view.FinalityAggregations(n)
+	own := r.view.FinalitySubnet
+	duties := r.view.FinalityVoteDuties[n]
+	aggSubnets := r.view.FinalityAggregations[n]
 
 	var voteDialed, aggDialed []int
 	picked := map[int]bool{}
@@ -715,7 +719,10 @@ func (r *NodeRunner) prejoinFinality(n int) {
 // dials are reproducible across runs/backends), keyed by (seed, round key, subnet) — the round
 // key is the finality slot in base mode, the AC slot under segregation.
 func (r *NodeRunner) shuffledFinalitySubscribers(n, subnet int) []int {
-	subs := r.view.FinalitySubscribersOf(subnet)
+	var subs []int
+	if subnet >= 0 && subnet < len(r.view.FinalitySubscribers) {
+		subs = r.view.FinalitySubscribers[subnet]
+	}
 	order := make([]int, len(subs))
 	copy(order, subs)
 	rng := rand.New(rand.NewPCG(r.seed, uint64(n)*1_000_003+uint64(subnet)))
@@ -728,10 +735,10 @@ func (r *NodeRunner) shuffledFinalitySubscribers(n, subnet int) []int {
 // count (n, the finality slot, is unused). Segregated: the (round, subnet) cell of the two
 // independent draws, round = n % k (n is the AC slot). 0 if out of range.
 func (r *NodeRunner) validatorsPerCell(n, subnet int) int {
-	counts := r.view.ValidatorsPerSubnet()
+	counts := r.view.ValidatorsPerSubnet
 	if r.segregated {
 		round := n % r.k
-		perRound := r.view.ValidatorsPerRoundSubnet()
+		perRound := r.view.ValidatorsPerRoundSubnet
 		if round < 0 || round >= len(perRound) {
 			return 0
 		}
@@ -915,8 +922,8 @@ func (r *NodeRunner) publishBlock(when time.Time, msg validator.Message) {
 	if err := r.nd.Publish(r.runCtx, msg.Topic, msg.Payload); err != nil {
 		slog.Error("publish block failed", "node", r.num, "slot", msg.Slot, "err", err)
 	}
-	if r.view.NumColumns() > 0 {
-		for col := range r.view.NumColumns() {
+	if r.view.NumColumns > 0 {
+		for col := range r.view.NumColumns {
 			cmsg := validator.MakeColumn(msg.Slot, col, r.num)
 			r.tracer.OnPublish(metrics.ColumnID(msg.Slot, col, r.num), false, now)
 			if err := r.nd.Publish(r.runCtx, cmsg.Topic, cmsg.Payload); err != nil {
