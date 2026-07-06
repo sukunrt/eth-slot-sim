@@ -318,7 +318,7 @@ func (r *NodeRunner) beginSlot(slot int, slotStart time.Time) {
 func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 	var ss *slotState
 	// ss := &slotState{deadline: slotStart.Add(r.blockDue)}
-	if r.view.NumSlots > 0 && (r.attest || r.sync || r.decoupled) {
+	if r.attest || r.sync || r.decoupled {
 		ss = &slotState{deadline: slotStart.Add(r.blockDue)}
 		if r.attest {
 			ss.attestationDuties = r.view.AttestDuties[slot]
@@ -411,10 +411,10 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 	}
 }
 
-// proposes reports whether this node publishes slot's block: the view's per-slot proposer
-// when a plan is set, else the cyclic slot%N rule (block-only runs).
+// proposes reports whether this node publishes slot's block: the plan's per-slot proposer
+// when the plan names proposers, else the cyclic slot%N rule (block-only runs).
 func (r *NodeRunner) proposes(slot int) bool {
-	if r.view.NumSlots > 0 {
+	if len(r.view.Proposes) > 0 {
 		return r.view.Proposes[slot]
 	}
 	return slot%r.numNodes == r.num
@@ -600,9 +600,7 @@ func (r *NodeRunner) armFinalitySubRound(slot int, slotStart time.Time) {
 	// and anything sequenced after it here slips past its offset: this round's 1s vote fired
 	// at p50 2.7s at n4000. The goroutine has the full slot to finish; only slot 0 above must
 	// pre-join inline (its own round votes 1s later and needs the topic joins done).
-	if slot+1 < r.view.NumSlots { // nothing to warm past the last slot
-		go r.prejoinFinality(slot + 1)
-	}
+	go r.prejoinFinality(slot + 1) // a no-op past the run's last round (it bounds itself)
 	r.mu.Lock()
 	fs := r.finals[slot]
 	r.mu.Unlock()

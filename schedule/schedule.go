@@ -201,14 +201,13 @@ type ACVoteDuty struct {
 // View is one node's slice of the plan, materialized once by Assignment.Node: the node's own
 // duties per slot plus the shared membership tables it needs (dial targets, aggregate sizing).
 // Plain data — a test can build one as a literal. It is the only handle a NodeRunner holds on
-// the plan, so a runner can never ask about another node's duties. The zero value (NumSlots 0)
-// is the no-plan sentinel: block-only runs propose cyclically and owe nothing. The shared
-// tables are slice headers into the Assignment, not copies.
+// the plan, so a runner can never ask about another node's duties. The zero value is the
+// no-plan view (block-only runs): empty Proposes ⇒ cyclic proposers, and no duties owed. The
+// shared tables are slice headers into the Assignment, not copies.
 type View struct {
-	NumSlots   int
 	NumColumns int // column-subnet count (0 ⇒ the column phase is off)
 
-	// Per-AC-slot duties, indexed by slot (each len == NumSlots).
+	// Per-AC-slot duties, indexed by slot (each len == the plan's slot count).
 	Proposes             []bool         // this node publishes slot s's block (the Python draw)
 	AttestDuties         [][]AttestDuty // one per hosted validator seated in slot s's committees
 	ACVoteDuties         [][]ACVoteDuty // one per hosted validator in slot s's VRF draw
@@ -240,7 +239,6 @@ type View struct {
 // Node materializes one node's view of the assignment.
 func (a *Assignment) Node(node int) View {
 	v := View{
-		NumSlots:                 len(a.Slots),
 		NumColumns:               a.NumColumns,
 		FullCustody:              slices.Contains(a.FullCustody, node),
 		SyncSubnet:               -1,
