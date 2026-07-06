@@ -55,7 +55,7 @@ through all of that.
 - Split the file by phase: `runner.go` (core loop + column gate), `runner_sync.go`,
   `runner_decoupled.go`. The finality-state machinery (`armFinality` / `prejoinFinality` /
   `reapFinality`) is self-contained and moves cleanly.
-- `DecoupledParams` fields are copied one-by-one into `r.k` / `r.fcVoteOffset` /
+- `DecoupledParams` fields are copied one-by-one into `r.finalitySubRounds` / `r.fcVoteOffset` /
   `r.fcAggFraction` — just store the struct pointer.
 
 ## 3. Python analyzer factory
@@ -88,7 +88,7 @@ decoupled-consensus-spec.md):
 | Finality subnet membership (stable node receiver core) | "FS subnets" | `finality_subscribers` | `FinalitySubscribers` | `fin_subs` (simctl/runner.py local), `fcvote` (batch class, node/node.go) |
 | Finality voting subnet (per-validator draw) | "validator partition" | `finality_subnet_of` | `FinalitySubnetOf`, `FinalityVoteDuties` (pairs) | — |
 | Finality subnet count | `FS subnets` | `fs_subnets` | `FsSubnets` | — |
-| AC slots per finality slot | `AC_SLOTS_PER_FINALITY_SLOT`, "k" | `ac_slots_per_finality_slot` | `AcSlotsPerFinalitySlot`, `DecoupledParams.K`, `r.k` | — |
+| AC slots per finality slot | `AC_SLOTS_PER_FINALITY_SLOT`, "k" | `ac_slots_per_finality_slot` | `AcSlotsPerFinalitySlot`, `DecoupledParams.K`, `r.finalitySubRounds` | — |
 | Availability-chain vote | "AC vote" | `ac_voters`, `ac_vote_size` | `KindACVote`, `ACVoteDuties`, `MakeACVote` | topic `availability_vote`, batch class `ac` |
 | Aggregation deadline fraction | `FINALITY_SLOT_AGGREGATION_FRACTION` | — | `FCAggFraction`, `fcAggFraction` | batch class `fcagg` |
 | Finality attestation (the per-validator finality-chain message) | "finality attestation" (canonical); "FC vote" / "finality vote" are aliases | — (per-validator, derived) | `KindFinalityVote`, `MakeFinalityVote`, `pb.FinalityVote` | "finality vote" (analysis output), batch class `fcvote` |
