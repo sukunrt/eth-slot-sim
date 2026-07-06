@@ -449,12 +449,7 @@ func (r *NodeRunner) blockPublishAt(slot int) time.Duration {
 // shuffledSubscribers returns subnet's subscribers in a seeded order (so the 2 dialed are
 // reproducible across runs/backends), keyed by (seed, slot, subnet).
 func (r *NodeRunner) shuffledSubscribers(slot, subnet int) []int {
-	var subs []int
-	if subnet >= 0 && subnet < len(r.view.Subscribers) {
-		subs = r.view.Subscribers[subnet]
-	}
-	order := make([]int, len(subs))
-	copy(order, subs)
+	order := slices.Clone(r.view.Subscribers[subnet])
 	rng := rand.New(rand.NewPCG(r.seed, dialStream|uint64(slot)<<32|uint64(subnet)))
 	rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
 	return order
@@ -728,12 +723,7 @@ func (r *NodeRunner) prejoinFinality(n int) {
 // dials are reproducible across runs/backends), keyed by (seed, round key, subnet) — the round
 // key is the finality slot in base mode, the AC slot under segregation.
 func (r *NodeRunner) shuffledFinalitySubscribers(n, subnet int) []int {
-	var subs []int
-	if subnet >= 0 && subnet < len(r.view.FinalitySubscribers) {
-		subs = r.view.FinalitySubscribers[subnet]
-	}
-	order := make([]int, len(subs))
-	copy(order, subs)
+	order := slices.Clone(r.view.FinalitySubscribers[subnet])
 	rng := rand.New(rand.NewPCG(r.seed, finalityDialStream|uint64(n)<<32|uint64(subnet)))
 	rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
 	return order
