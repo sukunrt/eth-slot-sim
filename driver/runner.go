@@ -36,23 +36,23 @@ type DecoupledParams struct {
 // is the node's OnReceive sink, so it can couple block arrival to attestation emit
 // while keeping Node pure. The multi-node Driver builds N; the Shadow binary builds 1.
 type NodeRunner struct {
-	num       int
-	nd        *node.Node
-	view      schedule.View // this node's slice of the plan; zero ⇒ block-only (Phase 1)
-	numNodes  int           // fleet size (the cyclic proposer fallback when view is zero)
-	blockSize int           // proposed-block payload bytes
-	offset    time.Duration // block publish offset into the slot
-	jitter    time.Duration // block publish lands in [offset, offset+jitter)
-	attest    bool          // emit attestations (with a view set but false ⇒ columns-only)
-	sync      bool          // emit sync-committee messages + contributions (members only)
-	decoupled bool          // emit AC votes + finality votes/aggregates (replaces attest/sync)
-	tracer    metrics.Tracer
-	slotDur   time.Duration
-	blockDue  time.Duration // attestation / AC-vote deadline, offset into the slot
-	aggDue    time.Duration // the aggregation deadline (~2/3 slot): aggregates + sync contributions publish here
-	prep      time.Duration // Δ_prep before emitting on block receipt
-	seed      uint64        // seeds the per-slot subnet-peer dial choice
-	base      map[int]bool  // the node's long-lived peers (so we know which dials are extra)
+	num         int
+	nd          *node.Node
+	view        schedule.View // this node's slice of the plan; zero ⇒ block-only (Phase 1)
+	numNodes    int           // fleet size (the cyclic proposer fallback when view is zero)
+	blockSize   int           // proposed-block payload bytes
+	offset      time.Duration // block publish offset into the slot
+	jitter      time.Duration // block publish lands in [offset, offset+jitter)
+	attest      bool          // emit attestations (with a view set but false ⇒ columns-only)
+	sync        bool          // emit sync-committee messages + contributions (members only)
+	decoupled   bool          // emit AC votes + finality votes/aggregates (replaces attest/sync)
+	tracer      metrics.Tracer
+	slotDur     time.Duration
+	blockDue    time.Duration // attestation / AC-vote deadline, offset into the slot
+	aggDue      time.Duration // the aggregation deadline (~2/3 slot): aggregates + sync contributions publish here
+	prep        time.Duration // Δ_prep before emitting on block receipt
+	seed        uint64        // seeds the per-slot subnet-peer dial choice
+	stablePeers map[int]bool  // the node's long-lived peers (so we know which dials are extra)
 
 	// Decoupled finality-chain knobs (set when decoupled; consumed by the FC paths, M4/M5).
 	finalityRoundSize int           // ac_slots_per_finality_slot (k: AC slots per finality slot)
@@ -202,23 +202,23 @@ func NewRunner(nd *node.Node, view schedule.View, basePeers []int,
 		base[p] = true
 	}
 	r := &NodeRunner{
-		num:       nd.Num,
-		nd:        nd,
-		view:      view,
-		numNodes:  cfg.NumNodes,
-		blockSize: cfg.BlockSize,
-		offset:    cfg.Offset,
-		jitter:    cfg.Jitter,
-		attest:    cfg.Attest,
-		sync:      cfg.Sync,
-		tracer:    tracer,
-		slotDur:   cfg.SlotDuration,
-		blockDue:  cfg.AttestationDue,
-		aggDue:    cfg.AggregateDue,
-		prep:      cfg.Prep,
-		seed:      cfg.Seed,
-		base:      base,
-		slots:     make(map[int]*slotState),
+		num:         nd.Num,
+		nd:          nd,
+		view:        view,
+		numNodes:    cfg.NumNodes,
+		blockSize:   cfg.BlockSize,
+		offset:      cfg.Offset,
+		jitter:      cfg.Jitter,
+		attest:      cfg.Attest,
+		sync:        cfg.Sync,
+		tracer:      tracer,
+		slotDur:     cfg.SlotDuration,
+		blockDue:    cfg.AttestationDue,
+		aggDue:      cfg.AggregateDue,
+		prep:        cfg.Prep,
+		seed:        cfg.Seed,
+		stablePeers: base,
+		slots:       make(map[int]*slotState),
 	}
 	if dc := cfg.Decoupled; dc != nil {
 		r.decoupled = true
@@ -477,7 +477,7 @@ func (r *NodeRunner) dialDuties(slot int, ss *slotState) {
 			if n >= 2 {
 				break
 			}
-			if peer == r.num || r.base[peer] || picked[peer] {
+			if peer == r.num || r.stablePeers[peer] || picked[peer] {
 				continue
 			}
 			picked[peer] = true
@@ -663,21 +663,22 @@ func (r *NodeRunner) prejoinFinality(n int) {
 	duties := r.view.FinalityVoteDuties[n]
 	aggSubnets := r.view.FinalityAggregations[n]
 
-	var voteDialed, aggDialed []int
+	// dialTwo returns 2 fresh members of subnet to dial — extra peers only (not self, not the
+	// long-lived set, not already picked this pre-join), so the deadline drop is safe.
 	picked := map[int]bool{}
-	dialTwo := func(subnet int, dialed *[]int) {
-		count := 0
+	dialTwo := func(subnet int) []int {
+		var dialed []int
 		for _, peer := range r.shuffledFinalitySubscribers(n, subnet) {
-			if count >= 2 {
+			if len(dialed) >= 2 {
 				break
 			}
-			if peer == r.num || r.base[peer] || picked[peer] { // only extra peers, so the drop is safe
+			if peer == r.num || r.stablePeers[peer] || picked[peer] {
 				continue
 			}
 			picked[peer] = true
-			*dialed = append(*dialed, peer)
-			count++
+			dialed = append(dialed, peer)
 		}
+		return dialed
 	}
 	var dutySubnets []int
 	for _, d := range duties {
@@ -685,12 +686,13 @@ func (r *NodeRunner) prejoinFinality(n int) {
 			dutySubnets = append(dutySubnets, d.Subnet)
 		}
 	}
+	var voteDialed, aggDialed []int
 	for _, subnet := range dutySubnets {
-		dialTwo(subnet, &voteDialed)
+		voteDialed = append(voteDialed, dialTwo(subnet)...)
 	}
 	var aggSubscribed []string
 	for _, subnet := range aggSubnets {
-		dialTwo(subnet, &aggDialed)
+		aggDialed = append(aggDialed, dialTwo(subnet)...)
 		if subnet != own { // a stable member already subscribes (Prepare); it must not drop that
 			aggSubscribed = append(aggSubscribed, validator.FinalityVoteTopic(subnet))
 		}
