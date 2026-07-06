@@ -220,6 +220,12 @@ type View struct {
 	FinalityVoteDuties   [][]AttestDuty // one (val, subnet) per hosted validator voting in round n
 	FinalityAggregations [][]int        // finality subnets this node aggregates in round n (deduped)
 
+	// Plan-wide phase facts: whether the plan draws committee / sync-subnet aggregators at
+	// all. The runner's download-side joins and config validation key off these — the emit
+	// side needs only the per-slot duty slices above.
+	HasAggregators     bool
+	HasSyncAggregators bool
+
 	// Stable per-node facts.
 	SubscribedSubnets []int // attestation subnets this node meshes for the whole run
 	CustodyColumns    []int // column subnets this node custodies (all NumColumns when FullCustody)
@@ -313,6 +319,10 @@ func (a *Assignment) Node(node int) View {
 			if slices.Contains(aggs, node) {
 				v.SyncAggregateSubnets[s] = append(v.SyncAggregateSubnets[s], subnet)
 			}
+			v.HasSyncAggregators = v.HasSyncAggregators || len(aggs) > 0
+		}
+		for _, aggs := range sp.Aggregators {
+			v.HasAggregators = v.HasAggregators || len(aggs) > 0
 		}
 	}
 

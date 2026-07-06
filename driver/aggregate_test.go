@@ -168,13 +168,13 @@ func TestAggregatesPublishAtDeadline(t *testing.T) {
 	})
 }
 
-// With AggregateDue == 0 the aggregate phase is off: no aggregate is published or received
-// (block + attestation behavior unchanged).
-func TestAggregatesDisabled(t *testing.T) {
+// Aggregation is plan-controlled: a schedule that draws no aggregators publishes no
+// aggregates (block + attestation behavior unchanged). The deadline knob only says when.
+func TestAggregatesOffWithoutDuties(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		a := aggAssignment(6, [][]int{{0, 1, 2}, {3, 4, 5}}, [][]int{{0, 1}, {0, 3}})
+		a := aggAssignment(6, [][]int{{0, 1, 2}, {3, 4, 5}}, [][]int{{}, {}})
 		rec := metrics.NewRecorder()
-		d := aggDriver(t, a, 0, rec) // aggregates disabled
+		d := aggDriver(t, a, 8*time.Second, rec)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
@@ -184,7 +184,19 @@ func TestAggregatesDisabled(t *testing.T) {
 		d.Run(ctx, time.Now(), 1)
 
 		if got := aggregateArrivalCount(rec, 0); got != 0 {
-			t.Fatalf("aggregate arrivals with AggregateDue=0 = %d, want 0", got)
+			t.Fatalf("aggregate arrivals with no aggregator duties = %d, want 0", got)
 		}
 	})
+}
+
+// A plan that draws aggregators with no AggregateDue set would silently never publish them —
+// the runner refuses to build instead.
+func TestAggregatorsWithoutDeadlinePanic(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("want panic: aggregators drawn but AggregateDue unset")
+		}
+	}()
+	a := aggAssignment(6, [][]int{{0, 1, 2}, {3, 4, 5}}, [][]int{{0, 1}, {0, 3}})
+	aggDriver(t, a, 0, metrics.NewRecorder())
 }

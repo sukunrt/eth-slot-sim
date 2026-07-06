@@ -49,7 +49,7 @@ type NodeRunner struct {
 	tracer    metrics.Tracer
 	slotDur   time.Duration
 	blockDue  time.Duration // attestation / AC-vote deadline, offset into the slot
-	aggDue    time.Duration // aggregate emit, offset into the slot (0 ⇒ no aggregates)
+	aggDue    time.Duration // the aggregation deadline (~2/3 slot): aggregates + sync contributions publish here
 	prep      time.Duration // Δ_prep before emitting on block receipt
 	seed      uint64        // seeds the per-slot subnet-peer dial choice
 	base      map[int]bool  // the node's long-lived peers (so we know which dials are extra)
@@ -174,9 +174,14 @@ type RunnerConfig struct {
 
 	SlotDuration   time.Duration
 	AttestationDue time.Duration // attestation / AC-vote deadline, offset into the slot
-	AggregateDue   time.Duration // aggregate emit, offset into the slot (0 ⇒ no aggregate phase)
-	Prep           time.Duration // Δ_prep before emitting on block receipt
-	Seed           uint64        // seeds the per-slot subnet-peer dial choice + the block jitter
+
+	// AggregateDue is the aggregation deadline (~2/3 slot), shared by attestation aggregates
+	// and sync contributions (mainnet has both due at the same instant). Whether anyone
+	// aggregates is the plan's business (the view's aggregator duties), not a knob's.
+	AggregateDue time.Duration
+
+	Prep time.Duration // Δ_prep before emitting on block receipt
+	Seed uint64        // seeds the per-slot subnet-peer dial choice + the block jitter
 
 	// Decoupled (nil ⇒ off) turns on the decoupled-consensus phase, which suppresses
 	// attestation/sync emit (the AC vote replaces attestations). Partial (nil ⇒ classic)
@@ -221,6 +226,16 @@ func NewRunner(nd *node.Node, view schedule.View, basePeers []int,
 		r.segregated, r.roundAggFraction = dc.Segregated, dc.RoundAggFraction
 		r.finals = make(map[int]*finalityState)
 	}
+	// The plan decides who aggregates; the deadline only says when. A plan that draws
+	// aggregators with no deadline set would silently never publish them — refuse instead.
+	if cfg.AggregateDue <= 0 {
+		if cfg.Attest && view.HasAggregators {
+			panic("driver: the plan draws aggregators but AggregateDue is unset")
+		}
+		if cfg.Sync && view.HasSyncAggregators {
+			panic("driver: the plan draws sync aggregators but AggregateDue is unset")
+		}
+	}
 	if pp := cfg.Partial; pp != nil {
 		if !cfg.Attest && cfg.Decoupled == nil {
 			panic("driver: the partial transport requires the attestation phase or decoupled consensus")
@@ -240,7 +255,7 @@ func (r *NodeRunner) Attach() { r.nd.OnReceive = r.onReceive }
 // before the settle, so the meshes form before slot 0.
 func (r *NodeRunner) Prepare() {
 	if r.attest {
-		if r.aggDue > 0 { // every node joins the global aggregate mesh (it downloads all aggregates)
+		if r.view.HasAggregators { // every node joins the global aggregate mesh (it downloads all aggregates)
 			if err := r.nd.Subscribe(validator.AggregateTopic); err != nil {
 				slog.Error("subscribe aggregate topic failed", "node", r.num, "err", err)
 			}
@@ -341,14 +356,12 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 		}
 
 		// Aggregate phase: if this node aggregates any committee this slot, arm a timer to
-		// publish its M aggregates at the aggregate deadline (fixed offset, no coupling).
-		if r.aggDue > 0 {
-			ss.aggSubnets = r.view.AggregateSubnets[slot]
-			if len(ss.aggSubnets) > 0 {
-				ss.aggTimer = time.AfterFunc(time.Until(slotStart.Add(r.aggDue)), func() {
-					r.emitAggregate(slot, ss)
-				})
-			}
+		// publish its M aggregates at the aggregation deadline (fixed offset, no coupling).
+		ss.aggSubnets = r.view.AggregateSubnets[slot]
+		if len(ss.aggSubnets) > 0 {
+			ss.aggTimer = time.AfterFunc(time.Until(slotStart.Add(r.aggDue)), func() {
+				r.emitAggregate(slot, ss)
+			})
 		}
 	} else if r.decoupled {
 		// The AC vote is the column-gated attestation, retargeted: duties come from the per-slot
@@ -389,8 +402,8 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 	ss.timer = time.AfterFunc(time.Until(ss.deadline), func() { r.onBlockDeadline(slot, ss) })
 
 	// Sync contribution phase: if this node aggregates any sync subnet this slot, arm a timer
-	// to publish its contributions at the contribution deadline (reuses aggDue; fixed offset).
-	if r.sync && r.aggDue > 0 {
+	// to publish its contributions at the aggregation deadline (shared with aggregates).
+	if r.sync {
 		ss.syncAggSubnets = r.view.SyncAggregateSubnets[slot]
 		if len(ss.syncAggSubnets) > 0 {
 			ss.syncAggTimer = time.AfterFunc(time.Until(slotStart.Add(r.aggDue)), func() {

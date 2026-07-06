@@ -53,9 +53,10 @@ type Config struct {
 	AttestBatchWindow time.Duration
 	AttestBatchMax    int // max attestations per verify batch; 0 = uncapped
 
-	// Aggregate phase (optional). 0 ⇒ no aggregates. Each committee's aggregators (from the
-	// committee assignment) publish one distinct aggregate each at this offset.
-	AggregateDue time.Duration // aggregate emit, offset into the slot (≈8s)
+	// The aggregation deadline (≈8s, 2/3 of the slot): committee aggregators publish their
+	// aggregates and sync aggregators their contributions here. Whether anyone aggregates is
+	// the schedule's business (its aggregator draws), not this knob's.
+	AggregateDue time.Duration
 
 	// Decoupled-consensus phase (optional; nil ⇒ off). When set, the runner emits AC votes +
 	// finality votes/aggregates and attestation/sync emit is forced off (the AC vote replaces
