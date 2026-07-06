@@ -55,7 +55,7 @@ type NodeRunner struct {
 	base      map[int]bool  // the node's long-lived peers (so we know which dials are extra)
 
 	// Decoupled finality-chain knobs (set when decoupled; consumed by the FC paths, M4/M5).
-	finalitySubRounds int           // ac_slots_per_finality_slot (k: AC slots per finality slot)
+	finalityRoundSize int           // ac_slots_per_finality_slot (k: AC slots per finality slot)
 	fcVoteOffset      time.Duration // offset into the finality slot (AC slot when segregated) for the FC vote burst
 	fcAggFraction     int           // % of the finality slot when FC aggregates publish (base mode)
 	segregated        bool          // per-AC-slot finality rounds (validator segregation)
@@ -222,7 +222,7 @@ func NewRunner(nd *node.Node, view schedule.View, basePeers []int,
 	}
 	if dc := cfg.Decoupled; dc != nil {
 		r.decoupled = true
-		r.finalitySubRounds, r.fcVoteOffset, r.fcAggFraction = dc.K, dc.FCVoteOffset, dc.FCAggFraction
+		r.finalityRoundSize, r.fcVoteOffset, r.fcAggFraction = dc.K, dc.FCVoteOffset, dc.FCAggFraction
 		r.segregated, r.roundAggFraction = dc.Segregated, dc.RoundAggFraction
 		r.finals = make(map[int]*finalityState)
 	}
@@ -550,13 +550,13 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 // so the FC timers are armed off it directly. State lives in r.finals (created by the pre-join; at
 // n=0 the pre-join runs here, there being no previous slot) and spans k AC slots.
 func (r *NodeRunner) armFinality(slot int, slotStart time.Time) {
-	if (slot+1)%r.finalitySubRounds == 0 { // the AC slot before a boundary: warm up finality slot (slot+1)/k
-		go r.prejoinFinality((slot + 1) / r.finalitySubRounds) // off the slot path (see armRound)
+	if (slot+1)%r.finalityRoundSize == 0 { // the AC slot before a boundary: warm up finality slot (slot+1)/k
+		go r.prejoinFinality((slot + 1) / r.finalityRoundSize) // off the slot path (see armRound)
 	}
-	if slot%r.finalitySubRounds != 0 {
+	if slot%r.finalityRoundSize != 0 {
 		return
 	}
-	n := slot / r.finalitySubRounds
+	n := slot / r.finalityRoundSize
 	if n == 0 {
 		r.prejoinFinality(0)
 	}
@@ -574,7 +574,7 @@ func (r *NodeRunner) armFinality(slot int, slotStart time.Time) {
 	// Run sleep, surviving the intervening endSlots because they live in r.finals): an aggregator
 	// publishes its aggregates; every node that pre-joined network state drops it at the flood's
 	// semantic end. With no aggregation phase (fraction 0) the drop falls back to reapFinality.
-	fracDur := time.Duration(r.fcAggFraction) * time.Duration(r.finalitySubRounds) * r.slotDur / 100
+	fracDur := time.Duration(r.fcAggFraction) * time.Duration(r.finalityRoundSize) * r.slotDur / 100
 	if len(fs.aggSubnets) > 0 {
 		fs.aggTimer = time.AfterFunc(time.Until(slotStart.Add(fracDur)), func() {
 			r.emitFinalityAggregate(n, fs)
@@ -746,7 +746,7 @@ func (r *NodeRunner) shuffledFinalitySubscribers(n, subnet int) []int {
 func (r *NodeRunner) validatorsPerCell(n, subnet int) int {
 	counts := r.view.ValidatorsPerSubnet
 	if r.segregated {
-		round := n % r.finalitySubRounds
+		round := n % r.finalityRoundSize
 		perRound := r.view.ValidatorsPerRoundSubnet
 		if round < 0 || round >= len(perRound) {
 			return 0
@@ -888,10 +888,10 @@ func (r *NodeRunner) dropFinality(fs *finalityState) {
 func (r *NodeRunner) reapFinality(slot int) {
 	key := slot
 	if !r.segregated {
-		if (slot+1)%r.finalitySubRounds != 0 {
+		if (slot+1)%r.finalityRoundSize != 0 {
 			return
 		}
-		key = slot / r.finalitySubRounds
+		key = slot / r.finalityRoundSize
 	}
 	r.mu.Lock()
 	fs := r.finals[key]
