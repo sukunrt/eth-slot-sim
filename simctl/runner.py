@@ -443,7 +443,23 @@ def run_simulation(config: SimConfig, output_dir: Path) -> tuple[Path, subproces
     result = _run_shadow(run_dir)
     print(f"Shadow completed. Results in: {run_dir}")
     print(f"Exit code: {result.returncode}")
+    if result.returncode == 0:
+        _convert_to_parquet(run_dir)
     return run_dir, result
+
+
+def _convert_to_parquet(run_dir: Path) -> None:
+    """Convert the run's slog output to parquet event tables (analysis/to_parquet.py) so
+    analysis never re-parses the raw JSON — and so the remote flow can tar the small
+    parquet view separately. Additive only (raw logs untouched); a conversion failure
+    must never taint the run, so it only warns."""
+    try:
+        from analysis import to_parquet
+
+        out = to_parquet.convert(run_dir)
+        print(f"Parquet event tables in: {out}")
+    except Exception as e:  # noqa: BLE001 — the raw logs remain the source of truth
+        print(f"WARNING: parquet conversion failed ({e}); analyze from the raw logs")
 
 
 def run_simnet(config: SimConfig, run_dir: Path) -> Path:

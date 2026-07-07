@@ -195,10 +195,14 @@ class Runner:
             return 1
 
     def tar_and_cleanup(self, host: str, cwd: PurePosixPath, output_dir: str) -> int:
-        """Tar a remote output directory and remove the original.
+        """Tar a remote output directory (full + parquet-only views) and remove the original.
 
-        Creates {output_dir}.tar.gz in the parent directory, then removes
-        the output directory.
+        Creates {output_dir}.tar.gz (everything, the durable raw artifact) and
+        {output_dir}-parquet.tar.gz (the same run dirs minus shadow.data and the built
+        binary — small enough to pull for analysis; check_arrivals --parquet runs on the
+        extracted dir directly) in the parent directory, then removes the output
+        directory. The removal only happens after BOTH tarballs succeed, so a failure
+        never loses data.
 
         Args:
             host: Remote host in user@hostname format
@@ -213,19 +217,25 @@ class Runner:
             output_path = cwd / output_path
         parent_dir = output_path.parent
 
-        tar_path = str(parent_dir / f"{output_path.name}.tar.gz")
-        tar_script = (
-            f"tar -czf {shlex.quote(tar_path)} "
-            f"-C {shlex.quote(str(parent_dir))} "
-            f"{shlex.quote(output_path.name)}"
-        )
-        print(f"Creating tarball {tar_path}...")
-        tar_res = self._runner.ssh_cmd(host, f"bash -lc {shlex.quote(tar_script)}")
-        if tar_res.returncode != 0:
-            print(f"Failed to create tarball {tar_path!r} (exit code {tar_res.returncode})")
-            return tar_res.returncode
-
-        print(f"Tarball created at {tar_path}")
+        tars = [
+            (str(parent_dir / f"{output_path.name}.tar.gz"), ""),
+            (
+                str(parent_dir / f"{output_path.name}-parquet.tar.gz"),
+                "--exclude=shadow.data --exclude=slot-sim-node ",
+            ),
+        ]
+        for tar_path, excludes in tars:
+            tar_script = (
+                f"tar -czf {shlex.quote(tar_path)} {excludes}"
+                f"-C {shlex.quote(str(parent_dir))} "
+                f"{shlex.quote(output_path.name)}"
+            )
+            print(f"Creating tarball {tar_path}...")
+            tar_res = self._runner.ssh_cmd(host, f"bash -lc {shlex.quote(tar_script)}")
+            if tar_res.returncode != 0:
+                print(f"Failed to create tarball {tar_path!r} (exit code {tar_res.returncode})")
+                return tar_res.returncode
+            print(f"Tarball created at {tar_path}")
 
         rm_cmd = f"rm -rf -- {shlex.quote(str(output_path))}"
         rm_res = self._runner.ssh_cmd(host, f"bash -lc {shlex.quote(rm_cmd)}")

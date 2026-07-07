@@ -75,7 +75,13 @@ def test_tar_and_cleanup_tars_then_removes():
     joined = "\n".join(rec.ssh_calls)
     assert "tar -czf" in joined
     assert "/home/remote-user/eth-slot-sim/runs/smoke.tar.gz" in joined
-    assert "rm -rf -- " in joined and "runs/smoke" in joined
+    # The parquet-only view: same run dirs minus the raw logs and the built binary.
+    assert "/home/remote-user/eth-slot-sim/runs/smoke-parquet.tar.gz" in joined
+    parquet_tar = next(c for c in rec.ssh_calls if "smoke-parquet.tar.gz" in c)
+    assert "--exclude=shadow.data" in parquet_tar and "--exclude=slot-sim-node" in parquet_tar
+    # rm only after BOTH tarballs: it must be the last ssh command.
+    assert "rm -rf -- " in rec.ssh_calls[-1] and "runs/smoke" in rec.ssh_calls[-1]
+    assert all("rm -rf" not in c for c in rec.ssh_calls[:-1])
 
 
 # --- CLI wiring: `simctl run|compare --remote --dry-run` forwards the right args ---
