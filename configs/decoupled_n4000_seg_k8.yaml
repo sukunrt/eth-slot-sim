@@ -1,0 +1,58 @@
+# Decoupled consensus at 4k: validator segregation with k=8 per-AC-slot rounds (~51k votes
+# per slot, V/8) over the CLASSIC gossipsub transport — the k5-partial rung's sibling for
+# the round-size axis. 16 AC slots = 2 finality slots of 96s.
+# Run with `simctl run --remote sukun@ethp2p`.
+topology:
+  num_nodes: 4000
+  degree: 80
+  type: random
+  seed: 42
+  super_node_fraction: 0.5 # the full-custody backbone is drawn from the supernodes
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+attestation:
+  enabled: false           # OFF: this block only supplies the AC-vote deadline (attestation_due_ms)
+  validators: 400000       # ignored under tiered (V is emergent ≈ 400k)
+  committees: 1            # ignored under decoupled (no attestation committees)
+  committee_size: 8        # ignored under decoupled
+  attestation_due_ms: 4000 # the AC-vote deadline (reused; no new knob)
+
+data_columns:
+  enabled: true            # columns gate the AC vote (the "availability" chain)
+  num_columns: 128         # mainnet column universe; custody_floor 8 ⇒ sparse column subnets
+  blobs: 6
+  custody_floor: 8
+  full_custody_fraction: 0.5
+  column_backbone_floor: 3
+  verify_service_ms: 3
+  verify_parallelism_super: 16
+  verify_parallelism_regular: 4
+
+decoupled_consensus:
+  enabled: true
+  ac_vote_size: 512                      # spec default: VRF-selected validators voting on the AC each slot
+  ac_slots_per_finality_slot: 8          # k: finality slot = 96s
+  fs_subnets: 40                         # finality subnets, validator-partitioned (stable node receiver core)
+  fs_aggregators: 16                     # spec default: aggregator validators per subnet per finality slot (whole-set)
+  finality_slot_aggregation_fraction: 50 # % of the finality slot when aggregates publish
+  fc_vote_offset_ms: 1000                # offset into the AC slot for the round vote burst
+  validator_segregation: true            # per-AC-slot finality rounds: ~51k votes/slot (V/8)
+  round_aggregation_fraction: 67         # % of the AC slot when round aggregates publish
+
+validator_distribution:
+  type: tiered             # skewed hosting, tier defaults: supers log-normal mean 200 ⇒ V ≈ 100·N
+
+num_slots: 16
+slot_duration_seconds: 12
+block_size: 131072       # 128 KiB
+verify_delay_ms: 10
+offset_ms: 2000   # proposer publishes ~2s into the slot (mainnet-ish block arrival)
+jitter_ms: 500    # publish lands in [offset, offset+jitter) = [2.0s, 2.5s)
+startup_seconds: 240     # 4000 hosts at degree 80: extra dial + settle margin
+stop_time_minutes: 9     # 240 startup + 192 run + 30 drain = 462s, with margin
+log_level: warning       # 4000 hosts: keep Shadow's own log small
+seed: 1
