@@ -46,6 +46,11 @@ Layering, bottom-up. Each package has a doc comment worth reading; this is the m
   delay CDFs per message kind. **Contract with Go**: kind ints 1..9 and the MsgID field
   encoding (pinned by `node/registry_test.go` + `metrics/roundtrip_test.go`); don't
   renumber kinds or reshape the CSV/slog fields without updating this file.
+- `analysis/to_parquet.py` + `analysis/duck_report.py` — the DuckDB fast path: convert a
+  run's slog logs to parquet event tables once, then `check_arrivals.py <run> --parquet`
+  analyzes them in SQL. check_arrivals stays the stdlib-only REFERENCE implementation;
+  the two paths are pinned to identical reports by `tests/test_duck_report.py` — extend
+  both together.
 - `tests/` — pytest suite for the Python side.
 
 ## Two backends, one plan

@@ -34,11 +34,25 @@ rsyncs the repo, builds + runs Shadow on the remote, tarballs the output dir to
 monitors — the Shadow run is `nohup`'d on the remote and survives a laptop shutdown.)
 
 ## Fetch + analyze later
+
+The remote flow leaves TWO tarballs per run: the full `<name>.tar.gz` (raw slog logs —
+the durable artifact) and the small `<name>-parquet.tar.gz` (same run dir minus
+`shadow.data` and the binary; the runner converted the logs to `parquet/` event tables
+after the Shadow run). For analysis, pull only the parquet one:
+
 ```bash
-scp sukun@ethp2p:~/eth-slot-sim/runs/n1000-1mb.tar.gz /tmp/n1000.tar.gz
-mkdir -p /tmp/n1000 && tar -xzf /tmp/n1000.tar.gz -C /tmp/n1000
-uv run python analysis/check_arrivals.py /tmp/n1000/n1000-1mb/run-*
+scp sukun@ethp2p:~/eth-slot-sim/runs/n1000-1mb-parquet.tar.gz /tmp/
+mkdir -p /tmp/n1000 && tar -xzf /tmp/n1000-1mb-parquet.tar.gz -C /tmp/n1000
+uv run python analysis/check_arrivals.py /tmp/n1000/n1000-1mb/run-* --parquet
 ```
+
+`--parquet` is the DuckDB fast path over `parquet/{arrivals,publishes}.parquet`
+(equivalence-tested against the raw-text reference; same analysis.json). Without the
+flag it re-parses the raw slog text, so the full tarball keeps working as before. Old
+runs (raw-only tarballs) can be converted in place:
+`uv run python analysis/to_parquet.py <run-dir>`. Ad-hoc questions don't need code —
+`duckdb -c "SELECT ... FROM '<run-dir>/parquet/arrivals.parquet' WHERE kind=8"`
+(CLI via `scripts/install-duckdb.sh`; the Python package rides `uv sync`).
 
 Results tarball on remote: `~/eth-slot-sim/runs/n1000-1mb.tar.gz`
 (run dir inside: `n1000-1mb/run-<timestamp>-n1000-D8/`).
