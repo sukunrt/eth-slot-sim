@@ -18,7 +18,12 @@ finality votes (kind=8, per finality-subnet, one per hosted validator reaching t
 subnet members); and finality aggregates (kind=9, global topic, one distinct aggregate per
 aggregator reaching every node but itself) — the AC/finality twins of aggregates/sync.
 
-Usage: python analysis/check_arrivals.py <run-dir>
+Usage: python analysis/check_arrivals.py <run-dir> [--parquet [DIR]]
+
+--parquet switches to the DuckDB fast path over the parquet event tables written by
+analysis/to_parquet.py (DIR defaults to <run-dir>/parquet) — same report, minutes faster
+on big runs. This module itself stays stdlib-only: it is the REFERENCE implementation the
+parquet path (analysis/duck_report.py) is equivalence-tested against.
 
 Output: the human summary on stdout AND the full machine-readable report in
 <run-dir>/analysis.json — per-kind and per-slot CDFs (fine percentile grid), both loss
@@ -27,6 +32,7 @@ The JSON is the durable artifact: keep extending it, never reshape it, so old ru
 comparable and shadow.data never needs re-parsing.
 """
 
+import argparse
 import csv
 import json
 import math
@@ -1313,10 +1319,28 @@ def build_report(run_dir: Path) -> dict:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print(f"usage: {argv[0]} <run-dir>", file=sys.stderr)
-        return 2
-    report = build_report(Path(argv[1]))
+    parser = argparse.ArgumentParser(description="Verify message receipt for a Shadow run.")
+    parser.add_argument("run_dir", type=Path)
+    parser.add_argument(
+        "--parquet",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help="analyze the parquet event tables (DuckDB fast path; see analysis/to_parquet.py) "
+        "instead of re-parsing the raw slog text; DIR defaults to <run-dir>/parquet",
+    )
+    args = parser.parse_args(argv[1:])
+    if args.parquet is not None:
+        try:
+            from analysis import duck_report
+        except ImportError:  # invoked as a script: the repo root is not on sys.path
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+            from analysis import duck_report
+        parquet_dir = Path(args.parquet) if args.parquet else args.run_dir / "parquet"
+        report = duck_report.build_report(args.run_dir, parquet_dir)
+    else:
+        report = build_report(args.run_dir)
     return 0 if report["result"] == "OK" else 1
 
 
