@@ -162,12 +162,12 @@ func (f fanoutTracer) OnReceive(rcv int, id metrics.MsgID, at time.Time) {
 	}
 }
 
-// Round 0's finality warm-up runs off Run's lead-time goroutine (round0PrejoinLead before slot 0),
-// coordinated with slot 0's own setup by round0Once — so the vote timer is armed on time and the
-// burst fires at exactly runStart + FCVoteOffset, not shoved past it by the pre-join's dial barrier
-// (the n4000 collapse this replaces). The scenario's run() sets runStart = now, so the −10s lead is
-// already past: the early goroutine fires at once and RACES slot 0's setup through round0Once, the
-// path synctest explores deterministically. Reuses the coverage helper to also pin no double
+// Round 0's finality warm-up is kicked at bring-up (Prepare), coordinated with slot 0's own setup
+// by round0Once — so the vote timer is armed on time and the burst fires at exactly
+// runStart + FCVoteOffset, not shoved past it by the pre-join's dial barrier (the n4000 collapse
+// this replaces). The scenario's run() calls Prepare ~2s before Run, so the warm-up races the
+// settle; slot 0's setup then joins whatever state it finds through round0Once — both orders are
+// paths synctest explores deterministically. Reuses the coverage helper to also pin no double
 // emission — the once-guarded pre-join must not duplicate votes, arrivals, or publishes.
 func TestDecoupledFinalityVoteRound0NotDelayed(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

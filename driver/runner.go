@@ -69,7 +69,7 @@ type NodeRunner struct {
 
 	runCtx context.Context // set at Run; used by emit/publish
 	// Round 0's finality warm-up runs off the slot path (round0Warmup): round0Once makes the first
-	// caller — Run's lead-time goroutine, or slot 0's own setup if it wins the race — SPAWN the
+	// caller — Prepare's bring-up goroutine, or slot 0's own setup if it wins the race — SPAWN the
 	// pre-join, and round0Ready (closed when its dials are up) is the wait every caller then parks
 	// on, so the vote timer is never armed before round 0's joins exist. round0Ready is a channel
 	// rather than sync.Once's own wait deliberately: the pre-join ends in a Dial (a time-blocking
@@ -325,25 +325,22 @@ func (r *NodeRunner) Prepare() {
 				slog.Error("subscribe finality subnet failed", "node", r.num, "subnet", r.view.FinalitySubnet, "err", err)
 			}
 		}
+		// Round 0's finality warm-up belongs to bring-up: kicked here it runs during the settle
+		// window (in Shadow each host reaches Prepare at its own mesh-join stagger, so the fleet's
+		// dial barriers spread out over a quiet ~3 minutes), and slot 0's setup finds it long done.
+		// Kicking it from Run instead would fire it AT runStart — Run is only invoked at slot 0 —
+		// recreating the very race the warm-up exists to avoid.
+		go r.round0Warmup()
 	}
 }
 
 // Run paces one setup per slot start from runStart. beginSlot is non-blocking — every slot's work
 // (dials, emits, the finality pre-join, cleanup) runs in goroutines and timers — so the loop never
-// drifts off the slot clock. Under decoupled it also kicks round 0's finality warm-up off a
-// goroutine round0PrejoinLead before slot 0 (off the slot path entirely), so slot 0's setup finds
-// the pre-join already done instead of running that dial barrier inline. It returns at the last
-// slot's end; the Driver then drains in-flight receives.
+// drifts off the slot clock. Round 0's finality warm-up already ran off Prepare (bring-up); slot
+// 0's setup joins it through round0Warmup. It returns at the last slot's end; the Driver then
+// drains in-flight receives.
 func (r *NodeRunner) Run(ctx context.Context, runStart time.Time, numSlots int) {
 	r.runCtx = ctx
-	if r.decoupled {
-		// Off the Run loop: sleep until the lead point (0 when it is already past — short-settle
-		// tests fire it at once) then warm up round 0 ahead of slot 0's setup.
-		go func() {
-			time.Sleep(time.Until(runStart.Add(-round0PrejoinLead)))
-			r.round0Warmup()
-		}()
-	}
 	for slot := range numSlots {
 		slotStart := runStart.Add(time.Duration(slot) * r.slotDur)
 		time.Sleep(time.Until(slotStart))
@@ -459,12 +456,6 @@ func (r *NodeRunner) proposes(slot int) bool {
 	}
 	return slot%r.numNodes == r.num
 }
-
-// round0PrejoinLead is how far before slot 0 the round-0 finality warm-up starts. Every other
-// round pre-joins one AC slot ahead off the previous slot's setup; round 0 has no previous slot,
-// so its dial barrier would otherwise run inline in slot 0's setup and (at n4000 scale) shove the
-// vote timer past its offset. Run spawns the warm-up this far ahead so it finishes before slot 0.
-const round0PrejoinLead = 10 * time.Second
 
 // Stream keys for the runner's per-purpose PCG draws: PCG takes one uint64 stream, so the
 // purpose salt keeps the three families of draws disjoint and the shift packs the two (small)
@@ -686,8 +677,8 @@ func (r *NodeRunner) armFinalitySubRound(slot int, slotStart time.Time) {
 }
 
 // round0Warmup runs round 0's finality pre-join exactly once, OFF every slot path, and blocks the
-// caller until its dials are up. round0Once makes the first caller (Run's lead-time goroutine, or
-// slot 0's setup if it arrives first) SPAWN the pre-join and return at once — the dial never runs
+// caller until its dials are up. round0Once makes the first caller (Prepare's bring-up goroutine,
+// or slot 0's setup if it arrives first) SPAWN the pre-join and return at once — the dial never runs
 // under the Once's lock — and round0Ready, closed when the pre-join finishes, is the wait each
 // caller then parks on (a channel, so synctest still advances the fake clock while a caller waits;
 // see the round0Ready field). A no-op receive once closed, so repeat callers pass straight through.
@@ -702,8 +693,8 @@ func (r *NodeRunner) round0Warmup() {
 // arrives and the vote burst pushes straight through. n is the finality slot in base mode (run at
 // AC slot n·k−1) and the AC slot itself under segregation (run every slot for slot+1) —
 // FinalityVoteDuties/FinalityAggregations interpret the key per mode. Round 0 has no previous slot,
-// so round0Warmup runs it off the slot path (kicked round0PrejoinLead ahead of slot 0, or by slot
-// 0's setup if that wins the race). The warm-up:
+// so round0Warmup runs it off the slot path (kicked at bring-up from Prepare, or by slot 0's
+// setup if that wins the race). The warm-up:
 //
 //   - vote fan-out: for each duty subnet the node is NOT a member of (its validators' draws), it
 //     Joins the topic and dials 2 of the subnet's stable members — the attestation publish path,
