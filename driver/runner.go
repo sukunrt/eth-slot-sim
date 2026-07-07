@@ -68,8 +68,18 @@ type NodeRunner struct {
 	sigSize     int // signature filler bytes per vote
 
 	runCtx context.Context // set at Run; used by emit/publish
-	mu     sync.Mutex
-	slots  map[int]*slotState
+	// Round 0's finality warm-up runs off the slot path (round0Warmup): round0Once makes the first
+	// caller — Run's lead-time goroutine, or slot 0's own setup if it wins the race — SPAWN the
+	// pre-join, and round0Ready (closed when its dials are up) is the wait every caller then parks
+	// on, so the vote timer is never armed before round 0's joins exist. round0Ready is a channel
+	// rather than sync.Once's own wait deliberately: the pre-join ends in a Dial (a time-blocking
+	// handshake), and synctest advances its fake clock while a goroutine waits on a channel but NOT
+	// while it waits on sync.Once's internal mutex — so blocking a second caller in Once.Do across
+	// the dial would wedge the in-process tests behind that dial. Created only when decoupled.
+	round0Once  sync.Once
+	round0Ready chan struct{}
+	mu          sync.Mutex
+	slots       map[int]*slotState
 	// finals holds the decoupled finality state: keyed by finality slot in base mode (spans k
 	// AC slots), by AC slot under segregation (a round spans 2: pre-join at s−1, the rest in s).
 	finals map[int]*finalityState
@@ -226,6 +236,7 @@ func NewRunner(nd *node.Node, view schedule.View, basePeers []int,
 		r.finalityRoundSize, r.fcVoteOffset, r.fcAggFraction = dc.K, dc.FCVoteOffset, dc.FCAggFraction
 		r.segregated, r.roundAggFraction = dc.Segregated, dc.RoundAggFraction
 		r.finals = make(map[int]*finalityState)
+		r.round0Ready = make(chan struct{})
 	}
 	// The plan decides who aggregates; the deadline only says when. A plan that draws
 	// aggregators with no deadline set would silently never publish them — refuse instead.
@@ -319,10 +330,20 @@ func (r *NodeRunner) Prepare() {
 
 // Run paces one setup per slot start from runStart. beginSlot is non-blocking — every slot's work
 // (dials, emits, the finality pre-join, cleanup) runs in goroutines and timers — so the loop never
-// drifts off the slot clock. It returns at the last slot's end; the Driver then drains in-flight
-// receives.
+// drifts off the slot clock. Under decoupled it also kicks round 0's finality warm-up off a
+// goroutine round0PrejoinLead before slot 0 (off the slot path entirely), so slot 0's setup finds
+// the pre-join already done instead of running that dial barrier inline. It returns at the last
+// slot's end; the Driver then drains in-flight receives.
 func (r *NodeRunner) Run(ctx context.Context, runStart time.Time, numSlots int) {
 	r.runCtx = ctx
+	if r.decoupled {
+		// Off the Run loop: sleep until the lead point (0 when it is already past — short-settle
+		// tests fire it at once) then warm up round 0 ahead of slot 0's setup.
+		go func() {
+			time.Sleep(time.Until(runStart.Add(-round0PrejoinLead)))
+			r.round0Warmup()
+		}()
+	}
 	for slot := range numSlots {
 		slotStart := runStart.Add(time.Duration(slot) * r.slotDur)
 		time.Sleep(time.Until(slotStart))
@@ -438,6 +459,12 @@ func (r *NodeRunner) proposes(slot int) bool {
 	}
 	return slot%r.numNodes == r.num
 }
+
+// round0PrejoinLead is how far before slot 0 the round-0 finality warm-up starts. Every other
+// round pre-joins one AC slot ahead off the previous slot's setup; round 0 has no previous slot,
+// so its dial barrier would otherwise run inline in slot 0's setup and (at n4000 scale) shove the
+// vote timer past its offset. Run spawns the warm-up this far ahead so it finishes before slot 0.
+const round0PrejoinLead = 10 * time.Second
 
 // Stream keys for the runner's per-purpose PCG draws: PCG takes one uint64 stream, so the
 // purpose salt keeps the three families of draws disjoint and the shift packs the two (small)
@@ -555,8 +582,9 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 // wholly separate path the caller picks): the pre-join at the slot before a boundary (vote fan-out
 // warm-up + aggregator subscribe), and — at a boundary (slot % k == 0) — this node's per-validator
 // vote burst plus the aggregation deadline. The boundary slot's slotStart IS finalitySlotStart(n),
-// so the FC timers are armed off it directly. State lives in r.finals (created by the pre-join; at
-// n=0 the pre-join runs here, there being no previous slot) and spans k AC slots.
+// so the FC timers are armed off it directly. State lives in r.finals (created by the pre-join;
+// round 0 has no previous slot, so it is warmed up off the slot path via round0Warmup rather than
+// inline here) and spans k AC slots.
 func (r *NodeRunner) armFinality(slot int, slotStart time.Time) {
 	if (slot+1)%r.finalityRoundSize == 0 { // the AC slot before a boundary: warm up finality slot (slot+1)/k
 		go r.prejoinFinality((slot + 1) / r.finalityRoundSize) // off the slot path (see armRound)
@@ -566,7 +594,10 @@ func (r *NodeRunner) armFinality(slot int, slotStart time.Time) {
 	}
 	n := slot / r.finalityRoundSize
 	if n == 0 {
-		r.prejoinFinality(0)
+		// Join round 0's off-path warm-up: if Run's early goroutine is still dialing this WAITS on
+		// it, if it finished this returns at once, and if slot 0 got here first this kicks it —
+		// either way the vote timer below is not armed before round 0's joins exist.
+		r.round0Warmup()
 	}
 	r.mu.Lock()
 	fs := r.finals[n]
@@ -605,21 +636,23 @@ func (r *NodeRunner) armFinality(slot int, slotStart time.Time) {
 }
 
 // armFinalitySubRound drives the per-AC-slot finality round (validator segregation): every slot pre-joins
-// the NEXT slot's round (slot 0 also prepares itself, there being no previous slot), then arms
-// this round's vote burst at slotStart + fcVoteOffset and its aggregation deadline at
-// roundAggFraction% of the slot — both inside this AC slot, so the timers fire before this
-// slot's endSlot reaps the state. The per-slot pre-join overlaps the previous round's teardown
-// (its deadline) every slot; dropFinality's sparing covers that, exactly as it covers the base
-// k=2-at-50% coincidence.
+// the NEXT slot's round, then arms this round's vote burst at slotStart + fcVoteOffset and its
+// aggregation deadline at roundAggFraction% of the slot — both inside this AC slot, so the timers
+// fire before this slot's endSlot reaps the state. The per-slot pre-join overlaps the previous
+// round's teardown (its deadline) every slot; dropFinality's sparing covers that, exactly as it
+// covers the base k=2-at-50% coincidence. Round 0 has no previous slot: it is warmed up off the
+// slot path via round0Warmup rather than inline here.
 func (r *NodeRunner) armFinalitySubRound(slot int, slotStart time.Time) {
 	if slot == 0 {
-		r.prejoinFinality(0)
+		// Join round 0's off-path warm-up: if Run's early goroutine is still dialing this WAITS on
+		// it, if it finished this returns at once, and if slot 0 got here first this kicks it —
+		// either way the vote timer below is not armed before round 0's joins exist.
+		r.round0Warmup()
 	}
 	// The next round's warm-up runs OFF the slot path: prejoinFinality ends in a synchronous
 	// Dial barrier (waves of handshakes — seconds on hosts with duties across many subnets),
 	// and anything sequenced after it here slips past its offset: this round's 1s vote fired
-	// at p50 2.7s at n4000. The goroutine has the full slot to finish; only slot 0 above must
-	// pre-join inline (its own round votes 1s later and needs the topic joins done).
+	// at p50 2.7s at n4000. The goroutine has the full slot to finish.
 	go r.prejoinFinality(slot + 1) // a no-op past the run's last round (it bounds itself)
 	r.mu.Lock()
 	fs := r.finals[slot]
@@ -652,11 +685,25 @@ func (r *NodeRunner) armFinalitySubRound(slot int, slotStart time.Time) {
 	}
 }
 
+// round0Warmup runs round 0's finality pre-join exactly once, OFF every slot path, and blocks the
+// caller until its dials are up. round0Once makes the first caller (Run's lead-time goroutine, or
+// slot 0's setup if it arrives first) SPAWN the pre-join and return at once — the dial never runs
+// under the Once's lock — and round0Ready, closed when the pre-join finishes, is the wait each
+// caller then parks on (a channel, so synctest still advances the fake clock while a caller waits;
+// see the round0Ready field). A no-op receive once closed, so repeat callers pass straight through.
+func (r *NodeRunner) round0Warmup() {
+	r.round0Once.Do(func() {
+		go func() { r.prejoinFinality(0); close(r.round0Ready) }()
+	})
+	<-r.round0Ready
+}
+
 // prejoinFinality warms up round n at the previous AC slot, so connections exist when the slot
-// arrives and the vote burst pushes straight through. n is the finality slot in base mode (run
-// at AC slot n·k−1, or the boundary itself for n=0) and the AC slot itself under segregation
-// (run every slot for slot+1) — FinalityVoteDuties/FinalityAggregations interpret the key per
-// mode. The warm-up:
+// arrives and the vote burst pushes straight through. n is the finality slot in base mode (run at
+// AC slot n·k−1) and the AC slot itself under segregation (run every slot for slot+1) —
+// FinalityVoteDuties/FinalityAggregations interpret the key per mode. Round 0 has no previous slot,
+// so round0Warmup runs it off the slot path (kicked round0PrejoinLead ahead of slot 0, or by slot
+// 0's setup if that wins the race). The warm-up:
 //
 //   - vote fan-out: for each duty subnet the node is NOT a member of (its validators' draws), it
 //     Joins the topic and dials 2 of the subnet's stable members — the attestation publish path,

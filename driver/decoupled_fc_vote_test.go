@@ -145,6 +145,75 @@ func TestDecoupledFinalityVoteCoverage(t *testing.T) {
 	})
 }
 
+// fanoutTracer fans one tracer stream out to several. The scenario takes a single tracer, but a
+// test can want two views at once — here a Recorder (arrivals ⇒ coverage) and a timeTracer
+// (publish instants) — so it wraps both.
+type fanoutTracer []metrics.Tracer
+
+func (f fanoutTracer) OnPublish(id metrics.MsgID, voted bool, at time.Time) {
+	for _, t := range f {
+		t.OnPublish(id, voted, at)
+	}
+}
+
+func (f fanoutTracer) OnReceive(rcv int, id metrics.MsgID, at time.Time) {
+	for _, t := range f {
+		t.OnReceive(rcv, id, at)
+	}
+}
+
+// Round 0's finality warm-up runs off Run's lead-time goroutine (round0PrejoinLead before slot 0),
+// coordinated with slot 0's own setup by round0Once — so the vote timer is armed on time and the
+// burst fires at exactly runStart + FCVoteOffset, not shoved past it by the pre-join's dial barrier
+// (the n4000 collapse this replaces). The scenario's run() sets runStart = now, so the −10s lead is
+// already past: the early goroutine fires at once and RACES slot 0's setup through round0Once, the
+// path synctest explores deterministically. Reuses the coverage helper to also pin no double
+// emission — the once-guarded pre-join must not duplicate votes, arrivals, or publishes.
+func TestDecoupledFinalityVoteRound0NotDelayed(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Same 8-node / V=16 fixture as the coverage test: each node votes once as a member and
+		// once as a non-member fan-out, so round 0 warms up real per-node dial state.
+		subnetOf := make([]int, 16)
+		for v := range subnetOf {
+			subnetOf[v] = v / 8
+		}
+		a := decoupledFCAssignment(8, 2, [][]int{{0, 2, 4, 6}, {1, 3, 5, 7}}, subnetOf, 0, 2)
+		rec := metrics.NewRecorder()
+		tr := &timeTracer{}
+		const offset = time.Second
+		dc := &driver.DecoupledParams{K: 2, FCVoteOffset: offset}
+		s := buildDecoupledScenario(t, a, 4*time.Second, nil, fanoutTracer{rec, tr}, 4, dc)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		runStart := s.run(t, ctx, 2)
+
+		// (a) Coverage + no duplicate arrivals: the pre-join (whichever once-path won) left every
+		// fan-out mesh formed, so every vote reached exactly its expected receivers.
+		assertFinalityVoteCoverage(t, a, rec, 0)
+
+		// (b) Every round-0 vote published at exactly runStart+offset (the timer was not delayed by
+		// the pre-join) and exactly once per hosted validator (V publishes ⇒ no double emission from
+		// the early goroutine vs slot-0 setup race, which would double-count here).
+		wantAt := runStart.Add(offset)
+		pubs := 0
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		for _, p := range tr.pubs {
+			if p.id.Kind != node.KindFinalityVote || p.id.Slot != 0 {
+				continue
+			}
+			pubs++
+			if !p.at.Equal(wantAt) {
+				t.Fatalf("finality vote %+v published at %v, want %v (runStart+offset)", p.id, p.at, wantAt)
+			}
+		}
+		if want := len(a.FinalitySubnetOf); pubs != want {
+			t.Fatalf("round-0 finality vote publishes = %d, want %d (one per validator, no dup)", pubs, want)
+		}
+	})
+}
+
 // A node whose validators all drew foreign subnets is NOT a passive member anywhere it votes:
 // both its votes ride the fan-out path. Membership {0,1} vs {2,3} with all four validators of
 // nodes 0,1 drawn onto the opposite subnet pins the fan-out publish end-to-end.
