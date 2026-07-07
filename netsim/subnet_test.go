@@ -140,3 +140,40 @@ func TestDiscv5GraphGracefulSmallN(t *testing.T) {
 		t.Fatalf("n=1 graph = %v, want one empty adjacency list", got)
 	}
 }
+
+// Finality subnets carry the vote flood, so beyond connectivity every member must hold
+// enough co-member links (finalityGroupDegree, capped by subnet size) to form a full
+// D=8 mesh — the tree alone leaves leaf members at one link.
+func TestDiscv5GraphFinalityMeshDegree(t *testing.T) {
+	groups := [][]int{seq(20), nil}
+	for i := 20; i < 40; i++ {
+		groups[1] = append(groups[1], i)
+	}
+	a := &schedule.Assignment{
+		Params:              schedule.Params{N: 40, SubnetCount: 64, NumSlots: 1},
+		FinalitySubscribers: groups,
+	}
+	adj := discv5Graph(a, 8, 1)
+	assertSimple(t, adj)
+	for s, members := range groups {
+		if !componentConnected(adj, members) {
+			t.Fatalf("finality subnet %d members not connected: %v", s, members)
+		}
+		in := map[int]bool{}
+		for _, m := range members {
+			in[m] = true
+		}
+		want := min(finalityGroupDegree, len(members)-1)
+		for _, m := range members {
+			got := 0
+			for _, p := range adj[m] {
+				if in[p] {
+					got++
+				}
+			}
+			if got < want {
+				t.Fatalf("finality subnet %d member %d: %d co-member links, want >= %d", s, m, got, want)
+			}
+		}
+	}
+}

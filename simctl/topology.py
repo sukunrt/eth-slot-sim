@@ -117,6 +117,11 @@ class CountrySelector:
 # perturb the country-selection sequence.
 _SUPER_STREAM = 7
 
+# Same-subnet neighbor floor for finality-subnet members (~10-15 after in-edges): the vote
+# flood needs every member able to form a full D=8 mesh, which the connectivity tree alone
+# (degree ~2, leaves 1) cannot provide. Mirrored by netsim's finalityGroupDegree.
+FINALITY_GROUP_DEGREE = 12
+
 
 def supernode_ids(num_nodes: int, super_node_fraction: float, seed: int) -> set[int]:
     """The node ids that get supernode (1024/1024 Mbit) bandwidth — a pure, seeded function
@@ -154,6 +159,23 @@ class _Graph:
         random earlier one. Fewer than two ids is a no-op (trivially connected)."""
         for i in range(1, len(ids)):
             self.add(ids[i], ids[rng.randrange(i)])
+
+    def group_fill(self, ids: list[int], k: int, rng: random.Random) -> None:
+        """Top every id up toward k neighbors WITHIN ids. Gossipsub meshes only form over
+        existing links, so a flood-bearing membership group needs ~D internal degree per
+        member — the tree alone leaves leaves at 1. Bounded retries like fill's."""
+        members = set(ids)
+        target = min(k, len(ids) - 1)
+        for i in ids:
+            in_group = len(self.adj[i] & members)
+            tries = 0
+            while in_group < target and tries < k * 4:
+                peer = ids[rng.randrange(len(ids))]
+                tries += 1
+                if peer == i or peer in self.adj[i]:
+                    continue
+                self.add(i, peer)
+                in_group += 1
 
     def fill(self, k: int, rng: random.Random) -> None:
         """Top every node up toward degree k with random peers; bounded retries so a small
@@ -304,7 +326,10 @@ def generate_subnet_topology(
     for subs in assignment.sync_subscribers or []:
         g.random_tree(list(subs), rng)  # each sync subnet's members: one connected piece
     for subs in assignment.finality_subscribers or []:
-        g.random_tree(list(subs), rng)  # each finality subnet's members: one connected piece
+        # Finality subnets carry the vote flood: the tree gives connectivity, the group fill
+        # gives every member enough co-member links (~10-15) to form a real D=8 mesh.
+        g.random_tree(list(subs), rng)
+        g.group_fill(list(subs), FINALITY_GROUP_DEGREE, rng)
     g.fill(min(k, num_nodes - 1), rng)
 
     edges = _edges_from_adjacency(g.adj, nodes, latencies, min_latency_ms)

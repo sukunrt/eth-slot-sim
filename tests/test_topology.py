@@ -177,6 +177,12 @@ def test_subnet_topology_connects_every_finality_subnet_within_k():
     assert a.finality_subscribers, "decoupled schedule must carry finality membership"
     for i, subs in enumerate(a.finality_subscribers):
         assert _connected(adj, subs), f"finality subnet {i} members not connected: {subs}"
+        # The vote flood needs a real mesh, not just connectivity: every member holds at
+        # least min(FINALITY_GROUP_DEGREE, |subnet|-1) co-member links.
+        target = min(topology.FINALITY_GROUP_DEGREE, len(subs) - 1)
+        for m in subs:
+            got = len(adj[m] & set(subs))
+            assert got >= target, f"finality subnet {i} member {m}: {got} co-member links < {target}"
 
 
 def test_subnet_topology_degrades_gracefully_for_small_n():

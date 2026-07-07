@@ -48,6 +48,33 @@ func (g *graph) fill(k int, rng *rand.Rand) {
 	}
 }
 
+// groupFill tops every id up toward k neighbors WITHIN ids. Gossipsub meshes only form
+// over existing links, so a flood-bearing membership group needs ~D internal degree per
+// member — the tree alone leaves leaves at 1. Retries are bounded like fill's.
+func (g *graph) groupFill(ids []int, k int, rng *rand.Rand) {
+	in := make(map[int]bool, len(ids))
+	for _, id := range ids {
+		in[id] = true
+	}
+	target := min(k, len(ids)-1)
+	for _, id := range ids {
+		inGroup := 0
+		for _, p := range g.adj[id] {
+			if in[p] {
+				inGroup++
+			}
+		}
+		for tries := 0; inGroup < target && tries < k*4; tries++ {
+			peer := ids[rng.IntN(len(ids))]
+			if peer == id || g.edge[id][peer] {
+				continue
+			}
+			g.add(id, peer)
+			inGroup++
+		}
+	}
+}
+
 // seq returns the id list [0, 1, ..., n-1].
 func seq(n int) []int {
 	ids := make([]int, n)

@@ -15,6 +15,11 @@ import (
 // This is the in-process Go-test analogue of simctl/topology.py's builder — the two satisfy
 // the same invariants (per-subnet connectivity, ~K degree) rather than being byte-identical
 // (a cross-backend run shares one topology.json, so only one of them ever builds it).
+// finalityGroupDegree is the same-subnet neighbor floor for finality-subnet members
+// (~10-15 after in-edges): the vote flood needs every member able to form a full D=8 mesh,
+// which the connectivity tree alone (degree ~2, leaves 1) cannot provide.
+const finalityGroupDegree = 12
+
 func NewWithSchedule(a *schedule.Assignment, cfg Config) (*Netsim, error) {
 	n := a.Params.N
 	supers := pickSupernodes(n, cfg.SuperFrac, cfg.Seed)
@@ -53,7 +58,10 @@ func discv5Graph(a *schedule.Assignment, k int, seed uint64) [][]int {
 		g.randomTree(subs, rng) // each sync subnet's members: one connected piece
 	}
 	for _, subs := range a.FinalitySubscribers {
-		g.randomTree(subs, rng) // each finality subnet's members: one connected piece
+		// Finality subnets carry the vote flood: the tree gives connectivity, the group fill
+		// gives every member enough co-member links (~10-15) to form a real D=8 mesh.
+		g.randomTree(subs, rng)
+		g.groupFill(subs, finalityGroupDegree, rng)
 	}
 	g.fill(k, rng)
 	return g.adj
