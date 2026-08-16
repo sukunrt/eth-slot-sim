@@ -59,7 +59,10 @@ Layering, bottom-up. Each package has a doc comment worth reading; this is the m
    tests in `driver/*_fullrun_test.go`) and by `simnetrun` for sized comparisons.
 2. **Shadow**: `simctl run --config configs/<x>.yaml [--remote sukun@ethp2p]` builds
    `cmd/slot-sim-node`, generates `schedule.json` + Shadow topology, runs one process per
-   node under Shadow's virtual clock, then analyzes. See `run.md` for the remote workflow.
+   node under Shadow's virtual clock, then analyzes. A `--remote` run is nohup'd on the
+   remote and leaves two tarballs in `~/eth-slot-sim/runs/`: `<name>.tar.gz` (raw slog, the
+   durable artifact) and `<name>-parquet.tar.gz` (small; pull this one and run
+   `analysis/check_arrivals.py <run-dir> --parquet`).
 
 Both read the same `schedule.json`, so results are comparable by construction.
 
@@ -69,7 +72,7 @@ Both read the same `schedule.json`, so results are comparable by construction.
 go test ./...        # full Go suite (e2e full-runs included, ~10s)
 go vet ./...
 uv run pytest        # Python suite
-uv run simctl run --config configs/<x>.yaml   # Shadow run (see run.md for --remote)
+uv run simctl run --config configs/<x>.yaml   # Shadow run (add --remote sukun@ethp2p)
 go generate ./pb     # after editing .proto files
 ```
 
@@ -80,12 +83,7 @@ go generate ./pb     # after editing .proto files
 - Comment style is deliberately dense: invariants and "why", at the declaration site.
 - Feature phases are opt-in and layered: block-only → +columns → +attestations/aggregates →
   +sync → decoupled (which replaces attestation/sync emit). Mutual exclusion is enforced in
-  `driver.New` and `cmd/slot-sim-node/main.go` (see improvements.md item 2).
+  `driver.New` and `cmd/slot-sim-node/main.go`.
 
-## Where to read more
-
-- `improvements.md` — maintainability backlog + **the naming glossary** (spec ↔
-  schedule.json ↔ Go names for the same concepts; check it before renaming anything).
-- `run.md` — the remote Shadow run playbook.
-- `ladder-results.md` — run-ladder results. The per-phase implementation specs the code
-  comments cite (`*-spec.md`) were removed once implemented; see the repo history for them.
+The design/results markdowns (`*-spec.md`, `improvements.md`, `run.md`, `ladder-results.md`)
+were removed once their content was implemented or superseded; see the repo history.
