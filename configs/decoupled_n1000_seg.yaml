@@ -1,0 +1,60 @@
+# Decoupled consensus + validator segregation at 1k (rung 4 variant): 1000 nodes, ~100k validators (tiered skew, V
+# emergent ≈ 100·N), 10 finality subnets (~10k validators each), degree 80. k=10 AC
+# slots per finality slot; 20 AC slots = 2 finality slots of 120s. Same realism template
+# as decoupled_n4000.yaml (128 columns, custody floor 8, offset 2s + jitter 0.5s, spec
+# ac_vote_size/fs_aggregators 512/16). ~100k finality attestations per finality slot —
+# heavy; run with `simctl run --remote sukun@ethp2p`.
+topology:
+  num_nodes: 1000
+  degree: 80
+  type: random
+  seed: 42
+  super_node_fraction: 0.5 # the full-custody backbone is drawn from the supernodes
+
+gossipsub:
+  D: 8
+  Dlow: 6
+  Dhigh: 12
+
+attestation:
+  enabled: false           # OFF: this block only supplies the AC-vote deadline (attestation_due_ms)
+  validators: 100000       # ignored under tiered (V is emergent ≈ 100k)
+  committees: 1            # ignored under decoupled (no attestation committees)
+  committee_size: 8        # ignored under decoupled
+  attestation_due_ms: 4000 # the AC-vote deadline (reused; no new knob)
+
+data_columns:
+  enabled: true            # columns gate the AC vote (the "availability" chain)
+  num_columns: 128         # mainnet column universe; custody_floor 8 ⇒ sparse column subnets
+  blobs: 6
+  custody_floor: 8
+  full_custody_fraction: 0.5
+  column_backbone_floor: 3
+  verify_service_ms: 3
+  verify_parallelism_super: 16
+  verify_parallelism_regular: 4
+
+decoupled_consensus:
+  enabled: true
+  ac_vote_size: 512                      # spec default: VRF-selected validators voting on the AC each slot
+  ac_slots_per_finality_slot: 10         # k: finality slot = 120s
+  fs_subnets: 10                         # finality subnets, validator-partitioned (stable node receiver core)
+  fs_aggregators: 16                     # spec default: aggregator validators per subnet per finality slot (whole-set)
+  finality_slot_aggregation_fraction: 50 # % of the finality slot when aggregates publish
+  fc_vote_offset_ms: 1000                # offset into the AC slot for the round vote burst
+  validator_segregation: true            # per-AC-slot finality rounds: ~10k votes/slot vs ~100k at the boundary
+  round_aggregation_fraction: 67         # % of the AC slot when round aggregates publish
+
+validator_distribution:
+  type: tiered             # skewed hosting, tier defaults: supers log-normal mean 200 ⇒ V ≈ 100·N
+
+num_slots: 20
+slot_duration_seconds: 12
+block_size: 131072       # 128 KiB
+verify_delay_ms: 10
+offset_ms: 2000   # proposer publishes ~2s into the slot (mainnet-ish block arrival)
+jitter_ms: 500    # publish lands in [offset, offset+jitter) = [2.0s, 2.5s)
+startup_seconds: 180     # 1000 hosts at degree 80: extra dial + settle margin
+stop_time_minutes: 12    # 180 startup + 240 run + 30 drain = 450s, with margin
+log_level: warning       # 1000 hosts: keep Shadow's own log small
+seed: 1
