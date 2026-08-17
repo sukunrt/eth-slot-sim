@@ -85,5 +85,5 @@ go generate ./pb     # after editing .proto files
   +sync → decoupled (which replaces attestation/sync emit). Mutual exclusion is enforced in
   `driver.New` and `cmd/slot-sim-node/main.go`.
 
-The design/results markdowns (`*-spec.md`, `improvements.md`, `run.md`, `ladder-results.md`)
-were removed once their content was implemented or superseded; see the repo history.
+The design/results markdowns (`*-spec.md`, `improvements.md`, `run.md`) were removed once
+their content was implemented or superseded; see the repo history.

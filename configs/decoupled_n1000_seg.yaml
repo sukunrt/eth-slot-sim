@@ -1,4 +1,4 @@
-# Decoupled consensus + validator segregation at 1k (rung 4 variant): 1000 nodes, ~100k validators (tiered skew, V
+# Decoupled consensus + validator segregation at 1k: 1000 nodes, ~100k validators (tiered skew, V
 # emergent ≈ 100·N), 10 finality subnets (~10k validators each), degree 80. k=10 AC
 # slots per finality slot; 20 AC slots = 2 finality slots of 120s. Same realism template
 # as decoupled_n4000.yaml (128 columns, custody floor 8, offset 2s + jitter 0.5s, spec

@@ -1,4 +1,4 @@
-# Decoupled consensus run ladder, rung 6: 4000 nodes, ~400k validators (tiered skew, V
+# Decoupled consensus: 4000 nodes, ~400k validators (tiered skew, V
 # emergent ≈ 100·N), k=10 AC slots per finality slot, 40 finality subnets (the spec's
 # sizing for 4k nodes; ~100 nodes / ~10k validators per subnet), degree 80, 128 KiB
 # blocks. 20 AC slots = 2 finality slots of 120s. ~400k finality attestations per

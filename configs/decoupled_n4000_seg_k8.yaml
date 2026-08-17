@@ -1,5 +1,5 @@
 # Decoupled consensus at 4k: validator segregation with k=8 per-AC-slot rounds (~51k votes
-# per slot, V/8) over the CLASSIC gossipsub transport — the k5-partial rung's sibling for
+# per slot, V/8) over the CLASSIC gossipsub transport — the k5-partial config's sibling for
 # the round-size axis. 16 AC slots = 2 finality slots of 96s.
 # Run with `simctl run --remote sukun@ethp2p`.
 topology:

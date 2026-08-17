@@ -1,4 +1,4 @@
-# Decoupled consensus run ladder, rung 2: 100 nodes, ~10k validators (tiered skew, V
+# Decoupled consensus: 100 nodes, ~10k validators (tiered skew, V
 # emergent ≈ 100·N), 2 finality subnets. k=10 AC slots per finality slot; 20 AC slots =
 # 2 finality slots of 120s. Same realism template as decoupled_n4000.yaml (128 columns,
 # custody floor 8, offset 2s + jitter 0.5s, spec ac_vote_size/fs_aggregators 512/16).

@@ -253,7 +253,7 @@ func TestNodeUnsubscribe(t *testing.T) {
 // A multi-key host's burst must not serialize through its OWN verify queue: gossipsub
 // validates locally published messages too, and without a self-skip each Publish in an
 // emit loop blocks one batch cycle — a 738-key host trickled its finality attestations
-// out over 738 windows (the 37s tail in the n100 ladder run). A node never re-verifies
+// out over 738 windows (a 37s tail observed in an n100 run). A node never re-verifies
 // a signature it just produced, so own publishes bypass the hook; the receive side
 // still pays its batched cost.
 func TestPublishBurstNotSelfVerified(t *testing.T) {
