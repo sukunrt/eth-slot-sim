@@ -44,6 +44,12 @@ func ExecutionPayloadID(slot, origin int) MsgID {
 		node.Identity{Slot: slot, Subnet: -1, Attester: -1, Origin: origin}}
 }
 
+// PTCVoteID is the MsgID for the PTC vote by validator val, published by origin in slot on
+// the single global topic. The payload-present bool rides OnPublish's votedBlock slot.
+func PTCVoteID(slot, val, origin int) MsgID {
+	return MsgID{node.KindPTCVote, node.Identity{Slot: slot, Subnet: -1, Attester: val, Origin: origin}}
+}
+
 // AttestID is the MsgID for one attestation (validator attester on subnet, published by
 // origin) in slot.
 func AttestID(slot, subnet, attester, origin int) MsgID {
@@ -206,7 +212,13 @@ func (r *Recorder) FractionVotedACVote(slot int) float64 {
 	return r.fractionVoted(slot, node.KindACVote)
 }
 
-// fractionVoted is the shared core of FractionVotedBlock/FractionVotedHead/FractionVotedACVote: over
+// FractionVotedPTC is the ePBS payload-timeliness headline: over a slot's published PTC votes, the
+// fraction that saw the payload (and their custody columns) by the PTC deadline.
+func (r *Recorder) FractionVotedPTC(slot int) float64 {
+	return r.fractionVoted(slot, node.KindPTCVote)
+}
+
+// fractionVoted is the shared core of the FractionVoted* metrics above: over
 // a slot's published messages of the given kind, the fraction whose publish recorded a vote. 0 if none.
 func (r *Recorder) fractionVoted(slot int, kind node.Kind) float64 {
 	r.mu.Lock()

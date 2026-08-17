@@ -35,6 +35,7 @@ func TestPublishReceiveIdentityRoundTrip(t *testing.T) {
 			FinalityAggregateID(2, 7, 5), 5},
 		{"consensus block", validator.MakeConsensusBlock(3, 5, 64), ConsensusBlockID(3, 5), 5},
 		{"execution payload", validator.MakeExecutionPayload(3, 5, 64), ExecutionPayloadID(3, 5), 5},
+		{"ptc vote", validator.MakePTCVote(3, 42, 5, true), PTCVoteID(3, 42, 5), 5},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

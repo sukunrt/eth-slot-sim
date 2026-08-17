@@ -22,6 +22,7 @@ func TestKindValuesPinned(t *testing.T) {
 		KindFinalityAggregate: 9,
 		KindConsensusBlock:    10,
 		KindExecutionPayload:  11,
+		KindPTCVote:           12,
 	}
 	if len(pinned) != len(registry) {
 		t.Fatalf("registry has %d kinds, pinned table has %d", len(registry), len(pinned))

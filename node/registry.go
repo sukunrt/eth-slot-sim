@@ -35,6 +35,7 @@ const (
 	vcAC        verifyClass = "ac"        // availability votes
 	vcFCVote    verifyClass = "fcvote"    // finality votes
 	vcFCAgg     verifyClass = "fcagg"     // finality aggregates
+	vcPTC       verifyClass = "ptc"       // PTC votes
 )
 
 // descriptor is one message kind's registry entry: how its topic is matched, which verify
@@ -128,6 +129,11 @@ var registry = []descriptor{
 	{kind: KindExecutionPayload, topic: validator.ExecutionPayloadTopic, class: vcFixed,
 		decode: decodeAs(func(p *pb.ExecutionPayload) Identity {
 			return Identity{int(p.Slot), -1, -1, int(p.Origin)}
+		})},
+	// Global PTC flood, no subnets: Subnet -1, the voting validator in Attester (like AC votes).
+	{kind: KindPTCVote, topic: validator.PTCVoteTopic, class: vcPTC,
+		decode: decodeAs(func(v *pb.PTCVote) Identity {
+			return Identity{int(v.Slot), -1, int(v.Val), int(v.Origin)}
 		})},
 }
 

@@ -42,6 +42,7 @@ const (
 	KindFinalityAggregate Kind = 9
 	KindConsensusBlock    Kind = 10
 	KindExecutionPayload  Kind = 11
+	KindPTCVote           Kind = 12
 )
 
 // Received is the node's outward hand-off for one decoded message: the node
