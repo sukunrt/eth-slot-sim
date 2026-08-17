@@ -134,6 +134,11 @@ func main() {
 	}
 	// Decoupled consensus replaces attestations + sync (the AC vote stands in for the attestation).
 	attest, syncEmit := *attestations, *syncOn
+	// No schedule ⇒ block-only: -attestations/-sync default on but there are no duties to
+	// read, so force them off instead of indexing the zero view (which panics at slot 0).
+	if sched == nil {
+		attest, syncEmit = false, false
+	}
 	var decoupled *driver.DecoupledParams
 	if *fcSegregated && !*decoupledOn {
 		log.Fatal("-fc-segregated needs -decoupled")
