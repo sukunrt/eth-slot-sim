@@ -340,22 +340,30 @@ def _global_kind(
     return rep, ok
 
 
-def _ac_votes(con, schedule_data: dict) -> tuple[dict, bool]:
+def _ac_votes(
+    con,
+    schedule_data: dict,
+    kind: int = ca.AC_VOTE_KIND,
+    voters_key: str = "ac_voters",
+    label: str = "AC vote",
+    plural: str = "AC votes",
+    voted_key: str = "fraction_voted_block",
+) -> tuple[dict, bool]:
     """analyze_ac_votes in SQL: each scheduled (slot, val, origin) vote reaches every node
-    but its publisher; the -1 in example tuples is the unused subnet slot."""
-    kind = ca.AC_VOTE_KIND
+    but its publisher; the -1 in example tuples is the unused subnet slot. The kind/key
+    parameters retarget the same shape at the PTC vote (_ptc_votes)."""
     n = schedule_data["params"]["n"]
     voters = [
         (sp["slot"], r["val"], r["node"])
         for sp in schedule_data["slots"]
-        for r in sp.get("ac_voters") or []
+        for r in sp.get(voters_key) or []
     ]
-    _insert(con, "sched_ac", "slot BIGINT, val BIGINT, origin BIGINT", voters)
+    _insert(con, f"sched_k{kind}", "slot BIGINT, val BIGINT, origin BIGINT", voters)
     arrivals = _arr_count(con, kind)
     expected = len(voters) * (n - 1)
     n_voted = _val(
         con,
-        f"SELECT count(*) FROM sched_ac s JOIN publishes p ON p.kind = {kind} "
+        f"SELECT count(*) FROM sched_k{kind} s JOIN publishes p ON p.kind = {kind} "
         f"AND p.slot = s.slot AND p.attester = s.val AND p.origin = s.origin "
         f"AND p.voted_block",
     )
@@ -363,7 +371,7 @@ def _ac_votes(con, schedule_data: dict) -> tuple[dict, bool]:
     con.execute(
         f"""CREATE OR REPLACE TEMP TABLE miss_k{kind} AS
         SELECT r.node AS node, s.slot AS slot, -1 AS subnet, s.val AS val, s.origin AS origin
-        FROM sched_ac s CROSS JOIN nodes_n r
+        FROM sched_k{kind} s CROSS JOIN nodes_n r
         WHERE r.node != s.origin AND NOT EXISTS (
             SELECT 1 FROM arrivals a WHERE a.kind = {kind} AND a.node = r.node
             AND a.slot = s.slot AND a.attester = s.val AND a.origin = s.origin)"""
@@ -376,14 +384,23 @@ def _ac_votes(con, schedule_data: dict) -> tuple[dict, bool]:
     n_missing = _val(con, f"SELECT count(*) FROM miss_k{kind}")
     ok = not n_missing and not leaked_examples and not dups and arrivals == expected
     rep = _kind_report(
-        con, "AC vote", "AC votes", kind,
+        con, label, plural, kind,
         published=len(voters), arrivals=arrivals, expected=expected,
         missing_table=f"miss_k{kind}", leaked=len(leaked_examples),
         leaked_examples=leaked_examples[:20], duplicates=dups, ok=ok,
         delays_sql=_delays_sql(kind),
-        voted=("fraction_voted_block", fraction),
+        voted=(voted_key, fraction),
     )
     return rep, ok
+
+
+def _ptc_votes(con, schedule_data: dict) -> tuple[dict, bool]:
+    """analyze_ptc_votes in SQL: the AC-vote shape over ptc_voters; the publish bool
+    carries payload-present."""
+    return _ac_votes(
+        con, schedule_data, kind=ca.PTC_VOTE_KIND, voters_key="ptc_voters",
+        label="PTC vote", plural="PTC votes", voted_key="fraction_payload_present",
+    )
 
 
 def _finality_votes(con, schedule_data: dict) -> tuple[dict, bool]:
@@ -517,6 +534,13 @@ def build_report(run_dir: Path, parquet_dir: Path) -> dict:
         schedule_data = json.loads(schedule_path.read_text())
         n = schedule_data["params"]["n"]
         _insert(con, "nodes_n", "node BIGINT", [(i,) for i in range(n)])
+
+        # PTC votes (ePBS family; same relative position as the reference).
+        if schedule_data["slots"] and schedule_data["slots"][0].get("ptc_voters"):
+            rep, k_ok = _ptc_votes(con, schedule_data)
+            ok = ok and k_ok
+            kinds["ptc_votes"] = rep
+
         _insert(
             con, "att_members", "subnet BIGINT, node BIGINT",
             [(s, nd) for s, mem in enumerate(schedule_data["subnet_subscribers"]) for nd in mem],

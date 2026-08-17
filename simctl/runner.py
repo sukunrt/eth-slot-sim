@@ -628,6 +628,20 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
                 "simnet": _agg_summary(simnet_sc),
             }
 
+    # ePBS PTC votes: global coverage + the payload-present fraction (AttestResult shape;
+    # its fraction_voted_block field carries payload_present).
+    schedule_path = run_dir / "schedule.json"
+    if config.epbs.enabled and schedule_path.exists():
+        schedule_data = json.loads(schedule_path.read_text())
+        if schedule_data["slots"] and schedule_data["slots"][0].get("ptc_voters"):
+            shadow_pv = check_arrivals.analyze_ptc_votes(pubs, arrs, schedule_data)
+            simnet_pv = check_arrivals.analyze_ptc_votes_csv(csv_path, schedule_data)
+            comparison["ptc_votes"] = {
+                "expected": shadow_pv.expected,
+                "shadow": _att_summary(shadow_pv, voted_key="fraction_payload_present"),
+                "simnet": _att_summary(simnet_pv, voted_key="fraction_payload_present"),
+            }
+
     # Decoupled-consensus phase: global AC-vote coverage + fraction-voted-block (AttestResult shape),
     # per-subnet finality-vote coverage/no-leak (SyncMessageResult shape), and global finality-aggregate
     # coverage (AggregateResult shape). Mutually exclusive with attestation/sync above.
@@ -700,15 +714,19 @@ def _col_summary(res: check_arrivals.ColumnResult) -> dict[str, Any]:
     }
 
 
-def _att_summary(res: check_arrivals.AttestResult) -> dict[str, Any]:
-    """One backend's attestation result as a compare.json sub-dict."""
+def _att_summary(
+    res: check_arrivals.AttestResult, voted_key: str = "fraction_voted_block"
+) -> dict[str, Any]:
+    """One backend's attestation result as a compare.json sub-dict. voted_key renames the
+    vote fraction for the kinds whose publish bool means something else (PTC:
+    fraction_payload_present)."""
     return {
         "arrivals": res.arrivals,
         "expected": res.expected,
         "missing": len(res.missing),
         "leaked": len(res.leaked),
         "duplicates": len(res.duplicates),
-        "fraction_voted_block": res.fraction_voted_block,
+        voted_key: res.fraction_voted_block,
         "cdf_ms": check_arrivals.cdf(res.delays_ms),
     }
 

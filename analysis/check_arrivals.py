@@ -20,7 +20,10 @@ aggregator reaching every node but itself) — the AC/finality twins of aggregat
 
 ePBS (on by default) replaces the single block with two block-shaped kinds: consensus
 blocks (kind=10) and execution payloads (kind=11), both must reach every other node; the
-payload-lag metric is the per-(node, slot) gap between their first arrivals.
+payload-lag metric is the per-(node, slot) gap between their first arrivals. PTC votes
+(kind=12, global topic, one per scheduled PTC member reaching every node but its
+publisher) carry the payload-present bool — the headline is the fraction that saw the
+payload (and their custody columns) by the PTC deadline.
 
 Usage: python analysis/check_arrivals.py <run-dir> [--parquet [DIR]]
 
@@ -58,6 +61,7 @@ FINALITY_VOTE_KIND = 8
 FINALITY_AGGREGATE_KIND = 9
 CONSENSUS_BLOCK_KIND = 10
 EXECUTION_PAYLOAD_KIND = 11
+PTC_VOTE_KIND = 12
 
 # pub key: (kind, slot, subnet, attester, origin) -> (t_ns, voted_block)
 PubKey = tuple[int, int, int, int, int]
@@ -615,23 +619,29 @@ def _ac_vote_result(
 
 
 def analyze_ac_votes(
-    pubs: dict[PubKey, tuple[int, bool]], arrs: list[Arrival], schedule_data: dict
+    pubs: dict[PubKey, tuple[int, bool]],
+    arrs: list[Arrival],
+    schedule_data: dict,
+    kind: int = AC_VOTE_KIND,
+    voters_key: str = "ac_voters",
 ) -> AttestResult:
     """Cross-check AC-vote arrivals (Shadow slog) against the per-slot voter sets — the global-topic,
     N−1 coverage shape of an aggregate, but the publisher rides Origin (not Attester) and the vote
-    carries a voted-block bool. Each voter publishes one vote, identified by (slot, val, origin)."""
+    carries a voted-block bool. Each voter publishes one vote, identified by (slot, val, origin).
+    kind/voters_key retarget the same shape at the PTC vote (analyze_ptc_votes), whose publish bool
+    carries payload-present."""
     n = schedule_data["params"]["n"]
     published: dict[tuple[int, int, int], bool] = {}
     for sp in schedule_data["slots"]:
-        for r in sp.get("ac_voters") or []:
+        for r in sp.get(voters_key) or []:
             key = (sp["slot"], r["val"], r["node"])
-            published[key] = pubs.get((AC_VOTE_KIND, sp["slot"], -1, r["val"], r["node"]), (0, False))[1]
+            published[key] = pubs.get((kind, sp["slot"], -1, r["val"], r["node"]), (0, False))[1]
     counts: Counter = Counter()
     received: dict[tuple[int, int, int], set[int]] = {}
     delays_ms: list[float] = []
-    av_pubs = {(s, a, o): t for (k, s, _sub, a, o), (t, _v) in pubs.items() if k == AC_VOTE_KIND}
+    av_pubs = {(s, a, o): t for (k, s, _sub, a, o), (t, _v) in pubs.items() if k == kind}
     for node, k, slot, _sub, val, origin, t in arrs:
-        if k != AC_VOTE_KIND:
+        if k != kind:
             continue
         counts[(node, slot, val, origin)] += 1
         received.setdefault((slot, val, origin), set()).add(node)
@@ -640,14 +650,27 @@ def analyze_ac_votes(
     return _ac_vote_result(published, n, counts, received, delays_ms)
 
 
-def analyze_ac_votes_csv(path: Path, schedule_data: dict) -> AttestResult:
+def analyze_ptc_votes(
+    pubs: dict[PubKey, tuple[int, bool]], arrs: list[Arrival], schedule_data: dict
+) -> AttestResult:
+    """PTC-vote coverage (ePBS): the AC-vote shape over the per-slot ptc_voters draw; the
+    fraction_voted_block field carries the payload-present fraction."""
+    return analyze_ac_votes(pubs, arrs, schedule_data, kind=PTC_VOTE_KIND, voters_key="ptc_voters")
+
+
+def analyze_ac_votes_csv(
+    path: Path,
+    schedule_data: dict,
+    kind: int = AC_VOTE_KIND,
+    voters_key: str = "ac_voters",
+) -> AttestResult:
     """AC-vote coverage for the simnet backend. The CSV is keyed by (slot, attester=val) with no
     origin column, so each vote's publisher comes from schedule.json's ac_voters draw; the voted-block
-    bool rides the CSV's voted_block column."""
+    bool rides the CSV's voted_block column. kind/voters_key retarget it at the PTC vote."""
     n = schedule_data["params"]["n"]
     origin_of: dict[tuple[int, int], int] = {}  # (slot, val) -> publishing node
     for sp in schedule_data["slots"]:
-        for r in sp.get("ac_voters") or []:
+        for r in sp.get(voters_key) or []:
             origin_of[(sp["slot"], r["val"])] = r["node"]
 
     counts: Counter = Counter()
@@ -656,7 +679,7 @@ def analyze_ac_votes_csv(path: Path, schedule_data: dict) -> AttestResult:
     delays_ms: list[float] = []
     with open(path, newline="") as f:
         for r in csv.DictReader(f):
-            if int(r.get("kind", BLOCK_KIND)) != AC_VOTE_KIND:
+            if int(r.get("kind", BLOCK_KIND)) != kind:
                 continue
             slot, val, node = int(r["slot"]), int(r["attester"]), int(r["node"])
             origin = origin_of.get((slot, val), -1)
@@ -667,6 +690,11 @@ def analyze_ac_votes_csv(path: Path, schedule_data: dict) -> AttestResult:
 
     published = {(s, val, o): voted.get((s, val, o), False) for (s, val), o in origin_of.items()}
     return _ac_vote_result(published, n, counts, received, delays_ms)
+
+
+def analyze_ptc_votes_csv(path: Path, schedule_data: dict) -> AttestResult:
+    """PTC-vote coverage for the simnet backend (see analyze_ptc_votes)."""
+    return analyze_ac_votes_csv(path, schedule_data, kind=PTC_VOTE_KIND, voters_key="ptc_voters")
 
 
 def _finality_receivers(
@@ -1265,6 +1293,17 @@ def build_report(run_dir: Path) -> dict:
     schedule_path = run_dir / "schedule.json"
     if schedule_path.exists():
         schedule_data = json.loads(schedule_path.read_text())
+
+        # PTC votes (ePBS family; present when the schedule draws ptc_voters): the AC-vote
+        # coverage shape, headline = the payload-present fraction over the scheduled votes.
+        if schedule_data["slots"] and schedule_data["slots"][0].get("ptc_voters"):
+            pvres = analyze_ptc_votes(pubs, arrs, schedule_data)
+            ok = ok and pvres.ok
+            kinds["ptc_votes"] = _kind_report(
+                "PTC vote", "PTC votes", pvres, pubs, arrs, PTC_VOTE_KIND,
+                voted=("fraction_payload_present", pvres.fraction_voted_block),
+            )
+
         subscribers = {sub: set(mem) for sub, mem in enumerate(schedule_data["subnet_subscribers"])}
         ares = analyze_attestations(pubs, arrs, subscribers)
         ok = ok and ares.ok

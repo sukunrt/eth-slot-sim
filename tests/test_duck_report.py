@@ -257,3 +257,49 @@ def test_equivalence_decoupled_kinds(tmp_path, capsys):
     assert kinds["finality_aggregates"]["missing"] == 3
     assert raw["validators"]["v"] == 4
     assert raw["proposer_guard"]["ok"]
+
+
+def _epbs_ptc_schedule():
+    """n=4, one slot: an ePBS run with a PTC draw (ptc_voters gates the section; no
+    decoupled/finality membership — PTC rides ePBS, not decoupled)."""
+    return {
+        "params": {"n": 4, "v": 4, "ptc_size": 3},
+        "subnet_subscribers": [],
+        "slots": [
+            {"slot": 0, "proposer": 0, "committees": [], "subnet_of": [],
+             "ptc_voters": [{"node": 1, "val": 1, "subnet": 0, "position": 0},
+                            {"node": 2, "val": 2, "subnet": 0, "position": 1},
+                            {"node": 3, "val": 3, "subnet": 0, "position": 2}]},
+        ],
+    }
+
+
+def test_equivalence_ptc_votes(tmp_path, capsys):
+    """PTC votes (kind 12): AC-vote coverage shape over ptc_voters with the
+    payload-present headline — full coverage for val 1, a missing receiver + duplicate for
+    val 2, and val 3 scheduled-but-unpublished (counts false in the fraction)."""
+    lines = [
+        # ePBS block family: consensus block + payload, both complete
+        _pub(10, 0, -1, -1, 0, 0),
+        *[_arr(i, 10, 0, -1, -1, 0, 300 + i) for i in (1, 2, 3)],
+        _pub(11, 0, -1, -1, 0, 700),
+        *[_arr(i, 11, 0, -1, -1, 0, 1100 + i) for i in (1, 2, 3)],
+        # PTC votes at the 9s deadline: val 1 present + complete; val 2 not-present,
+        # misses node 3, duplicated at node 0; val 3 never publishes
+        _pub(12, 0, -1, 1, 1, 9000, voted=True),
+        *[_arr(i, 12, 0, -1, 1, 1, 9200 + i) for i in (0, 2, 3)],
+        _pub(12, 0, -1, 2, 2, 9000),
+        _arr(0, 12, 0, -1, 2, 2, 9210),
+        _arr(0, 12, 0, -1, 2, 2, 9220),
+        _arr(1, 12, 0, -1, 2, 2, 9230),
+    ]
+    run = _write_run(tmp_path, 4, lines, schedule=_epbs_ptc_schedule(), supernodes={0})
+    raw = _assert_equivalent(run, capsys)
+    kinds = raw["kinds"]
+    assert set(kinds) == {"blocks", "consensus_blocks", "execution_payloads", "ptc_votes",
+                          "attestations"}
+    ptc = kinds["ptc_votes"]
+    assert ptc["published"] == 3 and ptc["expected"] == 9
+    assert ptc["missing"] == 4 and ptc["duplicates"] == 1  # val 3's 3 receivers + val 2's one
+    assert ptc["fraction_payload_present"] == 1 / 3
+    assert raw["proposer_guard"]["ok"]

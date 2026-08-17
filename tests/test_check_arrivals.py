@@ -765,6 +765,74 @@ def test_analyze_ac_votes_csv_detects_missing_and_leak(tmp_path):
     assert not res.ok
 
 
+# --- PTC votes (kind=12, ePBS) --------------------------------------------------------
+#
+# The AC-vote shape retargeted (analyze_ptc_votes delegates to analyze_ac_votes with
+# kind=12 / ptc_voters), so the shared machinery is covered by the AC tests above; these
+# pin the retargeting itself — kind, schedule key, and the payload-present headline —
+# on both the slog and CSV paths.
+
+
+def _ptcpub(slot, val, origin, t_ms, present):
+    return (
+        f'{{"msg":"publish","kind":12,"slot":{slot},"subnet":-1,"attester":{val},'
+        f'"origin":{origin},"voted_block":{"true" if present else "false"},"t_ns":{t_ms * MS}}}'
+    )
+
+
+def _ptcarr(node, slot, val, origin, t_ms):
+    return (
+        f'{{"msg":"arrival","node":{node},"kind":12,"slot":{slot},"subnet":-1,'
+        f'"attester":{val},"origin":{origin},"t_ns":{t_ms * MS}}}'
+    )
+
+
+def _epbs_ptc(n, ptc_voters):
+    # ptc_voters: list of (val, node) for slot 0.
+    return {
+        "params": {"n": n, "v": n, "ptc_size": len(ptc_voters)},
+        "subnet_subscribers": [],
+        "slots": [{
+            "slot": 0, "committees": [], "subnet_of": [], "proposer": 0,
+            "ptc_voters": [{"node": nd, "val": val, "subnet": 0, "position": i}
+                           for i, (val, nd) in enumerate(ptc_voters)],
+        }],
+    }
+
+
+def test_ptc_vote_coverage_and_payload_present_fraction():
+    # Two of three members saw the payload (+ columns) by the deadline; full N−1 coverage.
+    voters = [(0, 0), (1, 1), (2, 2)]
+    data = _epbs_ptc(4, voters)
+    lines = [_ptcpub(0, val, nd, 100, val != 2) for val, nd in voters] + [
+        _ptcarr(node, 0, val, nd, 300)
+        for val, nd in voters
+        for node in set(range(4)) - {nd}
+    ]
+    pubs, arrs = ca.parse_events(lines)
+    res = ca.analyze_ptc_votes(pubs, arrs, data)
+    assert res.expected == 9 and res.arrivals == 9  # 3 members × (4−1)
+    assert res.missing == [] and res.leaked == [] and res.duplicates == []
+    assert res.published == 3 and res.ok
+    assert abs(res.fraction_voted_block - 2 / 3) < 1e-9
+
+
+def test_analyze_ptc_votes_csv(tmp_path):
+    # simnet CSV path (kind=12; origin recovered from the schedule's ptc_voters draw).
+    voters = [(0, 0), (1, 1)]
+    data = _epbs_ptc(4, voters)
+    csv_path = tmp_path / "simnet_arrivals.csv"
+    rows = ["node,slot,kind,subnet,attester,delay_ms,voted_block"]
+    for val, nd in voters:
+        for node in sorted(set(range(4)) - {nd}):
+            rows.append(f"{node},0,12,-1,{val},90,{'true' if val == 0 else 'false'}")
+    csv_path.write_text("\n".join(rows) + "\n")
+    res = ca.analyze_ptc_votes_csv(csv_path, data)
+    assert res.expected == 6 and res.arrivals == 6
+    assert res.missing == [] and res.leaked == [] and res.duplicates == []
+    assert res.ok and res.fraction_voted_block == 0.5
+
+
 # --- finality votes (kind=8, per finality-subnet, distinct per (subnet, val)) ----------
 #
 # Each node emits ONE finality vote per validator it hosts, on THAT VALIDATOR'S drawn subnet
