@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package epbs;
+
+option go_package = "github.com/ethp2p/slot-sim/pb";
+
+// ConsensusBlock is the ePBS proposer message (Gloas beacon_block): the small consensus
+// block carrying the builder's bid, no execution payload. payload carries random filler
+// sized so the marshaled message hits the target byte count.
+message ConsensusBlock {
+  uint32 slot    = 1;
+  uint32 origin  = 2; // publishing node number (the proposer)
+  bytes  payload = 3; // filler sized so the marshaled ConsensusBlock == target
+}
+
+// ExecutionPayload is the ePBS builder reveal (Gloas execution_payload topic,
+// SignedExecutionPayloadEnvelope): the big message, published 0.5-1s after the
+// consensus block by the same node (the proposer plays the builder).
+message ExecutionPayload {
+  uint32 slot    = 1;
+  uint32 origin  = 2; // publishing node number (proposer-as-builder)
+  bytes  payload = 3; // filler sized so the marshaled ExecutionPayload == target
+}
