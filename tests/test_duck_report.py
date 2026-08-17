@@ -70,6 +70,43 @@ def test_equivalence_block_only(tmp_path, capsys):
     assert raw["result"] == "FAIL"
 
 
+def test_equivalence_epbs_kinds(tmp_path, capsys):
+    """ePBS: consensus blocks + execution payloads are block-shaped kinds; payload lag is
+    the per-(node, slot) gap between their first arrivals — duplicates must not skew it."""
+    lines = [
+        # consensus blocks: slot 0 complete, slot 1 misses node 2
+        _pub(10, 0, -1, -1, 0, 0),
+        _arr(1, 10, 0, -1, -1, 0, 300),
+        _arr(2, 10, 0, -1, -1, 0, 400),
+        _pub(10, 1, -1, -1, 0, 12_000),
+        _arr(1, 10, 1, -1, -1, 0, 12_300),
+        # payloads ~700ms after the block instant; node 1 slot 0 duplicated (lag uses the
+        # FIRST copy); node 2's slot-1 payload has no consensus block there → no lag row
+        _pub(11, 0, -1, -1, 0, 700),
+        _arr(1, 11, 0, -1, -1, 0, 1100),
+        _arr(1, 11, 0, -1, -1, 0, 1200),
+        _arr(2, 11, 0, -1, -1, 0, 1300),
+        _pub(11, 1, -1, -1, 0, 12_700),
+        _arr(1, 11, 1, -1, -1, 0, 13_200),
+        _arr(2, 11, 1, -1, -1, 0, 13_300),
+        # a legacy block publish alongside (mixed run): keeps the blocks section non-zero
+        _pub(1, 0, -1, -1, 0, 0),
+        _arr(1, 1, 0, -1, -1, 0, 500),
+        _arr(2, 1, 0, -1, -1, 0, 600),
+    ]
+    raw = _assert_equivalent(_write_run(tmp_path, 3, lines), capsys)
+    kinds = raw["kinds"]
+    assert set(kinds) == {"blocks", "consensus_blocks", "execution_payloads"}
+    assert kinds["consensus_blocks"]["missing"] == 1
+    assert kinds["execution_payloads"]["missing"] == 0
+    assert kinds["execution_payloads"]["duplicates"] == 1
+    # lags: node1/slot0 = 1100-300, node2/slot0 = 1300-400, node1/slot1 = 13200-12300
+    # → sorted [800, 900, 900]; nearest-rank p50 = ceil(0.5·3) = rank 2 = 900
+    assert kinds["execution_payloads"]["payload_lag_ms"] == {
+        "count": 3, "p50": 900.0, "p90": 900.0, "p99": 900.0, "p100": 900.0,
+    }
+
+
 def _classic_schedule():
     """n=5, two slots: attestation subnets, aggregate + sync-contribution draws, columns,
     sync members. The slot-1 aggregate/contribution draws get no events at all, so their

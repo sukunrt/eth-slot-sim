@@ -212,9 +212,10 @@ def _voted_fraction(con, kind: int) -> float:
     return v / n if n else 0.0
 
 
-def _blocks(con, node_count: int) -> dict:
-    """analyze() in SQL: every node != origin receives each published block once."""
-    kind = ca.BLOCK_KIND
+def _blocks(con, node_count: int, kind: int = ca.BLOCK_KIND,
+            label: str = "block", plural: str = "blocks") -> dict:
+    """analyze() in SQL, for any block-shaped kind (blocks, ePBS consensus blocks /
+    execution payloads): every node != origin receives each published message once."""
     n_pubs = _pub_count(con, kind)
     arrivals = _arr_count(con, kind)
     expected = n_pubs * (node_count - 1)
@@ -231,11 +232,25 @@ def _blocks(con, node_count: int) -> dict:
     n_missing = _val(con, f"SELECT count(*) FROM miss_k{kind}")
     ok = not n_missing and not dups and arrivals == expected
     return _kind_report(
-        con, "block", "blocks", kind,
+        con, label, plural, kind,
         published=n_pubs, arrivals=arrivals, expected=expected,
         missing_table=f"miss_k{kind}", leaked=0, leaked_examples=[],
         duplicates=dups, ok=ok, delays_sql=_delays_sql(kind),
     )
+
+
+def _payload_lag_cdf(con) -> dict:
+    """payload_lag in SQL: per (node, slot), first execution-payload arrival minus first
+    consensus-block arrival, over the nodes that received both."""
+    lag_sql = (
+        f"WITH cb AS (SELECT node, slot, min(t_ns) AS t FROM arrivals "
+        f"WHERE kind = {ca.CONSENSUS_BLOCK_KIND} GROUP BY ALL), "
+        f"ep AS (SELECT node, slot, min(t_ns) AS t FROM arrivals "
+        f"WHERE kind = {ca.EXECUTION_PAYLOAD_KIND} GROUP BY ALL) "
+        f"SELECT (ep.t - cb.t) / 1e6 AS delay_ms FROM ep JOIN cb USING (node, slot)"
+    )
+    cdf, _grid = _delay_stats(con, lag_sql)
+    return cdf
 
 
 def _membership_kind(
@@ -478,6 +493,24 @@ def build_report(run_dir: Path, parquet_dir: Path) -> dict:
     blocks = _blocks(con, len(node_nums))
     ok = blocks["ok"]
     kinds["blocks"] = blocks
+
+    # ePBS: both halves are block-shaped; the payload-lag headline mirrors the reference.
+    if _pub_count(con, ca.CONSENSUS_BLOCK_KIND):
+        rep = _blocks(con, len(node_nums), ca.CONSENSUS_BLOCK_KIND,
+                      "consensus block", "consensus blocks")
+        ok = ok and rep["ok"]
+        kinds["consensus_blocks"] = rep
+        rep = _blocks(con, len(node_nums), ca.EXECUTION_PAYLOAD_KIND,
+                      "execution payload", "execution payloads")
+        ok = ok and rep["ok"]
+        kinds["execution_payloads"] = rep
+        lag_cdf = _payload_lag_cdf(con)
+        rep["payload_lag_ms"] = lag_cdf
+        if lag_cdf["count"]:
+            print(
+                f"  payload lag CDF (ms): p50={lag_cdf['p50']:.1f} p90={lag_cdf['p90']:.1f} "
+                f"p99={lag_cdf['p99']:.1f} p100={lag_cdf['p100']:.1f}"
+            )
 
     schedule_path = run_dir / "schedule.json"
     if schedule_path.exists():

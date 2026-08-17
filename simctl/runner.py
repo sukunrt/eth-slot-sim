@@ -538,6 +538,29 @@ def run_comparison(config: SimConfig, output_dir: Path) -> dict[str, Any]:
         },
     }
 
+    # ePBS: both halves are block-shaped, so the block analyzer covers them per kind (the
+    # legacy blocks section above is all-zero when epbs is on).
+    if config.epbs.enabled:
+        for name, kind in (
+            ("consensus_blocks", check_arrivals.CONSENSUS_BLOCK_KIND),
+            ("execution_payloads", check_arrivals.EXECUTION_PAYLOAD_KIND),
+        ):
+            sres = check_arrivals.analyze(pubs, arrs, node_nums, kind=kind)
+            sim_delays = check_arrivals.delays_from_csv(csv_path, kind=kind)
+            comparison[name] = {
+                "expected_arrivals": sres.expected,
+                "shadow": {
+                    "arrivals": sres.arrivals,
+                    "missing": len(sres.missing),
+                    "duplicates": len(sres.duplicates),
+                    "cdf_ms": check_arrivals.cdf(sres.delays_ms),
+                },
+                "simnet": {
+                    "arrivals": len(sim_delays),
+                    "cdf_ms": check_arrivals.cdf(sim_delays),
+                },
+            }
+
     # Attestation phase: report both backends' coverage/no-leak + CDF. The simnet check
     # against schedule.json is the only automated coverage test of the real topology.json
     # graph (the Go suites only exercise the in-process discv5Graph). Skipped when

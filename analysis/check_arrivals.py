@@ -18,6 +18,10 @@ finality votes (kind=8, per finality-subnet, one per hosted validator reaching t
 subnet members); and finality aggregates (kind=9, global topic, one distinct aggregate per
 aggregator reaching every node but itself) — the AC/finality twins of aggregates/sync.
 
+ePBS (on by default) replaces the single block with two block-shaped kinds: consensus
+blocks (kind=10) and execution payloads (kind=11), both must reach every other node; the
+payload-lag metric is the per-(node, slot) gap between their first arrivals.
+
 Usage: python analysis/check_arrivals.py <run-dir> [--parquet [DIR]]
 
 --parquet switches to the DuckDB fast path over the parquet event tables written by
@@ -52,6 +56,8 @@ SYNC_CONTRIBUTION_KIND = 6
 AC_VOTE_KIND = 7
 FINALITY_VOTE_KIND = 8
 FINALITY_AGGREGATE_KIND = 9
+CONSENSUS_BLOCK_KIND = 10
+EXECUTION_PAYLOAD_KIND = 11
 
 # pub key: (kind, slot, subnet, attester, origin) -> (t_ns, voted_block)
 PubKey = tuple[int, int, int, int, int]
@@ -97,11 +103,16 @@ class Result:
         return not self.missing and not self.duplicates and self.arrivals == self.expected
 
 
-def analyze(pubs: dict[PubKey, tuple[int, bool]], arrs: list[Arrival], node_nums: set[int]) -> Result:
-    """Cross-check block arrivals against publishes: every node != origin should
-    receive each published block exactly once."""
-    block_pubs = {(s, o): t for (k, s, _sub, _a, o), (t, _v) in pubs.items() if k == BLOCK_KIND}
-    block_arrs = [(n, s, o, t) for (n, k, s, _sub, _a, o, t) in arrs if k == BLOCK_KIND]
+def analyze(
+    pubs: dict[PubKey, tuple[int, bool]],
+    arrs: list[Arrival],
+    node_nums: set[int],
+    kind: int = BLOCK_KIND,
+) -> Result:
+    """Cross-check a block-shaped kind (blocks, ePBS consensus blocks / execution payloads)
+    against publishes: every node != origin should receive each published message once."""
+    block_pubs = {(s, o): t for (k, s, _sub, _a, o), (t, _v) in pubs.items() if k == kind}
+    block_arrs = [(n, s, o, t) for (n, k, s, _sub, _a, o, t) in arrs if k == kind]
 
     counts = Counter((n, s, o) for n, s, o, _ in block_arrs)
     received = set(counts)
@@ -119,6 +130,23 @@ def analyze(pubs: dict[PubKey, tuple[int, bool]], arrs: list[Arrival], node_nums
     )
     expected = len(block_pubs) * (len(node_nums) - 1)
     return Result(len(block_arrs), expected, missing, duplicates, delays_ms)
+
+
+def payload_lag(arrs: list[Arrival]) -> list[float]:
+    """ePBS headline metric: per (node, slot), the extra wait the payload costs — first
+    execution-payload arrival minus first consensus-block arrival, in ms, over the nodes
+    that received both. Sorted; empty when the run is not ePBS."""
+    first: dict[tuple[int, int, int], int] = {}  # (kind, node, slot) -> min t_ns
+    for n, k, s, _sub, _a, _o, t in arrs:
+        if k in (CONSENSUS_BLOCK_KIND, EXECUTION_PAYLOAD_KIND):
+            key = (k, n, s)
+            if key not in first or t < first[key]:
+                first[key] = t
+    return sorted(
+        (t - first[(CONSENSUS_BLOCK_KIND, n, s)]) / 1e6
+        for (k, n, s), t in first.items()
+        if k == EXECUTION_PAYLOAD_KIND and (CONSENSUS_BLOCK_KIND, n, s) in first
+    )
 
 
 @dataclass
@@ -1206,6 +1234,33 @@ def build_report(run_dir: Path) -> dict:
     kinds["blocks"] = _kind_report(
         "block", "blocks", res, pubs, arrs, BLOCK_KIND, published=n_blocks
     )
+
+    # ePBS (present when any consensus block was published): both halves are block-shaped
+    # (every node != origin receives once), plus the payload-lag headline — the extra wait
+    # the payload reveal costs each node beyond its consensus-block arrival.
+    n_cb = sum(1 for k, *_ in pubs if k == CONSENSUS_BLOCK_KIND)
+    if n_cb:
+        cres = analyze(pubs, arrs, node_nums, kind=CONSENSUS_BLOCK_KIND)
+        ok = ok and cres.ok
+        kinds["consensus_blocks"] = _kind_report(
+            "consensus block", "consensus blocks", cres, pubs, arrs,
+            CONSENSUS_BLOCK_KIND, published=n_cb,
+        )
+        pres = analyze(pubs, arrs, node_nums, kind=EXECUTION_PAYLOAD_KIND)
+        ok = ok and pres.ok
+        n_ep = sum(1 for k, *_ in pubs if k == EXECUTION_PAYLOAD_KIND)
+        kinds["execution_payloads"] = _kind_report(
+            "execution payload", "execution payloads", pres, pubs, arrs,
+            EXECUTION_PAYLOAD_KIND, published=n_ep,
+        )
+        lag = payload_lag(arrs)
+        lag_cdf = cdf(lag)
+        kinds["execution_payloads"]["payload_lag_ms"] = lag_cdf
+        if lag:
+            print(
+                f"  payload lag CDF (ms): p50={lag_cdf['p50']:.1f} p90={lag_cdf['p90']:.1f} "
+                f"p99={lag_cdf['p99']:.1f} p100={lag_cdf['p100']:.1f}"
+            )
 
     schedule_path = run_dir / "schedule.json"
     if schedule_path.exists():
