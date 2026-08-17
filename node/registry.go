@@ -119,6 +119,16 @@ var registry = []descriptor{
 		decode: decodeAs(func(a *pb.FinalityAggregate) Identity {
 			return Identity{int(a.FinalitySlot), int(a.Subnet), int(a.Origin), -1}
 		})},
+	// The ePBS pair splits the block: both carry the block's identity policy and its fixed
+	// per-hop verify delay (the payload's heavier check still sleeps once per hop).
+	{kind: KindConsensusBlock, topic: validator.ConsensusBlockTopic, class: vcFixed,
+		decode: decodeAs(func(b *pb.ConsensusBlock) Identity {
+			return Identity{int(b.Slot), -1, -1, int(b.Origin)}
+		})},
+	{kind: KindExecutionPayload, topic: validator.ExecutionPayloadTopic, class: vcFixed,
+		decode: decodeAs(func(p *pb.ExecutionPayload) Identity {
+			return Identity{int(p.Slot), -1, -1, int(p.Origin)}
+		})},
 }
 
 var exactTopics, prefixTopics = buildLookups(registry)

@@ -40,6 +40,8 @@ const (
 	KindACVote            Kind = 7
 	KindFinalityVote      Kind = 8
 	KindFinalityAggregate Kind = 9
+	KindConsensusBlock    Kind = 10
+	KindExecutionPayload  Kind = 11
 )
 
 // Received is the node's outward hand-off for one decoded message: the node
@@ -191,8 +193,17 @@ func (n *Node) JoinTopics(ctx context.Context) error {
 		n.wg.Go(func() { n.partial.run(n.rctx, n.ps) })
 	}
 
-	// The block topic: Join + Subscribe with the fixed verify hook, as Phase 1.
-	return n.Subscribe(validator.BlockTopic)
+	// The block-family global topics: Join + Subscribe with the fixed verify hook. All three
+	// are always joined — the node is phase-ignorant, and an idle mesh carries no traffic
+	// (legacy runs publish only the Block, ePBS runs only the consensus block + payload).
+	for _, topic := range []string{
+		validator.BlockTopic, validator.ConsensusBlockTopic, validator.ExecutionPayloadTopic,
+	} {
+		if err := n.Subscribe(topic); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Join makes the node a publisher on topic without joining its mesh (fan-out

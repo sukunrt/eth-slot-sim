@@ -31,6 +31,19 @@ func BlockID(slot, origin int) MsgID {
 	return MsgID{node.KindBlock, node.Identity{Slot: slot, Subnet: -1, Attester: -1, Origin: origin}}
 }
 
+// ConsensusBlockID is the MsgID for the ePBS consensus block published by origin in slot.
+func ConsensusBlockID(slot, origin int) MsgID {
+	return MsgID{node.KindConsensusBlock,
+		node.Identity{Slot: slot, Subnet: -1, Attester: -1, Origin: origin}}
+}
+
+// ExecutionPayloadID is the MsgID for the ePBS payload reveal published by origin
+// (the proposer-as-builder) in slot.
+func ExecutionPayloadID(slot, origin int) MsgID {
+	return MsgID{node.KindExecutionPayload,
+		node.Identity{Slot: slot, Subnet: -1, Attester: -1, Origin: origin}}
+}
+
 // AttestID is the MsgID for one attestation (validator attester on subnet, published by
 // origin) in slot.
 func AttestID(slot, subnet, attester, origin int) MsgID {
