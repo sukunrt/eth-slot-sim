@@ -178,6 +178,18 @@ def _host_args(
         f"-startup={config.startup_seconds}s",
         f"-rpc-log-node={config.rpc_log_node}",
     ]
+    # Always passed explicitly (the Go flag also defaults to true): -block-size sizes the
+    # payload, the big message.
+    if config.epbs.enabled:
+        e = config.epbs
+        args += [
+            "-epbs=true",
+            f"-consensus-block-size={e.consensus_block_size}",
+            f"-payload-offset={e.payload_offset_ms}ms",
+            f"-payload-jitter={e.payload_jitter_ms}ms",
+        ]
+    else:
+        args.append("-epbs=false")
     if schedule_path:
         # Always passed (absolute: a host's cwd is its own data dir). It carries the proposer
         # schedule, which applies whether or not attestations are on; -attestations alone gates
@@ -308,6 +320,13 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
         "dhi": config.gossipsub.Dhigh,
         "seed": config.seed,
     }
+    if config.epbs.enabled:
+        params.update(
+            epbs=True,
+            consensus_block_size=config.epbs.consensus_block_size,
+            payload_offset_ms=config.epbs.payload_offset_ms,
+            payload_jitter_ms=config.epbs.payload_jitter_ms,
+        )
     if config.attestation is not None:
         a = config.attestation
         params.update(

@@ -148,6 +148,22 @@ class DecoupledConsensusConfig(BaseModel):
     round_aggregation_fraction: int = 67  # % of the AC slot when round aggregates publish
 
 
+class EPBSConfig(BaseModel):
+    """ePBS two-phase block send (Gloas/EIP-7732), ON by default. The proposer plays the
+    builder: it publishes a small consensus block at the block instant and the execution
+    payload — sized by the top-level ``block_size`` — plus the column burst 0.5-1 s later
+    (``payload_offset_ms`` + U(0, ``payload_jitter_ms``)). Votes (attestation / AC) gate on
+    the consensus block alone; the column gate is off. Composes with every phase. Disable
+    with ``epbs: {enabled: false}`` to get the legacy single Block."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    consensus_block_size: int = 2048  # bytes: the bid-only Gloas beacon block
+    payload_offset_ms: int = 500  # builder reveal delay after the block instant
+    payload_jitter_ms: int = 500  # reveal lands in [offset, offset+jitter)
+
+
 class RegularTierConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -190,6 +206,8 @@ class SimConfig(BaseModel):
     sync: SyncConfig | None = None  # present+enabled ⇒ run the sync-committee phase
     # present+enabled ⇒ run decoupled consensus (replaces attestations + sync)
     decoupled_consensus: DecoupledConsensusConfig | None = None
+    # ePBS two-phase block send, ON by default (see EPBSConfig)
+    epbs: EPBSConfig = Field(default_factory=EPBSConfig)
     # absent or type=uniform ⇒ validator v on node v % N (the status quo)
     validator_distribution: ValidatorDistributionConfig | None = None
     num_slots: int = 5

@@ -76,6 +76,12 @@ func main() {
 		seed        = flag.Uint64("seed", 1, "validator rng seed (combined with node-num)")
 		startup     = flag.Duration("startup", 60*time.Second, "bring-up window before slot 0")
 
+		// ePBS two-phase block send (on by default; -block-size sizes the payload, the big message).
+		epbsOn             = flag.Bool("epbs", true, "ePBS: consensus block at the block instant, execution payload (+ columns) 0.5-1s later; votes gate on the consensus block alone")
+		consensusBlockSize = flag.Int("consensus-block-size", 2048, "ePBS consensus-block size in bytes")
+		payloadOffset      = flag.Duration("payload-offset", 500*time.Millisecond, "ePBS payload publish delay after the block instant")
+		payloadJitter      = flag.Duration("payload-jitter", 500*time.Millisecond, "ePBS payload publish jitter: offset + rand(0,jitter)")
+
 		schedulePath   = flag.String("schedule", "", "path to schedule.json (empty → block-only)")
 		attestations   = flag.Bool("attestations", true, "emit attestations (false → block-only; committee still sets the proposer schedule)")
 		syncOn         = flag.Bool("sync", false, "emit sync-committee messages + contributions (members only; needs schedule.json; reuses -att-due/-agg-due)")
@@ -192,12 +198,17 @@ func main() {
 	default:
 		log.Fatalf("-transport=%q, want classic or partial", *transport)
 	}
+	var epbs *driver.EPBSParams
+	if *epbsOn {
+		epbs = &driver.EPBSParams{ConsensusBlockSize: *consensusBlockSize,
+			PayloadOffset: *payloadOffset, PayloadJitter: *payloadJitter}
+	}
 	peers := parseIntList(*peerNumsStr)
 	runner := driver.NewRunner(nd, view, peers, tracer, driver.RunnerConfig{
 		Attest: attest, Sync: syncEmit,
 		NumNodes: *numNodes, BlockSize: *blockSize, Offset: *offset, Jitter: *jitter,
 		SlotDuration: *slotDur, AttestationDue: *attDue, AggregateDue: *aggDue, Prep: *prep,
-		Seed: *seed, Decoupled: decoupled, Partial: pp,
+		Seed: *seed, Decoupled: decoupled, Partial: pp, EPBS: epbs,
 	})
 	runner.Attach() // sets nd.OnReceive before JoinTopics
 

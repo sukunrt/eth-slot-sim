@@ -39,6 +39,12 @@ type params struct {
 	Dhi             int     `json:"dhi"`
 	Seed            uint64  `json:"seed"`
 
+	// ePBS two-phase block send (BlockSize sizes the payload, the big message).
+	EPBS               bool `json:"epbs"`
+	ConsensusBlockSize int  `json:"consensus_block_size"`
+	PayloadOffsetMs    int  `json:"payload_offset_ms"`
+	PayloadJitterMs    int  `json:"payload_jitter_ms"`
+
 	// Attestation phase (empty Schedule ⇒ block-only). Attest false with a Schedule set
 	// keeps the proposer schedule but emits no attestations (block-only on the same network).
 	Schedule string `json:"schedule"`
@@ -117,6 +123,13 @@ func TestRun(t *testing.T) {
 			VerifyDelay:  func() time.Duration { return time.Duration(p.VerifyMs) * time.Millisecond },
 			D:            p.D, Dlo: p.Dlo, Dhi: p.Dhi,
 			Seed: p.Seed,
+		}
+		if p.EPBS {
+			cfg.EPBS = &driver.EPBSParams{
+				ConsensusBlockSize: p.ConsensusBlockSize,
+				PayloadOffset:      time.Duration(p.PayloadOffsetMs) * time.Millisecond,
+				PayloadJitter:      time.Duration(p.PayloadJitterMs) * time.Millisecond,
+			}
 		}
 		if p.Schedule != "" {
 			a, err := schedule.Load(p.Schedule)

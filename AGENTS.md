@@ -83,7 +83,9 @@ go generate ./pb     # after editing .proto files
 - Comment style is deliberately dense: invariants and "why", at the declaration site.
 - Feature phases are opt-in and layered: block-only → +columns → +attestations/aggregates →
   +sync → decoupled (which replaces attestation/sync emit). Mutual exclusion is enforced in
-  `driver.New` and `cmd/slot-sim-node/main.go`.
+  `driver.New` and `cmd/slot-sim-node/main.go`. ePBS is a send-path mode, not a phase: ON by
+  default, it splits the block into consensus block + execution payload (columns ride the
+  payload; votes gate on the consensus block alone) and composes with every phase.
 
 The design/results markdowns (`*-spec.md`, `improvements.md`, `run.md`) were removed once
 their content was implemented or superseded; see the repo history.

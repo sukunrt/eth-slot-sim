@@ -97,6 +97,11 @@ def test_simnet_params_match_scenario():
         "jitter_ms": 2000,
         "d": 8, "dlo": 6, "dhi": 12,
         "seed": 1,
+        # ePBS is on by default: block_size sizes the payload, the big message.
+        "epbs": True,
+        "consensus_block_size": 2048,
+        "payload_offset_ms": 500,
+        "payload_jitter_ms": 500,
     }
 
 
