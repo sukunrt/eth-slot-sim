@@ -25,12 +25,13 @@ payload-lag metric is the per-(node, slot) gap between their first arrivals. PTC
 publisher) carry the payload-present bool — the headline is the fraction that saw the
 payload (and their custody columns) by the PTC deadline.
 
-Usage: python analysis/check_arrivals.py <run-dir> [--parquet [DIR]]
+Usage: python analysis/check_arrivals.py <run-dir> [--raw | --parquet DIR]
 
---parquet switches to the DuckDB fast path over the parquet event tables written by
-analysis/to_parquet.py (DIR defaults to <run-dir>/parquet) — same report, minutes faster
-on big runs. This module itself stays stdlib-only: it is the REFERENCE implementation the
-parquet path (analysis/duck_report.py) is equivalence-tested against.
+The default is the DuckDB fast path over the parquet event tables written by
+analysis/to_parquet.py (<run-dir>/parquet, converted from the slog logs on first use;
+--parquet DIR points at tables elsewhere) — minutes faster on big runs. --raw re-parses
+the raw slog text instead. This module itself stays stdlib-only: it is the REFERENCE
+implementation the parquet path (analysis/duck_report.py) is equivalence-tested against.
 
 Output: the human summary on stdout AND the full machine-readable report in
 <run-dir>/analysis.json — per-kind and per-slot CDFs (fine percentile grid), both loss
@@ -1416,25 +1417,37 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Verify message receipt for a Shadow run.")
     parser.add_argument("run_dir", type=Path)
     parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="re-parse the raw slog text (the stdlib reference path) instead of the "
+        "parquet event tables",
+    )
+    parser.add_argument(
         "--parquet",
-        nargs="?",
-        const="",
         default=None,
         metavar="DIR",
-        help="analyze the parquet event tables (DuckDB fast path; see analysis/to_parquet.py) "
-        "instead of re-parsing the raw slog text; DIR defaults to <run-dir>/parquet",
+        help="parquet event tables to analyze (default <run-dir>/parquet, converted from "
+        "the slog logs on first use; see analysis/to_parquet.py)",
     )
     args = parser.parse_args(argv[1:])
-    if args.parquet is not None:
-        try:
-            from analysis import duck_report
-        except ImportError:  # invoked as a script: the repo root is not on sys.path
-            sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-            from analysis import duck_report
-        parquet_dir = Path(args.parquet) if args.parquet else args.run_dir / "parquet"
-        report = duck_report.build_report(args.run_dir, parquet_dir)
-    else:
+    if args.raw:
+        if args.parquet is not None:
+            parser.error("--raw and --parquet are mutually exclusive")
         report = build_report(args.run_dir)
+        return 0 if report["result"] == "OK" else 1
+    try:
+        from analysis import duck_report, to_parquet
+    except ImportError:  # invoked as a script: the repo root is not on sys.path
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from analysis import duck_report, to_parquet
+    parquet_dir = Path(args.parquet) if args.parquet else args.run_dir / "parquet"
+    tables = [parquet_dir / "arrivals.parquet", parquet_dir / "publishes.parquet",
+              parquet_dir / "meta.json"]
+    if not all(p.exists() for p in tables):
+        if args.parquet:  # an explicit DIR is never converted into — fail loudly
+            parser.error(f"no parquet event tables in {parquet_dir}")
+        to_parquet.convert(args.run_dir)  # first use: build them from the slog logs
+    report = duck_report.build_report(args.run_dir, parquet_dir)
     return 0 if report["result"] == "OK" else 1
 
 

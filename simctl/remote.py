@@ -199,7 +199,7 @@ class Runner:
 
         Creates {output_dir}.tar.gz (everything, the durable raw artifact) and
         {output_dir}-parquet.tar.gz (the same run dirs minus shadow.data and the built
-        binary — small enough to pull for analysis; check_arrivals --parquet runs on the
+        binary — small enough to pull for analysis; check_arrivals runs on the
         extracted dir directly) in the parent directory, then removes the output
         directory. The removal only happens after BOTH tarballs succeed, so a failure
         never loses data.
