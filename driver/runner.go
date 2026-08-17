@@ -32,6 +32,19 @@ type DecoupledParams struct {
 	RoundAggFraction int           // round_aggregation_fraction (% of the AC slot; segregated mode)
 }
 
+// EPBSParams turns on the ePBS two-phase block send (nil ⇒ the legacy single Block). The
+// proposer plays the builder: it publishes a ConsensusBlockSize-byte consensus block at the
+// block instant, then the BlockSize-byte execution payload (and the column burst, a builder
+// duty under Gloas) at + PayloadOffset + rand(0, PayloadJitter). Attestations and AC votes
+// then gate on the consensus block alone — the column gate turns off, because columns ride
+// the payload and can no longer make the attestation deadline (Gloas moves the DA check to
+// the payload-timeliness committee, a planned extension). Composes with every phase.
+type EPBSParams struct {
+	ConsensusBlockSize int           // consensus-block payload bytes (the bid-only block)
+	PayloadOffset      time.Duration // payload publish delay after the block instant
+	PayloadJitter      time.Duration // payload lands in [offset, offset+jitter) after it
+}
+
 // NodeRunner is one node's stateful per-slot orchestrator. It owns the slot loop AND
 // is the node's OnReceive sink, so it can couple block arrival to attestation emit
 // while keeping Node pure. The multi-node Driver builds N; the Shadow binary builds 1.
@@ -46,6 +59,7 @@ type NodeRunner struct {
 	attest      bool          // emit attestations (with a view set but false ⇒ columns-only)
 	sync        bool          // emit sync-committee messages + contributions (members only)
 	decoupled   bool          // emit AC votes + finality votes/aggregates (replaces attest/sync)
+	epbs        *EPBSParams   // ePBS two-phase block send (nil ⇒ the legacy single Block)
 	tracer      metrics.Tracer
 	slotDur     time.Duration
 	blockDue    time.Duration // attestation / AC-vote deadline, offset into the slot
@@ -134,6 +148,12 @@ type slotState struct {
 	blockSeenAt     time.Time
 	blockSeenOrigin int
 
+	// ePBS payload arrival (recorded once, post-verify). Nothing couples to it yet — the
+	// arrival data is the run's output; the payload-timeliness committee is a planned
+	// extension.
+	payloadSeen   bool
+	payloadSeenAt time.Time
+
 	// The slot's single attestation/AC vote: claimed atomically (under r.mu) by whichever path
 	// fires first — the early block vote on readiness, or the deadline's prior-head fallback.
 	// alreadyVoted is the claim guard; votedForSlotBlock records whether it was for the slot's
@@ -200,6 +220,11 @@ type RunnerConfig struct {
 	// phase, so it needs Attest or Decoupled on, and the node's Partial options set.
 	Decoupled *DecoupledParams
 	Partial   *PartialParams
+
+	// EPBS (nil ⇒ legacy single Block) switches the proposer to the two-phase ePBS send:
+	// consensus block at the block instant, payload (+ columns) 0.5-1s later, votes gated on
+	// the consensus block alone. Orthogonal to every phase — no mutual exclusions.
+	EPBS *EPBSParams
 }
 
 // NewRunner builds a runner for one node: nd identifies it, view is its slice of the plan
@@ -230,6 +255,12 @@ func NewRunner(nd *node.Node, view schedule.View, basePeers []int,
 		seed:        cfg.Seed,
 		stablePeers: base,
 		slots:       make(map[int]*slotState),
+		epbs:        cfg.EPBS,
+	}
+	// The consensus block is the vote trigger under ePBS; a zero size would publish an
+	// empty-payload message and silently distort the timing it exists to measure.
+	if ep := cfg.EPBS; ep != nil && ep.ConsensusBlockSize <= 0 {
+		panic("driver: epbs on but ConsensusBlockSize is unset")
 	}
 	if dc := cfg.Decoupled; dc != nil {
 		r.decoupled = true
@@ -415,9 +446,12 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 	// The DA gate: this node's custody columns (from the column phase; empty ⇒ gate
 	// trivially complete). Only the vote paths wait on it — the attestation and the AC
 	// vote emit block only once all custody is in (tryEarlyEmit); sync votes head
-	// un-gated by design, isolating the DA gate's effect.
+	// un-gated by design, isolating the DA gate's effect. Under ePBS the gate starts
+	// complete: columns ride the payload reveal (a builder duty) and can no longer make
+	// the vote deadline — votes gate on the consensus block alone, and the DA check moves
+	// to the payload-timeliness committee (a planned extension).
 	ss.custody = r.view.CustodyColumns
-	ss.columnsComplete = len(ss.custody) == 0
+	ss.columnsComplete = len(ss.custody) == 0 || r.epbs != nil
 	ss.haveColumn = make(map[int]bool, len(ss.custody))
 
 	if r.sync {
@@ -441,8 +475,13 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 	// The deadline dispatches per phase inside onBlockDeadline; with no vote phase on it no-ops.
 	ss.timer = time.AfterFunc(time.Until(ss.deadline), func() { r.onBlockDeadline(slot, ss) })
 	if r.proposes(slot) {
-		msg := validator.MakeBlock(slot, r.num, r.blockSize)
-		go r.publishBlock(slotStart.Add(r.blockPublishAt(slot)), msg)
+		if r.epbs != nil {
+			go r.publishConsensusBlock(slotStart.Add(r.blockPublishAt(slot)), slot)
+			go r.publishExecutionPayload(slotStart.Add(r.payloadPublishAt(slot)), slot)
+		} else {
+			msg := validator.MakeBlock(slot, r.num, r.blockSize)
+			go r.publishBlock(slotStart.Add(r.blockPublishAt(slot)), msg)
+		}
 	}
 	// Slot-end cleanup runs off a timer, not the Run loop (which has moved on).
 	time.AfterFunc(time.Until(slotStart.Add(r.slotDur)), func() { r.endSlot(slot, ss) })
@@ -462,9 +501,10 @@ func (r *NodeRunner) proposes(slot int) bool {
 // identifiers injectively. Every draw is a pure function of (run seed, purpose, identity) —
 // independent of goroutine interleaving and identical across both backends.
 const (
-	jitterStream       = 1 << 60 // block publish jitter, |num<<32|slot
-	dialStream         = 2 << 60 // attestation fan-out dial order, |slot<<32|subnet
-	finalityDialStream = 3 << 60 // finality pre-join dial order, |round<<32|subnet
+	jitterStream        = 1 << 60 // block publish jitter, |num<<32|slot
+	dialStream          = 2 << 60 // attestation fan-out dial order, |slot<<32|subnet
+	finalityDialStream  = 3 << 60 // finality pre-join dial order, |round<<32|subnet
+	payloadJitterStream = 4 << 60 // ePBS payload publish jitter, |num<<32|slot
 )
 
 // blockPublishAt draws the block's publish instant, offset + rand(0, jitter) into the slot.
@@ -473,6 +513,17 @@ func (r *NodeRunner) blockPublishAt(slot int) time.Duration {
 	if r.jitter > 0 {
 		rng := rand.New(rand.NewPCG(r.seed, jitterStream|uint64(r.num)<<32|uint64(slot)))
 		at += time.Duration(rng.Int64N(int64(r.jitter)))
+	}
+	return at
+}
+
+// payloadPublishAt draws the ePBS payload's publish instant: the consensus block's instant
+// plus PayloadOffset + rand(0, PayloadJitter) — the builder's reveal delay after its block.
+func (r *NodeRunner) payloadPublishAt(slot int) time.Duration {
+	at := r.blockPublishAt(slot) + r.epbs.PayloadOffset
+	if r.epbs.PayloadJitter > 0 {
+		rng := rand.New(rand.NewPCG(r.seed, payloadJitterStream|uint64(r.num)<<32|uint64(slot)))
+		at += time.Duration(rng.Int64N(int64(r.epbs.PayloadJitter)))
 	}
 	return at
 }
@@ -991,6 +1042,42 @@ func (r *NodeRunner) publishBlock(when time.Time, msg validator.Message) {
 	r.onBlockProcessed(msg.Slot, r.num, now)
 }
 
+// publishConsensusBlock is publishBlock's ePBS first phase: the small consensus block at the
+// block instant. The proposer's own vote path fires here (block_processed = now, no loopback),
+// exactly as for the legacy block — under ePBS the vote gates on this message alone.
+func (r *NodeRunner) publishConsensusBlock(when time.Time, slot int) {
+	time.Sleep(time.Until(when))
+	now := time.Now()
+	msg := validator.MakeConsensusBlock(slot, r.num, r.epbs.ConsensusBlockSize)
+	r.tracer.OnPublish(metrics.ConsensusBlockID(slot, r.num), false, now)
+	if err := r.nd.Publish(r.runCtx, msg.Topic, msg.Payload); err != nil {
+		slog.Error("publish consensus block failed", "node", r.num, "slot", slot, "err", err)
+	}
+	r.onBlockProcessed(slot, r.num, now)
+}
+
+// publishExecutionPayload is publishBlock's ePBS second phase, 0.5-1s after the consensus
+// block: the payload reveal plus the column burst (a builder duty under Gloas), back-to-back
+// at the payload's instant. No markColumnsComplete — the gate starts complete under ePBS
+// (see setupSlot); the proposer records only its own payload-seen (it never self-receives).
+func (r *NodeRunner) publishExecutionPayload(when time.Time, slot int) {
+	time.Sleep(time.Until(when))
+	now := time.Now()
+	msg := validator.MakeExecutionPayload(slot, r.num, r.blockSize)
+	r.tracer.OnPublish(metrics.ExecutionPayloadID(slot, r.num), false, now)
+	if err := r.nd.Publish(r.runCtx, msg.Topic, msg.Payload); err != nil {
+		slog.Error("publish execution payload failed", "node", r.num, "slot", slot, "err", err)
+	}
+	for col := range r.view.NumColumns {
+		cmsg := validator.MakeColumn(slot, col, r.num)
+		r.tracer.OnPublish(metrics.ColumnID(slot, col, r.num), false, now)
+		if err := r.nd.Publish(r.runCtx, cmsg.Topic, cmsg.Payload); err != nil {
+			slog.Error("publish column failed", "node", r.num, "slot", slot, "column", col, "err", err)
+		}
+	}
+	r.onPayloadProcessed(slot, now)
+}
+
 // onReceive routes a decoded receipt: skip the node's own loopback (Received.Origin is the
 // publisher for every kind, even where the identity drops it), record the arrival, and feed
 // blocks and columns into the coupling.
@@ -1000,10 +1087,12 @@ func (r *NodeRunner) onReceive(rec node.Received) {
 	}
 	r.tracer.OnReceive(r.num, metrics.MsgID{Kind: rec.Kind, Identity: rec.ID}, rec.At)
 	switch rec.Kind {
-	case node.KindBlock:
+	case node.KindBlock, node.KindConsensusBlock:
 		r.onBlockProcessed(rec.ID.Slot, rec.ID.Origin, rec.At)
 	case node.KindColumn:
 		r.onColumnProcessed(rec.ID.Slot, rec.ID.Subnet, rec.At) // the column index rides Subnet
+	case node.KindExecutionPayload:
+		r.onPayloadProcessed(rec.ID.Slot, rec.At)
 	}
 }
 
@@ -1048,6 +1137,16 @@ func (r *NodeRunner) onColumnProcessed(slot, col int, at time.Time) {
 	if complete {
 		r.tryEarlyEmit(slot, ss)
 	}
+}
+
+// onPayloadProcessed records the ePBS payload's arrival once (post-verify, like block-seen).
+// Nothing couples to it yet — see slotState.payloadSeen.
+func (r *NodeRunner) onPayloadProcessed(slot int, at time.Time) {
+	r.mu.Lock()
+	if ss, ok := r.slots[slot]; ok && !ss.payloadSeen {
+		ss.payloadSeen, ss.payloadSeenAt = true, at
+	}
+	r.mu.Unlock()
 }
 
 // markColumnsComplete records custody completion at `at` without a per-column count — used by

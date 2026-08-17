@@ -29,31 +29,38 @@ type scenario struct {
 }
 
 func buildScenario(t *testing.T, a *schedule.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int) *scenario {
-	return buildScenarioWith(t, a, due, suppressBlock, tracer, peersP, true, a.SyncSubscribers != nil, nil, nil)
+	return buildScenarioWith(t, a, due, suppressBlock, tracer, peersP, true, a.SyncSubscribers != nil, nil, nil, nil)
+}
+
+// buildEPBSScenario is buildScenario with the ePBS two-phase block send on: the proposer
+// publishes the consensus block then the payload (+ columns), and votes gate on the
+// consensus block alone.
+func buildEPBSScenario(t *testing.T, a *schedule.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int, ep *driver.EPBSParams) *scenario {
+	return buildScenarioWith(t, a, due, suppressBlock, tracer, peersP, true, false, nil, nil, ep)
 }
 
 // buildDecoupledScenario is buildScenario's decoupled twin: attestation/sync emit off, the
 // decoupled phase on (via dc). The AC vote rides the same block/column trigger, so the column-gate
 // and block-suppression filters (suppressBlock, dropColumnTo) work unchanged.
 func buildDecoupledScenario(t *testing.T, a *schedule.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int, dc *driver.DecoupledParams) *scenario {
-	return buildScenarioWith(t, a, due, suppressBlock, tracer, peersP, false, false, dc, nil)
+	return buildScenarioWith(t, a, due, suppressBlock, tracer, peersP, false, false, dc, nil, nil)
 }
 
 // buildPartialScenario / buildPartialDecoupledScenario switch the attestation-class floods to
 // the partial transport — same assignment, same timing, different wire (the parity seam).
 func buildPartialScenario(t *testing.T, a *schedule.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int) *scenario {
-	return buildScenarioWith(t, a, due, suppressBlock, tracer, peersP, true, false, nil, &driver.PartialParams{})
+	return buildScenarioWith(t, a, due, suppressBlock, tracer, peersP, true, false, nil, &driver.PartialParams{}, nil)
 }
 
 func buildPartialDecoupledScenario(t *testing.T, a *schedule.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int, dc *driver.DecoupledParams) *scenario {
-	return buildScenarioWith(t, a, due, suppressBlock, tracer, peersP, false, false, dc, &driver.PartialParams{})
+	return buildScenarioWith(t, a, due, suppressBlock, tracer, peersP, false, false, dc, &driver.PartialParams{}, nil)
 }
 
 func buildScenarioRunners(t *testing.T, a *schedule.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int, attest, sync bool, dc *driver.DecoupledParams) *scenario {
-	return buildScenarioWith(t, a, due, suppressBlock, tracer, peersP, attest, sync, dc, nil)
+	return buildScenarioWith(t, a, due, suppressBlock, tracer, peersP, attest, sync, dc, nil, nil)
 }
 
-func buildScenarioWith(t *testing.T, a *schedule.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int, attest, sync bool, dc *driver.DecoupledParams, pp *driver.PartialParams) *scenario {
+func buildScenarioWith(t *testing.T, a *schedule.Assignment, due time.Duration, suppressBlock map[int]bool, tracer metrics.Tracer, peersP int, attest, sync bool, dc *driver.DecoupledParams, pp *driver.PartialParams, ep *driver.EPBSParams) *scenario {
 	t.Helper()
 	n := a.Params.N
 	const slotDur = 12 * time.Second
@@ -88,7 +95,8 @@ func buildScenarioWith(t *testing.T, a *schedule.Assignment, due time.Duration, 
 		r := driver.NewRunner(nd, a.Node(i), nw.Peers(i), tracer, driver.RunnerConfig{
 			Attest: attest, Sync: sync,
 			NumNodes: n, BlockSize: 1024, Offset: 200 * time.Millisecond,
-			SlotDuration: slotDur, AttestationDue: due, Seed: 1, Decoupled: dc, Partial: pp,
+			SlotDuration: slotDur, AttestationDue: due, Seed: 1,
+			Decoupled: dc, Partial: pp, EPBS: ep,
 		})
 		r.Attach()
 		if suppressBlock[i] {

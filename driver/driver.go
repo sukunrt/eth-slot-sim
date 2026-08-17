@@ -69,6 +69,10 @@ type Config struct {
 	// Decoupled. See partial-attestation-spec.md.
 	Partial *PartialParams
 
+	// ePBS two-phase block send (optional; nil ⇒ the legacy single Block). Composes with
+	// every phase; see EPBSParams.
+	EPBS *EPBSParams
+
 	// Data-columns phase (optional; active when Schedule.NumColumns > 0). The proposer bursts
 	// one DataColumnSidecar per column subnet at t=0; each node verifies columns through a
 	// width-P semaphore, P sized from its full-custody role.
@@ -110,7 +114,7 @@ func New(nw Fabric, cfg Config, tracer metrics.Tracer) *Driver {
 		NumNodes: n, BlockSize: cfg.BlockSize, Offset: cfg.Offset, Jitter: cfg.Jitter,
 		SlotDuration: cfg.SlotDuration, AttestationDue: cfg.AttestationDue,
 		AggregateDue: cfg.AggregateDue, Prep: cfg.Prep, Seed: cfg.Seed,
-		Decoupled: cfg.Decoupled, Partial: cfg.Partial,
+		Decoupled: cfg.Decoupled, Partial: cfg.Partial, EPBS: cfg.EPBS,
 	}
 	// Decoupled consensus replaces attestations + sync, so force both emit flags off when it's on
 	// (the runner's mutual-exclusion invariant: a slot emits an AC vote OR an attestation, never both).
