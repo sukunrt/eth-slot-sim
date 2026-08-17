@@ -21,3 +21,15 @@ message ExecutionPayload {
   uint32 origin  = 2; // publishing node number (proposer-as-builder)
   bytes  payload = 3; // filler sized so the marshaled ExecutionPayload == target
 }
+
+// PTCVote is one Payload Timeliness Committee member's payload_attestation_message
+// (Gloas): did this validator see the execution payload (and its custody columns) by the
+// PTC deadline. Global topic, one message per PTC validator per slot, no aggregation.
+// There is deliberately no subnet field: the topic is global.
+message PTCVote {
+  uint32 slot            = 1;
+  uint32 val             = 2; // voting validator index (the PTC member)
+  uint32 origin          = 3; // publishing node number (gossip origin, loopback skip)
+  bool   payload_present = 4; // payload + custody columns seen by the deadline
+  bytes  payload         = 5; // filler sized so the marshaled PTCVote == target
+}
