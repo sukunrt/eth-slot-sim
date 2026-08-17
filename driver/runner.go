@@ -38,11 +38,16 @@ type DecoupledParams struct {
 // duty under Gloas) at + PayloadOffset + rand(0, PayloadJitter). Attestations and AC votes
 // then gate on the consensus block alone — the column gate turns off, because columns ride
 // the payload and can no longer make the attestation deadline (Gloas moves the DA check to
-// the payload-timeliness committee, a planned extension). Composes with every phase.
+// the payload-timeliness committee, the PTC vote below). Composes with every phase.
 type EPBSParams struct {
 	ConsensusBlockSize int           // consensus-block payload bytes (the bid-only block)
 	PayloadOffset      time.Duration // payload publish delay after the block instant
 	PayloadJitter      time.Duration // payload lands in [offset, offset+jitter) after it
+	// PTCDue is the payload-attestation deadline, offset into the slot (Gloas
+	// PAYLOAD_ATTESTATION_DUE_BPS = 7500 ⇒ 9s at 12s slots): each hosted PTC member votes
+	// payload_present = payload AND custody columns seen by this instant. The plan decides
+	// who votes (schedule ptc_voters); PTCDue only says when.
+	PTCDue time.Duration
 }
 
 // NodeRunner is one node's stateful per-slot orchestrator. It owns the slot loop AND
@@ -148,9 +153,8 @@ type slotState struct {
 	blockSeenAt     time.Time
 	blockSeenOrigin int
 
-	// ePBS payload arrival (recorded once, post-verify). Nothing couples to it yet — the
-	// arrival data is the run's output; the payload-timeliness committee is a planned
-	// extension.
+	// ePBS payload arrival (recorded once, post-verify). The PTC deadline reads it: a hosted
+	// PTC member votes payload_present only if the payload was in by then.
 	payloadSeen   bool
 	payloadSeenAt time.Time
 
@@ -186,6 +190,12 @@ type slotState struct {
 	syncAggSubnets  []int
 	syncAggTimer    *time.Timer
 	syncAggEmitOnce sync.Once
+
+	// ePBS PTC phase (fixed deadline, like the contribution phase). ptcDuties = the hosted PTC
+	// members this slot; the timer fires at PTCDue and records what the node saw by then.
+	ptcDuties   []schedule.PTCDuty
+	ptcTimer    *time.Timer
+	ptcEmitOnce sync.Once
 }
 
 // RunnerConfig is the run-wide half of a runner's construction — identical for every node in a
@@ -261,6 +271,16 @@ func NewRunner(nd *node.Node, view schedule.View, basePeers []int,
 	// empty-payload message and silently distort the timing it exists to measure.
 	if ep := cfg.EPBS; ep != nil && ep.ConsensusBlockSize <= 0 {
 		panic("driver: epbs on but ConsensusBlockSize is unset")
+	}
+	// The plan decides who PTC-votes; ePBS + PTCDue only say how and when. A plan that draws
+	// PTC voters without them would silently never vote — refuse instead.
+	if slices.ContainsFunc(view.PTCDuties, func(d []schedule.PTCDuty) bool { return len(d) > 0 }) {
+		if cfg.EPBS == nil {
+			panic("driver: the plan draws PTC voters but ePBS is off")
+		}
+		if cfg.EPBS.PTCDue <= 0 {
+			panic("driver: the plan draws PTC voters but PTCDue is unset")
+		}
 	}
 	if dc := cfg.Decoupled; dc != nil {
 		r.decoupled = true
@@ -338,6 +358,13 @@ func (r *NodeRunner) Prepare() {
 			if err := r.nd.Subscribe(validator.SyncMessageTopic(r.view.SyncSubnet)); err != nil {
 				slog.Error("subscribe sync subnet failed", "node", r.num, "subnet", r.view.SyncSubnet, "err", err)
 			}
+		}
+	}
+	if r.epbs != nil {
+		// Every node downloads all PTC votes (a global topic, like aggregates); whether anyone
+		// publishes is the plan's business (ptc_voters in the schedule).
+		if err := r.nd.Subscribe(validator.PTCVoteTopic); err != nil {
+			slog.Error("subscribe ptc vote topic failed", "node", r.num, "err", err)
 		}
 	}
 	if r.decoupled {
@@ -449,10 +476,23 @@ func (r *NodeRunner) setupSlot(slot int, slotStart time.Time) {
 	// un-gated by design, isolating the DA gate's effect. Under ePBS the gate starts
 	// complete: columns ride the payload reveal (a builder duty) and can no longer make
 	// the vote deadline — votes gate on the consensus block alone, and the DA check moves
-	// to the payload-timeliness committee (a planned extension).
+	// to the payload-timeliness committee (the PTC vote below; haveColumn keeps counting
+	// so its deadline can read real custody state).
 	ss.custody = r.view.CustodyColumns
 	ss.columnsComplete = len(ss.custody) == 0 || r.epbs != nil
 	ss.haveColumn = make(map[int]bool, len(ss.custody))
+
+	// ePBS PTC: one timer per slot with hosted PTC members, at the payload-attestation
+	// deadline (a fixed-offset emit like the contribution phase — no coupling; the emit
+	// reads what the node saw by then).
+	if r.epbs != nil && slot < len(r.view.PTCDuties) {
+		ss.ptcDuties = r.view.PTCDuties[slot]
+		if len(ss.ptcDuties) > 0 {
+			ss.ptcTimer = time.AfterFunc(time.Until(slotStart.Add(r.epbs.PTCDue)), func() {
+				r.emitPTCVote(slot, ss)
+			})
+		}
+	}
 
 	if r.sync {
 		// This node's stable sync membership (a member emits one message on its subnet).
@@ -606,6 +646,9 @@ func (r *NodeRunner) endSlot(slot int, ss *slotState) {
 	}
 	if ss.syncAggTimer != nil {
 		ss.syncAggTimer.Stop()
+	}
+	if ss.ptcTimer != nil {
+		ss.ptcTimer.Stop()
 	}
 	r.dropDials(ss) // backstop: drop the fan-out dials if the dialTimer hasn't already
 	r.mu.Lock()
@@ -1059,7 +1102,8 @@ func (r *NodeRunner) publishConsensusBlock(when time.Time, slot int) {
 // publishExecutionPayload is publishBlock's ePBS second phase, 0.5-1s after the consensus
 // block: the payload reveal plus the column burst (a builder duty under Gloas), back-to-back
 // at the payload's instant. No markColumnsComplete — the gate starts complete under ePBS
-// (see setupSlot); the proposer records only its own payload-seen (it never self-receives).
+// (see setupSlot). The proposer records its own payload-seen and custody (it never
+// self-receives, but it holds everything it just published), so its PTC members vote present.
 func (r *NodeRunner) publishExecutionPayload(when time.Time, slot int) {
 	time.Sleep(time.Until(when))
 	now := time.Now()
@@ -1076,6 +1120,7 @@ func (r *NodeRunner) publishExecutionPayload(when time.Time, slot int) {
 		}
 	}
 	r.onPayloadProcessed(slot, now)
+	r.markCustodyHeld(slot)
 }
 
 // onReceive routes a decoded receipt: skip the node's own loopback (Received.Origin is the
@@ -1116,23 +1161,26 @@ func (r *NodeRunner) onBlockProcessed(slot, origin int, at time.Time) {
 }
 
 // onColumnProcessed records a custody column's arrival (post-verify, so consistent with
-// block-seen). When it completes the node's custody set it attempts the early vote — a
-// late-completing column can unblock a block vote that was waiting on custody. A no-op once
-// custody is already complete (covers the columns-off and proposer cases).
+// block-seen). haveColumn counts even once the vote gate is satisfied — under ePBS the gate
+// starts complete but the PTC deadline reads real custody state. When the count completes an
+// unsatisfied gate it attempts the early vote — a late-completing column can unblock a block
+// vote that was waiting on custody.
 func (r *NodeRunner) onColumnProcessed(slot, col int, at time.Time) {
 	r.mu.Lock()
 	ss, ok := r.slots[slot]
-	if !ok || ss.columnsComplete {
+	if !ok || ss.haveColumn[col] {
 		r.mu.Unlock()
 		return
 	}
-	if !ss.haveColumn[col] {
-		ss.haveColumn[col] = true
-		if len(ss.haveColumn) == len(ss.custody) {
-			ss.columnsComplete, ss.columnsCompleteAt = true, at
-		}
+	ss.haveColumn[col] = true
+	if ss.columnsComplete { // gate already satisfied (columns off, proposer, or ePBS)
+		r.mu.Unlock()
+		return
 	}
-	complete := ss.columnsComplete
+	complete := len(ss.haveColumn) == len(ss.custody)
+	if complete {
+		ss.columnsComplete, ss.columnsCompleteAt = true, at
+	}
 	r.mu.Unlock()
 	if complete {
 		r.tryEarlyEmit(slot, ss)
@@ -1155,6 +1203,18 @@ func (r *NodeRunner) markColumnsComplete(slot int, at time.Time) {
 	r.mu.Lock()
 	if ss, ok := r.slots[slot]; ok && !ss.columnsComplete {
 		ss.columnsComplete, ss.columnsCompleteAt = true, at
+	}
+	r.mu.Unlock()
+}
+
+// markCustodyHeld fills the ePBS proposer's per-column count: it holds every custody column
+// it just published (it never self-receives), so its PTC deadline reads custody complete.
+func (r *NodeRunner) markCustodyHeld(slot int) {
+	r.mu.Lock()
+	if ss, ok := r.slots[slot]; ok {
+		for _, c := range ss.custody {
+			ss.haveColumn[c] = true
+		}
 	}
 	r.mu.Unlock()
 }
@@ -1348,6 +1408,30 @@ func (r *NodeRunner) emitACVote(slot int, ss *slotState) {
 			slog.Error("publish AC vote failed", "node", r.num, "slot", slot, "val", d.Val, "err", err)
 		}
 	}
+}
+
+// emitPTCVote publishes one PTC vote per hosted member at the payload-attestation deadline
+// (ePBS): payload_present = the payload AND all custody columns arrived by now — the DA check
+// that ePBS removed from the attestation, relocated here. No consensus block seen ⇒ no votes
+// at all (spec: nothing to attest to). At most one burst per slot.
+func (r *NodeRunner) emitPTCVote(slot int, ss *slotState) {
+	ss.ptcEmitOnce.Do(func() {
+		r.mu.Lock()
+		blockSeen := ss.blockSeen
+		present := ss.payloadSeen && len(ss.haveColumn) == len(ss.custody)
+		r.mu.Unlock()
+		if !blockSeen {
+			return
+		}
+		at := time.Now()
+		for _, d := range ss.ptcDuties {
+			msg := validator.MakePTCVote(slot, d.Val, r.num, present)
+			r.tracer.OnPublish(metrics.PTCVoteID(slot, d.Val, r.num), present, at)
+			if err := r.nd.Publish(r.runCtx, validator.PTCVoteTopic, msg.Payload); err != nil {
+				slog.Error("publish ptc vote failed", "node", r.num, "slot", slot, "val", d.Val, "err", err)
+			}
+		}
+	})
 }
 
 // emitSyncMessage publishes this member's one sync-committee message on its subnet. The claim

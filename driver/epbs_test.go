@@ -16,6 +16,7 @@ func epbsParams() *driver.EPBSParams {
 		ConsensusBlockSize: 2048,
 		PayloadOffset:      500 * time.Millisecond,
 		PayloadJitter:      500 * time.Millisecond,
+		PTCDue:             9 * time.Second, // 75% of the 12s scenario slot
 	}
 }
 
