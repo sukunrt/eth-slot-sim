@@ -39,6 +39,9 @@ type Params struct {
 	AcSlotsPerFinalitySlot int `json:"ac_slots_per_finality_slot,omitempty"`
 	FsSubnets              int `json:"fs_subnets,omitempty"`
 	FsAggregators          int `json:"fs_aggregators,omitempty"`
+	// PTCSize is the per-slot VRF-selected Payload Timeliness Committee size (ePBS; 0 ⇒ no
+	// PTC votes drawn).
+	PTCSize int `json:"ptc_size,omitempty"`
 }
 
 // AttesterRef is one committee seat: which node publishes, which validator, on which
@@ -65,6 +68,9 @@ type SlotPlan struct {
 	// (no committees, no subnets; one global topic), so a node hosting m of them emits m votes.
 	// Empty/nil when the decoupled-consensus phase is off.
 	ACVoters []AttesterRef `json:"ac_voters,omitempty"`
+	// PTCVoters = the VRF-selected Payload Timeliness Committee this slot — a flat set like
+	// ACVoters (no committees, no subnets; one global topic). Empty/nil when PTC is off.
+	PTCVoters []AttesterRef `json:"ptc_voters,omitempty"`
 	// FinalityAggregators[i] = the aggregator refs for finality subnet i this finality slot —
 	// fs_aggregators VALIDATORS sampled from the entire set (unrelated to subnet membership or
 	// hosting); the host node carries the duty. Present only on a finality-boundary slot
@@ -198,6 +204,12 @@ type ACVoteDuty struct {
 	Val int
 }
 
+// PTCDuty is one PTC vote a node owes: which validator. Like ACVoteDuty — one global topic,
+// content decided at the deadline.
+type PTCDuty struct {
+	Val int
+}
+
 // View is one node's slice of the plan, materialized once by Assignment.Node: the node's own
 // duties per slot plus the shared membership tables it needs (dial targets, aggregate sizing).
 // Plain data — a test can build one as a literal. It is the only handle a NodeRunner holds on
@@ -211,6 +223,7 @@ type View struct {
 	Proposes             []bool         // this node publishes slot s's block (the Python draw)
 	AttestDuties         [][]AttestDuty // one per hosted validator seated in slot s's committees
 	ACVoteDuties         [][]ACVoteDuty // one per hosted validator in slot s's VRF draw
+	PTCDuties            [][]PTCDuty    // one per hosted validator in slot s's PTC draw (ePBS)
 	AggregateSubnets     [][]int        // subnets this node aggregates in slot s (one aggregate each)
 	SyncAggregateSubnets [][]int        // sync subnets this node aggregates in slot s (one contribution each)
 
@@ -293,6 +306,7 @@ func (a *Assignment) Node(node int) View {
 	v.Proposes = make([]bool, len(a.Slots))
 	v.AttestDuties = make([][]AttestDuty, len(a.Slots))
 	v.ACVoteDuties = make([][]ACVoteDuty, len(a.Slots))
+	v.PTCDuties = make([][]PTCDuty, len(a.Slots))
 	v.AggregateSubnets = make([][]int, len(a.Slots))
 	v.SyncAggregateSubnets = make([][]int, len(a.Slots))
 	for s, sp := range a.Slots {
@@ -308,6 +322,11 @@ func (a *Assignment) Node(node int) View {
 		for _, r := range sp.ACVoters {
 			if r.Node == node {
 				v.ACVoteDuties[s] = append(v.ACVoteDuties[s], ACVoteDuty{Val: r.Val})
+			}
+		}
+		for _, r := range sp.PTCVoters {
+			if r.Node == node {
+				v.PTCDuties[s] = append(v.PTCDuties[s], PTCDuty{Val: r.Val})
 			}
 		}
 		// Aggregators is per committee (SubnetOf maps committee → subnet); SyncAggregators is

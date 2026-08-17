@@ -61,6 +61,9 @@ class Params:
     ac_slots_per_finality_slot: int = 0
     fs_subnets: int = 0
     fs_aggregators: int = 0
+    # ePBS Payload Timeliness Committee (ptc_size 0 ⇒ off). ptc_size validators per slot vote
+    # payload timeliness on one global topic (a flat VRF draw like ac_voters, clamped to V).
+    ptc_size: int = 0
     # Validator segregation (requires decoupled): k (= ac_slots_per_finality_slot) also becomes
     # the number of round groups — AC slot s is round s % k, only validators with
     # finality_round_of[v] == s % k vote in it, and fc_aggregators are drawn per AC slot instead
@@ -101,6 +104,9 @@ class SlotPlan:
     # ac_voters = the VRF-selected validators voting on the availability chain this slot — a flat set
     # (no committees/subnets; one global topic). None when the decoupled phase is off.
     ac_voters: list[AttesterRef] | None = None
+    # ptc_voters = the VRF-selected Payload Timeliness Committee this slot — a flat set like
+    # ac_voters (one global topic). None when PTC is off.
+    ptc_voters: list[AttesterRef] | None = None
     # finality_aggregators[i] = the aggregator refs for finality subnet i — fs_aggregators
     # VALIDATORS sampled from the entire set (unrelated to subnet membership or hosting); the
     # host node carries the duty. Base: set only on a finality-boundary slot (slot % k == 0),
@@ -183,6 +189,10 @@ class Assignment:
             if self.params.validator_segregation:
                 d["finality_round_of"] = self.finality_round_of
                 d["validators_per_round_subnet"] = self.validators_per_round_subnet
+        # The PTC knob appears only when PTC is on (the per-slot ptc_voters ride each slot
+        # dict via _slot_dict; back-compat: a non-PTC schedule.json is byte-identical).
+        if self.params.ptc_size > 0:
+            d["params"]["ptc_size"] = self.params.ptc_size
         # The Dist seam: present only under tiered/explicit (back-compat: a uniform
         # schedule.json is unchanged; absent ⇒ consumers fall back to v % N).
         if self.validator_counts is not None:
@@ -206,6 +216,8 @@ def _slot_dict(s: SlotPlan) -> dict:
         d["sync_aggregators"] = s.sync_aggregators
     if s.ac_voters is not None:  # only when the decoupled phase is on
         d["ac_voters"] = [_ref_dict(r) for r in s.ac_voters]
+    if s.ptc_voters is not None:  # only when PTC is on
+        d["ptc_voters"] = [_ref_dict(r) for r in s.ptc_voters]
     if s.finality_aggregators is not None:  # boundary slots (base) / every slot (segregated)
         d["finality_aggregators"] = [
             [_ref_dict(r) for r in aggs] for aggs in s.finality_aggregators
@@ -560,8 +572,17 @@ def _slot_plan(
                 ]
                 for subnet in range(p.fs_subnets)
             ]
+    # ePBS PTC: a flat per-slot draw like ac_voters, clamped to V. Stream 14: the next free
+    # after 13 (see _finality_round_of).
+    ptc_voters: list[AttesterRef] | None = None
+    if p.ptc_size > 0:
+        ptc = _rng(p.seed, 14, slot).sample(range(p.v), min(p.ptc_size, p.v))
+        ptc_voters = [
+            AttesterRef(node=node_of(v), val=v, subnet=0, position=pos)  # subnet unused (global)
+            for pos, v in enumerate(ptc)
+        ]
     return SlotPlan(
         slot=slot, committees=committees, subnet_of=subnet_of, aggregators=aggregators,
         proposer=proposer, sync_aggregators=sync_aggregators, ac_voters=ac_voters,
-        finality_aggregators=finality_aggregators,
+        ptc_voters=ptc_voters, finality_aggregators=finality_aggregators,
     )
