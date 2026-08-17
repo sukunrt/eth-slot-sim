@@ -153,8 +153,11 @@ class EPBSConfig(BaseModel):
     builder: it publishes a small consensus block at the block instant and the execution
     payload — sized by the top-level ``block_size`` — plus the column burst 0.5-1 s later
     (``payload_offset_ms`` + U(0, ``payload_jitter_ms``)). Votes (attestation / AC) gate on
-    the consensus block alone; the column gate is off. Composes with every phase. Disable
-    with ``epbs: {enabled: false}`` to get the legacy single Block."""
+    the consensus block alone; the DA check moves to the Payload Timeliness Committee:
+    ``ptc_size`` validators per slot each vote payload_present (payload + custody columns
+    seen) at ``ptc_due_ms``. PTC needs a schedule (an attestation config); ``ptc_size: 0``
+    turns it off. Composes with every phase. Disable with ``epbs: {enabled: false}`` to get
+    the legacy single Block."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -162,6 +165,8 @@ class EPBSConfig(BaseModel):
     consensus_block_size: int = 2048  # bytes: the bid-only Gloas beacon block
     payload_offset_ms: int = 500  # builder reveal delay after the block instant
     payload_jitter_ms: int = 500  # reveal lands in [offset, offset+jitter)
+    ptc_size: int = 512  # PTC_SIZE = 2**9; clamped to V by the schedule draw; 0 ⇒ off
+    ptc_due_ms: int = 9000  # PAYLOAD_ATTESTATION_DUE_BPS = 7500 (75% of a 12 s slot)
 
 
 class RegularTierConfig(BaseModel):

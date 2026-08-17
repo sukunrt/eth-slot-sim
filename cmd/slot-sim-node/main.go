@@ -81,6 +81,7 @@ func main() {
 		consensusBlockSize = flag.Int("consensus-block-size", 2048, "ePBS consensus-block size in bytes")
 		payloadOffset      = flag.Duration("payload-offset", 500*time.Millisecond, "ePBS payload publish delay after the block instant")
 		payloadJitter      = flag.Duration("payload-jitter", 500*time.Millisecond, "ePBS payload publish jitter: offset + rand(0,jitter)")
+		ptcDue             = flag.Duration("ptc-due", 9*time.Second, "PTC vote deadline offset into the slot (who votes rides schedule.json's ptc_voters)")
 
 		schedulePath   = flag.String("schedule", "", "path to schedule.json (empty → block-only)")
 		attestations   = flag.Bool("attestations", true, "emit attestations (false → block-only; committee still sets the proposer schedule)")
@@ -206,7 +207,7 @@ func main() {
 	var epbs *driver.EPBSParams
 	if *epbsOn {
 		epbs = &driver.EPBSParams{ConsensusBlockSize: *consensusBlockSize,
-			PayloadOffset: *payloadOffset, PayloadJitter: *payloadJitter}
+			PayloadOffset: *payloadOffset, PayloadJitter: *payloadJitter, PTCDue: *ptcDue}
 	}
 	peers := parseIntList(*peerNumsStr)
 	runner := driver.NewRunner(nd, view, peers, tracer, driver.RunnerConfig{

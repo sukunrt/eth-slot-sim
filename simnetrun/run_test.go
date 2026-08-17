@@ -44,6 +44,7 @@ type params struct {
 	ConsensusBlockSize int  `json:"consensus_block_size"`
 	PayloadOffsetMs    int  `json:"payload_offset_ms"`
 	PayloadJitterMs    int  `json:"payload_jitter_ms"`
+	PTCDueMs           int  `json:"ptc_due_ms"` // PTC vote deadline (who votes rides schedule.json)
 
 	// Attestation phase (empty Schedule ⇒ block-only). Attest false with a Schedule set
 	// keeps the proposer schedule but emits no attestations (block-only on the same network).
@@ -129,6 +130,7 @@ func TestRun(t *testing.T) {
 				ConsensusBlockSize: p.ConsensusBlockSize,
 				PayloadOffset:      time.Duration(p.PayloadOffsetMs) * time.Millisecond,
 				PayloadJitter:      time.Duration(p.PayloadJitterMs) * time.Millisecond,
+				PTCDue:             time.Duration(p.PTCDueMs) * time.Millisecond,
 			}
 		}
 		if p.Schedule != "" {

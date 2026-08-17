@@ -102,6 +102,7 @@ def test_simnet_params_match_scenario():
         "consensus_block_size": 2048,
         "payload_offset_ms": 500,
         "payload_jitter_ms": 500,
+        "ptc_due_ms": 9000,
     }
 
 

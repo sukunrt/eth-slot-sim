@@ -77,6 +77,9 @@ def _schedule_assignment(config: SimConfig) -> schedule.Assignment | None:
             dist_seed=vd.seed,
             explicit_counts=tuple(vd.counts) if vd.counts is not None else None,
         )
+    epbs_kwargs: dict[str, Any] = {}
+    if config.epbs.enabled and config.epbs.ptc_size > 0:  # the PTC draw rides schedule.json
+        epbs_kwargs = dict(ptc_size=config.epbs.ptc_size)
     dcc_kwargs: dict[str, Any] = {}
     dcc = config.decoupled_consensus
     if dcc is not None and dcc.enabled:  # decoupled replaces committee + sync gen with AC/FC membership
@@ -102,6 +105,7 @@ def _schedule_assignment(config: SimConfig) -> schedule.Assignment | None:
             num_slots=config.num_slots,
             **col_kwargs,
             **sync_kwargs,
+            **epbs_kwargs,
             **dcc_kwargs,
             **dist_kwargs,
         ),
@@ -187,6 +191,7 @@ def _host_args(
             f"-consensus-block-size={e.consensus_block_size}",
             f"-payload-offset={e.payload_offset_ms}ms",
             f"-payload-jitter={e.payload_jitter_ms}ms",
+            f"-ptc-due={e.ptc_due_ms}ms",  # who votes rides schedule.json's ptc_voters
         ]
     else:
         args.append("-epbs=false")
@@ -326,6 +331,7 @@ def _simnet_params(config: SimConfig) -> dict[str, Any]:
             consensus_block_size=config.epbs.consensus_block_size,
             payload_offset_ms=config.epbs.payload_offset_ms,
             payload_jitter_ms=config.epbs.payload_jitter_ms,
+            ptc_due_ms=config.epbs.ptc_due_ms,  # who votes rides schedule.json's ptc_voters
         )
     if config.attestation is not None:
         a = config.attestation
