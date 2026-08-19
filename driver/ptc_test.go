@@ -6,6 +6,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/ethp2p/slot-sim/driver"
 	"github.com/ethp2p/slot-sim/metrics"
 	"github.com/ethp2p/slot-sim/node"
 	"github.com/ethp2p/slot-sim/schedule"
@@ -173,6 +174,46 @@ func TestEPBSPTCNoBlockNoVote(t *testing.T) {
 		}
 		if !voters[2] || !voters[3] {
 			t.Fatalf("PTC votes seen from origins %v, want 2 and 3", voters)
+		}
+	})
+}
+
+// decoupledPTCAssignment is decoupledACAssignment plus a PTC draw: PTC is an ePBS send-path
+// knob, orthogonal to the phase, so AC and PTC membership coexist in one plan.
+func decoupledPTCAssignment(n int, acVoters, ptcVoters []int, numColumns int) *schedule.Assignment {
+	a := decoupledACAssignment(n, acVoters, numColumns)
+	refs := make([]schedule.AttesterRef, len(ptcVoters))
+	for i, nd := range ptcVoters {
+		refs[i] = schedule.AttesterRef{Node: nd, Val: nd}
+	}
+	a.Params.PTCSize = len(ptcVoters)
+	a.Slots[0].PTCVoters = refs
+	return a
+}
+
+// PTC votes ride the decoupled phase unchanged: attestation emit is off and the AC vote
+// replaces it, but the ePBS PTC deadline still fires and its votes still flood. The held-back
+// custody column is the point — under ePBS the AC vote gates on the consensus block alone
+// (TestEPBSDecoupledACVoteGateOff), so the DA check it dropped has to reappear here, in the
+// victim's payload_present bit.
+func TestEPBSDecoupledPTCVote(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a := decoupledPTCAssignment(4, []int{1, 2, 3}, []int{1, 2, 3}, 2)
+		rec := metrics.NewRecorder()
+		s := buildScenarioWith(t, a, 4*time.Second, nil, rec, 3,
+			false, false, &driver.DecoupledParams{K: 1}, nil, epbsParams())
+		dropColumnTo(s, 1, 0)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		s.run(t, ctx, 1)
+
+		assertPTCVoteCoverage(t, a, rec, 0)
+		if got := rec.FractionVotedACVote(0); got != 1.0 {
+			t.Fatalf("FractionVotedACVote = %v, want 1 (ePBS: consensus-block-only gate)", got)
+		}
+		if got, want := rec.FractionVotedPTC(0), 2.0/3.0; got != want {
+			t.Fatalf("FractionVotedPTC = %v, want %v (one member missed a custody column)", got, want)
 		}
 	})
 }
